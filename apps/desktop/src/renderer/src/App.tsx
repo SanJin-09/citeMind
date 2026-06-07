@@ -1,5 +1,9 @@
 import { useCallback, useEffect, useState } from "react";
 import type {
+  BackgroundJobRecord,
+  BackgroundJobStatus,
+  KnowledgeBaseRecord,
+  KnowledgeBaseSource,
   ModelCapabilityStatus,
   ModelValidationStatus,
   SeedCredentialStatus,
@@ -31,44 +35,9 @@ type IconName =
   | "settings"
   | "sparkle";
 
-interface Source {
-  id: number;
-  title: string;
-  meta: string;
-  selected: boolean;
-  tone: "amber" | "blue" | "violet" | "green";
-}
+type SourceTone = "amber" | "blue" | "violet" | "green";
 
-const INITIAL_SOURCES: Source[] = [
-  {
-    id: 1,
-    title: "RAG 产品与架构方案",
-    meta: "Markdown · 722 行",
-    selected: true,
-    tone: "amber",
-  },
-  {
-    id: 2,
-    title: "可信引用设计笔记",
-    meta: "PDF · 18 页",
-    selected: true,
-    tone: "blue",
-  },
-  {
-    id: 3,
-    title: "Seed 模型能力清单",
-    meta: "网页快照 · 今天",
-    selected: true,
-    tone: "violet",
-  },
-  {
-    id: 4,
-    title: "混合检索实验记录",
-    meta: "DOCX · 6 个章节",
-    selected: false,
-    tone: "green",
-  },
-];
+type KnowledgeBaseDialogMode = "create" | "rename" | "delete";
 
 const SUGGESTIONS = [
   "总结当前知识库的核心架构决策",
@@ -103,6 +72,97 @@ const FALLBACK_SEED_MODELS: SeedModelDescriptor[] = [
     contextWindow: null,
     vectorDimension: 2048,
     capabilities: ["embedding", "vision_embedding"],
+  },
+];
+
+const FALLBACK_KNOWLEDGE_BASES: KnowledgeBaseRecord[] = [
+  {
+    id: "demo-kb",
+    name: "产品与架构资料库",
+    description: "浏览器预览用知识库",
+    createdAt: "",
+    updatedAt: "",
+    summary: {
+      sourceCount: 4,
+      sourcesByStatus: { ready: 3, pending: 1 },
+      readyIndexCount: 1,
+      conversationCount: 0,
+      chunkCount: 128,
+    },
+  },
+];
+
+const FALLBACK_SOURCES: KnowledgeBaseSource[] = [
+  {
+    id: "demo-source-1",
+    sourceType: "pdf",
+    displayName: "RAG 产品与架构方案",
+    uri: null,
+    status: "ready",
+    latestVersionStatus: "ready",
+    chunkCount: 42,
+    createdAt: "",
+    updatedAt: "",
+  },
+  {
+    id: "demo-source-2",
+    sourceType: "pdf",
+    displayName: "可信引用设计笔记",
+    uri: null,
+    status: "ready",
+    latestVersionStatus: "ready",
+    chunkCount: 35,
+    createdAt: "",
+    updatedAt: "",
+  },
+  {
+    id: "demo-source-3",
+    sourceType: "web",
+    displayName: "Seed 模型能力清单",
+    uri: null,
+    status: "ready",
+    latestVersionStatus: "ready",
+    chunkCount: 21,
+    createdAt: "",
+    updatedAt: "",
+  },
+  {
+    id: "demo-source-4",
+    sourceType: "docx",
+    displayName: "混合检索实验记录",
+    uri: null,
+    status: "pending",
+    latestVersionStatus: "processing",
+    chunkCount: 0,
+    createdAt: "",
+    updatedAt: "",
+  },
+];
+
+const FALLBACK_JOBS: BackgroundJobRecord[] = [
+  {
+    id: "demo-job-1",
+    jobType: "source.import",
+    targetId: "demo-source-4",
+    status: "running",
+    progress: 0.42,
+    checkpoint: {
+      stages: [
+        { id: "parse", label: "解析", status: "completed", progress: 1 },
+        { id: "ocr", label: "OCR", status: "running", progress: 0.68 },
+        {
+          id: "embedding",
+          label: "Embedding",
+          status: "pending",
+          progress: 0,
+        },
+        { id: "index", label: "索引", status: "pending", progress: 0 },
+      ],
+    },
+    retryCount: 0,
+    errorMessage: null,
+    createdAt: "",
+    updatedAt: "",
   },
 ];
 
@@ -174,11 +234,34 @@ function Icon({
 
 function App(): React.JSX.Element {
   const [worker, setWorker] = useState<WorkerState>({ kind: "checking" });
-  const [sources, setSources] = useState(INITIAL_SOURCES);
+  const [knowledgeBases, setKnowledgeBases] = useState<KnowledgeBaseRecord[]>(
+    FALLBACK_KNOWLEDGE_BASES,
+  );
+  const [activeKnowledgeBaseId, setActiveKnowledgeBaseId] = useState(
+    FALLBACK_KNOWLEDGE_BASES[0]?.id ?? "",
+  );
+  const [sources, setSources] =
+    useState<KnowledgeBaseSource[]>(FALLBACK_SOURCES);
+  const [selectedSourceIds, setSelectedSourceIds] = useState(
+    FALLBACK_SOURCES.map((source) => source.id),
+  );
+  const [jobs, setJobs] = useState<BackgroundJobRecord[]>(FALLBACK_JOBS);
+  const [jobBusyId, setJobBusyId] = useState("");
+  const [jobError, setJobError] = useState("");
   const [query, setQuery] = useState("");
   const [evidenceOpen, setEvidenceOpen] = useState(true);
   const [systemOpen, setSystemOpen] = useState(false);
   const [sentQuestion, setSentQuestion] = useState("");
+  const [knowledgeBaseMenuOpen, setKnowledgeBaseMenuOpen] = useState(false);
+  const [knowledgeBaseDialog, setKnowledgeBaseDialog] =
+    useState<KnowledgeBaseDialogMode | null>(null);
+  const [knowledgeBaseForm, setKnowledgeBaseForm] = useState({
+    name: "",
+    description: "",
+    confirmName: "",
+  });
+  const [knowledgeBaseBusy, setKnowledgeBaseBusy] = useState(false);
+  const [knowledgeBaseError, setKnowledgeBaseError] = useState("");
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [seedStatus, setSeedStatus] = useState<SeedCredentialStatus | null>(
     null,
@@ -234,19 +317,103 @@ function App(): React.JSX.Element {
     }
   }, []);
 
+  const loadSources = useCallback(async (knowledgeBaseId: string) => {
+    if (!knowledgeBaseId) {
+      setSources([]);
+      setSelectedSourceIds([]);
+      return;
+    }
+    const result =
+      await getDesktopApi().knowledgeBases.listSources(knowledgeBaseId);
+    setSources(result.sources);
+    setSelectedSourceIds(result.sources.map((source) => source.id));
+    setKnowledgeBases((items) =>
+      items.map((item) =>
+        item.id === knowledgeBaseId
+          ? { ...item, summary: result.summary }
+          : item,
+      ),
+    );
+  }, []);
+
+  const loadKnowledgeBases = useCallback(
+    async (preferredId?: string) => {
+      try {
+        const result = await getDesktopApi().knowledgeBases.list();
+        setKnowledgeBases(result.knowledgeBases);
+        const next =
+          result.knowledgeBases.find((item) => item.id === preferredId) ??
+          result.knowledgeBases[0];
+        setActiveKnowledgeBaseId(next?.id ?? "");
+        if (next) {
+          await loadSources(next.id);
+        } else {
+          setSources([]);
+          setSelectedSourceIds([]);
+        }
+      } catch (error) {
+        const message =
+          error instanceof Error ? error.message : "知识库状态读取失败";
+        if (!message.includes("Preload IPC")) {
+          setKnowledgeBaseError(message);
+        }
+      }
+    },
+    [loadSources],
+  );
+
+  const loadJobs = useCallback(async () => {
+    try {
+      const result = await getDesktopApi().jobs.list({
+        includeTerminal: false,
+        limit: 20,
+      });
+      setJobs(result.jobs);
+      setJobError("");
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "任务状态读取失败";
+      if (!message.includes("Preload IPC")) {
+        setJobError(message);
+      }
+    }
+  }, []);
+
   useEffect(() => {
     void checkHealth();
     void loadSeedStatus();
-  }, [checkHealth, loadSeedStatus]);
+    void loadKnowledgeBases(activeKnowledgeBaseId);
+    void loadJobs();
+  }, [
+    activeKnowledgeBaseId,
+    checkHealth,
+    loadJobs,
+    loadKnowledgeBases,
+    loadSeedStatus,
+  ]);
 
   const online = worker.kind === "online";
-  const selectedCount = sources.filter((source) => source.selected).length;
 
-  const toggleSource = (id: number): void => {
-    setSources((items) =>
-      items.map((source) =>
-        source.id === id ? { ...source, selected: !source.selected } : source,
-      ),
+  useEffect(() => {
+    if (!online) {
+      return;
+    }
+    const timer = window.setInterval(() => {
+      void loadJobs();
+    }, 1800);
+    return () => window.clearInterval(timer);
+  }, [loadJobs, online]);
+
+  const activeKnowledgeBase =
+    knowledgeBases.find((item) => item.id === activeKnowledgeBaseId) ??
+    knowledgeBases[0];
+  const selectedCount = selectedSourceIds.length;
+  const sourceSummary =
+    activeKnowledgeBase?.summary ?? emptyKnowledgeBaseSummary();
+
+  const toggleSource = (id: string): void => {
+    setSelectedSourceIds((items) =>
+      items.includes(id) ? items.filter((item) => item !== id) : [...items, id],
     );
   };
 
@@ -255,6 +422,118 @@ function App(): React.JSX.Element {
     if (!value) return;
     setSentQuestion(value);
     setQuery("");
+  };
+
+  const switchKnowledgeBase = async (
+    knowledgeBaseId: string,
+  ): Promise<void> => {
+    setActiveKnowledgeBaseId(knowledgeBaseId);
+    setKnowledgeBaseMenuOpen(false);
+    setKnowledgeBaseError("");
+    try {
+      await loadSources(knowledgeBaseId);
+    } catch (error) {
+      setKnowledgeBaseError(
+        error instanceof Error ? error.message : "知识库切换失败",
+      );
+    }
+  };
+
+  const openKnowledgeBaseDialog = (mode: KnowledgeBaseDialogMode): void => {
+    setKnowledgeBaseMenuOpen(false);
+    setKnowledgeBaseError("");
+    setKnowledgeBaseDialog(mode);
+    if (mode === "create") {
+      setKnowledgeBaseForm({
+        name: "新的知识库",
+        description: "",
+        confirmName: "",
+      });
+      return;
+    }
+    setKnowledgeBaseForm({
+      name: activeKnowledgeBase?.name ?? "",
+      description: activeKnowledgeBase?.description ?? "",
+      confirmName: "",
+    });
+  };
+
+  const submitKnowledgeBaseDialog = async (): Promise<void> => {
+    setKnowledgeBaseBusy(true);
+    setKnowledgeBaseError("");
+    try {
+      if (knowledgeBaseDialog === "create") {
+        const created = await getDesktopApi().knowledgeBases.create({
+          name: knowledgeBaseForm.name,
+          description: knowledgeBaseForm.description || null,
+        });
+        setKnowledgeBaseDialog(null);
+        await loadKnowledgeBases(created.id);
+      }
+      if (knowledgeBaseDialog === "rename" && activeKnowledgeBase) {
+        const renamed = await getDesktopApi().knowledgeBases.rename({
+          knowledgeBaseId: activeKnowledgeBase.id,
+          name: knowledgeBaseForm.name,
+          description: knowledgeBaseForm.description || null,
+        });
+        setKnowledgeBaseDialog(null);
+        await loadKnowledgeBases(renamed.id);
+      }
+      if (knowledgeBaseDialog === "delete" && activeKnowledgeBase) {
+        if (knowledgeBaseForm.confirmName !== activeKnowledgeBase.name) {
+          throw new Error("请输入完整知识库名称以确认删除");
+        }
+        const result = await getDesktopApi().knowledgeBases.delete(
+          activeKnowledgeBase.id,
+        );
+        const next = result.knowledgeBases[0];
+        setKnowledgeBaseDialog(null);
+        setKnowledgeBases(result.knowledgeBases);
+        setActiveKnowledgeBaseId(next?.id ?? "");
+        if (next) {
+          await loadSources(next.id);
+        } else {
+          setSources([]);
+          setSelectedSourceIds([]);
+        }
+      }
+    } catch (error) {
+      setKnowledgeBaseError(
+        error instanceof Error ? error.message : "知识库操作失败",
+      );
+    } finally {
+      setKnowledgeBaseBusy(false);
+    }
+  };
+
+  const handleJobAction = async (
+    jobId: string,
+    action: "pause" | "resume" | "cancel" | "retry" | "recover",
+  ): Promise<void> => {
+    setJobBusyId(action === "recover" ? "recover" : jobId);
+    setJobError("");
+    try {
+      if (action === "pause") {
+        await getDesktopApi().jobs.pause(jobId);
+      }
+      if (action === "resume") {
+        await getDesktopApi().jobs.resume(jobId);
+      }
+      if (action === "cancel") {
+        await getDesktopApi().jobs.cancel(jobId);
+      }
+      if (action === "retry") {
+        await getDesktopApi().jobs.retry(jobId);
+      }
+      if (action === "recover") {
+        await getDesktopApi().jobs.recover();
+      }
+      await loadJobs();
+    } catch (error) {
+      setJobError(error instanceof Error ? error.message : "任务操作失败");
+    } finally {
+      setJobBusyId("");
+    }
   };
 
   const saveSeedCredential = async (): Promise<void> => {
@@ -311,9 +590,67 @@ function App(): React.JSX.Element {
           </span>
           <span className="brand-name">citeMind</span>
           <span className="brand-divider" />
-          <button className="notebook-switcher" type="button">
-            产品与架构资料库 <Icon name="chevron" size={15} />
-          </button>
+          <div className="notebook-menu-wrap">
+            <button
+              className="notebook-switcher"
+              type="button"
+              onClick={() => setKnowledgeBaseMenuOpen(!knowledgeBaseMenuOpen)}
+            >
+              {activeKnowledgeBase?.name ?? "未选择知识库"}{" "}
+              <Icon name="chevron" size={15} />
+            </button>
+            {knowledgeBaseMenuOpen && (
+              <div className="notebook-menu">
+                <div className="notebook-menu-heading">
+                  <strong>知识库</strong>
+                  <span>{knowledgeBases.length} 个</span>
+                </div>
+                <div className="notebook-menu-list">
+                  {knowledgeBases.map((item) => (
+                    <button
+                      className={
+                        item.id === activeKnowledgeBaseId ? "active" : ""
+                      }
+                      key={item.id}
+                      type="button"
+                      onClick={() => void switchKnowledgeBase(item.id)}
+                    >
+                      <span>{item.name}</span>
+                      <small>
+                        {item.summary.sourceCount} 来源 ·{" "}
+                        {item.summary.conversationCount} 对话
+                      </small>
+                    </button>
+                  ))}
+                </div>
+                <div className="notebook-menu-actions">
+                  <button
+                    className="text-button"
+                    type="button"
+                    onClick={() => openKnowledgeBaseDialog("create")}
+                  >
+                    新建
+                  </button>
+                  <button
+                    className="text-button"
+                    disabled={!activeKnowledgeBase}
+                    type="button"
+                    onClick={() => openKnowledgeBaseDialog("rename")}
+                  >
+                    重命名
+                  </button>
+                  <button
+                    className="text-button danger-text"
+                    disabled={!activeKnowledgeBase}
+                    type="button"
+                    onClick={() => openKnowledgeBaseDialog("delete")}
+                  >
+                    删除
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
         </div>
         <label className="global-search">
           <Icon name="search" size={17} />
@@ -358,40 +695,63 @@ function App(): React.JSX.Element {
               className="text-button"
               type="button"
               onClick={() =>
-                setSources((items) =>
-                  items.map((source) => ({ ...source, selected: true })),
-                )
+                setSelectedSourceIds(sources.map((source) => source.id))
               }
             >
               全选
             </button>
           </div>
+          {knowledgeBaseError && (
+            <div className="inline-error">{knowledgeBaseError}</div>
+          )}
           <div className="source-list">
-            {sources.map((source) => (
-              <button
-                className={`source-item ${source.selected ? "selected" : ""}`}
-                key={source.id}
-                type="button"
-                onClick={() => toggleSource(source.id)}
-              >
-                <span className={`source-icon ${source.tone}`}>
-                  <Icon name="document" size={17} />
-                </span>
-                <span className="source-copy">
-                  <strong>{source.title}</strong>
-                  <small>{source.meta}</small>
-                </span>
-                <span className="source-check">
-                  {source.selected && <Icon name="check" size={14} />}
-                </span>
-              </button>
-            ))}
+            {sources.length > 0 ? (
+              sources.map((source) => (
+                <button
+                  className={`source-item ${
+                    selectedSourceIds.includes(source.id) ? "selected" : ""
+                  }`}
+                  key={source.id}
+                  type="button"
+                  onClick={() => toggleSource(source.id)}
+                >
+                  <span className={`source-icon ${sourceTone(source)}`}>
+                    <Icon name="document" size={17} />
+                  </span>
+                  <span className="source-copy">
+                    <strong>{source.displayName}</strong>
+                    <small>{sourceMeta(source)}</small>
+                  </span>
+                  <span className="source-check">
+                    {selectedSourceIds.includes(source.id) && (
+                      <Icon name="check" size={14} />
+                    )}
+                  </span>
+                </button>
+              ))
+            ) : (
+              <div className="empty-source-state">
+                <strong>还没有来源</strong>
+                <span>导入功能完成后，文件和网页会按当前知识库隔离显示。</span>
+              </div>
+            )}
           </div>
           <button className="source-footer" type="button">
             <Icon name="book" size={17} />
-            管理全部来源
+            {sourceStatusLine(sourceSummary.sourcesByStatus)}
             <Icon name="chevron" size={15} />
           </button>
+          <JobProgressPanel
+            busyJobId={jobBusyId}
+            error={jobError}
+            jobs={jobs}
+            onCancel={(jobId) => void handleJobAction(jobId, "cancel")}
+            onPause={(jobId) => void handleJobAction(jobId, "pause")}
+            onRecover={() => void handleJobAction("", "recover")}
+            onRefresh={() => void loadJobs()}
+            onResume={(jobId) => void handleJobAction(jobId, "resume")}
+            onRetry={(jobId) => void handleJobAction(jobId, "retry")}
+          />
         </aside>
 
         <section className="panel chat-panel">
@@ -405,21 +765,23 @@ function App(): React.JSX.Element {
               <span className="welcome-icon">
                 <Icon name="sparkle" size={25} />
               </span>
-              <p className="eyebrow">产品与架构资料库</p>
-              <h1>从资料中获得可验证的答案</h1>
+              <p className="eyebrow">{activeKnowledgeBase?.name ?? "知识库"}</p>
+              <h1>从当前知识库获得可验证的答案</h1>
               <p className="welcome-summary">
-                当前知识库聚焦 citeMind
-                的产品需求与技术架构。回答将基于已选择来源生成，并在右侧展示经过校验的引用证据。
+                文档、索引和对话都绑定到当前知识库。切换知识库后，来源列表、引用证据和后续检索上下文会随之隔离。
               </p>
               <div className="overview-metrics">
                 <span>
-                  <strong>{sources.length}</strong> 个来源
+                  <strong>{sourceSummary.sourceCount}</strong> 个来源
                 </span>
                 <span>
                   <strong>{selectedCount}</strong> 个已选择
                 </span>
                 <span>
-                  <strong>可信引用</strong> 已启用
+                  <strong>{sourceSummary.readyIndexCount}</strong> 个可用索引
+                </span>
+                <span>
+                  <strong>{sourceSummary.conversationCount}</strong> 个对话
                 </span>
               </div>
             </div>
@@ -653,7 +1015,267 @@ function App(): React.JSX.Element {
           onValidate={() => void validateSeedCredential()}
         />
       )}
+
+      {knowledgeBaseDialog && (
+        <KnowledgeBaseDialog
+          activeKnowledgeBase={activeKnowledgeBase}
+          busy={knowledgeBaseBusy}
+          error={knowledgeBaseError}
+          form={knowledgeBaseForm}
+          mode={knowledgeBaseDialog}
+          onClose={() => setKnowledgeBaseDialog(null)}
+          onFormChange={setKnowledgeBaseForm}
+          onSubmit={() => void submitKnowledgeBaseDialog()}
+        />
+      )}
     </main>
+  );
+}
+
+function JobProgressPanel({
+  busyJobId,
+  error,
+  jobs,
+  onCancel,
+  onPause,
+  onRecover,
+  onRefresh,
+  onResume,
+  onRetry,
+}: {
+  busyJobId: string;
+  error: string;
+  jobs: BackgroundJobRecord[];
+  onCancel: (jobId: string) => void;
+  onPause: (jobId: string) => void;
+  onRecover: () => void;
+  onRefresh: () => void;
+  onResume: (jobId: string) => void;
+  onRetry: (jobId: string) => void;
+}): React.JSX.Element {
+  return (
+    <section className="job-panel" aria-label="后台任务">
+      <div className="job-panel-heading">
+        <div>
+          <strong>后台任务</strong>
+          <span>{jobs.length} 个未完成</span>
+        </div>
+        <div className="job-heading-actions">
+          <button
+            className="text-button"
+            disabled={busyJobId === "recover"}
+            type="button"
+            onClick={onRecover}
+          >
+            恢复扫描
+          </button>
+          <button className="icon-button" type="button" onClick={onRefresh}>
+            <Icon name="refresh" size={15} />
+          </button>
+        </div>
+      </div>
+      {error && <div className="inline-error">{error}</div>}
+      <div className="job-list">
+        {jobs.length > 0 ? (
+          jobs.map((job) => (
+            <article className={`job-card ${job.status}`} key={job.id}>
+              <div className="job-card-heading">
+                <div>
+                  <strong>{jobTypeLabel(job.jobType)}</strong>
+                  <span>{job.targetId}</span>
+                </div>
+                <span className={`job-status ${job.status}`}>
+                  {jobStatusLabel(job.status)}
+                </span>
+              </div>
+              <div className="job-progress">
+                <span style={{ width: `${Math.round(job.progress * 100)}%` }} />
+              </div>
+              <div className="job-meta">
+                <span>{Math.round(job.progress * 100)}%</span>
+                <span>重试 {job.retryCount} 次</span>
+              </div>
+              <div className="job-stages">
+                {jobStages(job).map((stage) => (
+                  <span className={stage.status} key={stage.id}>
+                    {stage.label}
+                  </span>
+                ))}
+              </div>
+              {job.errorMessage && (
+                <p className="job-error">{job.errorMessage}</p>
+              )}
+              <div className="job-actions">
+                {job.status === "running" && (
+                  <button
+                    className="text-button"
+                    disabled={busyJobId === job.id}
+                    type="button"
+                    onClick={() => onPause(job.id)}
+                  >
+                    暂停
+                  </button>
+                )}
+                {["pending", "paused", "retrying"].includes(job.status) && (
+                  <button
+                    className="text-button"
+                    disabled={busyJobId === job.id}
+                    type="button"
+                    onClick={() => onResume(job.id)}
+                  >
+                    {job.status === "pending" ? "开始" : "继续"}
+                  </button>
+                )}
+                {job.status === "failed" && (
+                  <button
+                    className="text-button"
+                    disabled={busyJobId === job.id}
+                    type="button"
+                    onClick={() => onRetry(job.id)}
+                  >
+                    重试
+                  </button>
+                )}
+                {jobCanCancel(job.status) && (
+                  <button
+                    className="text-button danger-text"
+                    disabled={busyJobId === job.id}
+                    type="button"
+                    onClick={() => onCancel(job.id)}
+                  >
+                    取消
+                  </button>
+                )}
+              </div>
+            </article>
+          ))
+        ) : (
+          <div className="empty-job-state">
+            <strong>暂无后台任务</strong>
+            <span>导入、OCR、Embedding 和索引任务会在这里实时更新。</span>
+          </div>
+        )}
+      </div>
+    </section>
+  );
+}
+
+function KnowledgeBaseDialog({
+  activeKnowledgeBase,
+  busy,
+  error,
+  form,
+  mode,
+  onClose,
+  onFormChange,
+  onSubmit,
+}: {
+  activeKnowledgeBase?: KnowledgeBaseRecord;
+  busy: boolean;
+  error: string;
+  form: { name: string; description: string; confirmName: string };
+  mode: KnowledgeBaseDialogMode;
+  onClose: () => void;
+  onFormChange: (next: {
+    name: string;
+    description: string;
+    confirmName: string;
+  }) => void;
+  onSubmit: () => void;
+}): React.JSX.Element {
+  const deleting = mode === "delete";
+  const title =
+    mode === "create"
+      ? "新建知识库"
+      : mode === "rename"
+        ? "重命名知识库"
+        : "删除知识库";
+  const disabled =
+    busy ||
+    (deleting
+      ? form.confirmName !== activeKnowledgeBase?.name
+      : !form.name.trim());
+
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <section className="kb-dialog" role="dialog" aria-modal="true">
+        <header className="settings-heading">
+          <div>
+            <p className="eyebrow">Knowledge Base</p>
+            <h2>{title}</h2>
+            <span>
+              {deleting
+                ? "删除会级联移除该知识库下的来源、索引、对话和引用。"
+                : "知识库用于隔离来源、索引、对话与后续引用证据。"}
+            </span>
+          </div>
+          <button
+            aria-label="关闭知识库弹窗"
+            className="icon-button"
+            type="button"
+            onClick={onClose}
+          >
+            <Icon name="close" size={17} />
+          </button>
+        </header>
+        <div className="kb-dialog-body">
+          {deleting ? (
+            <label>
+              <span>
+                输入 <strong>{activeKnowledgeBase?.name}</strong> 确认删除
+              </span>
+              <input
+                value={form.confirmName}
+                onChange={(event) =>
+                  onFormChange({ ...form, confirmName: event.target.value })
+                }
+              />
+            </label>
+          ) : (
+            <>
+              <label>
+                <span>知识库名称</span>
+                <input
+                  value={form.name}
+                  onChange={(event) =>
+                    onFormChange({ ...form, name: event.target.value })
+                  }
+                />
+              </label>
+              <label>
+                <span>描述</span>
+                <input
+                  value={form.description}
+                  placeholder="可选"
+                  onChange={(event) =>
+                    onFormChange({ ...form, description: event.target.value })
+                  }
+                />
+              </label>
+            </>
+          )}
+          {error && <div className="settings-error">{error}</div>}
+        </div>
+        <div className="settings-actions">
+          <button
+            className="button ghost"
+            disabled={busy}
+            type="button"
+            onClick={onClose}
+          >
+            取消
+          </button>
+          <button
+            className={`button ${deleting ? "danger" : "primary"}`}
+            disabled={disabled}
+            type="button"
+            onClick={onSubmit}
+          >
+            {busy ? "处理中..." : title}
+          </button>
+        </div>
+      </section>
+    </div>
   );
 }
 
@@ -937,6 +1559,124 @@ function capabilityDetails(
     return `结构化 ${values.structuredOutput}${vision}`;
   }
   return capability.message ?? "已验证";
+}
+
+function emptyKnowledgeBaseSummary(): KnowledgeBaseRecord["summary"] {
+  return {
+    sourceCount: 0,
+    sourcesByStatus: {},
+    readyIndexCount: 0,
+    conversationCount: 0,
+    chunkCount: 0,
+  };
+}
+
+function sourceTone(source: KnowledgeBaseSource): SourceTone {
+  if (source.status === "failed") {
+    return "violet";
+  }
+  const tones: Record<KnowledgeBaseSource["sourceType"], SourceTone> = {
+    pdf: "amber",
+    docx: "blue",
+    image: "green",
+    web: "violet",
+  };
+  return tones[source.sourceType];
+}
+
+function sourceMeta(source: KnowledgeBaseSource): string {
+  const chunks = source.chunkCount > 0 ? ` · ${source.chunkCount} 块` : "";
+  const version =
+    source.latestVersionStatus && source.latestVersionStatus !== source.status
+      ? ` · ${sourceStatusLabel(source.latestVersionStatus)}`
+      : "";
+  return `${sourceTypeLabel(source.sourceType)} · ${sourceStatusLabel(source.status)}${version}${chunks}`;
+}
+
+function sourceTypeLabel(type: KnowledgeBaseSource["sourceType"]): string {
+  const labels: Record<KnowledgeBaseSource["sourceType"], string> = {
+    pdf: "PDF",
+    docx: "DOCX",
+    image: "图片",
+    web: "网页",
+  };
+  return labels[type];
+}
+
+function sourceStatusLabel(status: string): string {
+  const labels: Record<string, string> = {
+    pending: "待处理",
+    processing: "处理中",
+    ready: "可用",
+    failed: "失败",
+    paused: "已暂停",
+    retrying: "重试中",
+    completed: "已完成",
+  };
+  return labels[status] ?? status;
+}
+
+function sourceStatusLine(sourcesByStatus: Record<string, number>): string {
+  const entries = Object.entries(sourcesByStatus);
+  if (entries.length === 0) {
+    return "暂无来源状态";
+  }
+  return entries
+    .map(([status, count]) => `${sourceStatusLabel(status)} ${count}`)
+    .join(" · ");
+}
+
+function jobTypeLabel(type: string): string {
+  const labels: Record<string, string> = {
+    "source.import": "导入与解析",
+    "source.parse": "文档解析",
+    ocr: "OCR",
+    embedding: "Embedding",
+    "index.build": "索引构建",
+    "index.rebuild": "索引重建",
+    "web.refresh": "网页更新",
+  };
+  return labels[type] ?? type;
+}
+
+function jobStatusLabel(status: BackgroundJobStatus): string {
+  const labels: Record<BackgroundJobStatus, string> = {
+    pending: "待执行",
+    running: "运行中",
+    completed: "已完成",
+    paused: "已暂停",
+    cancelled: "已取消",
+    failed: "失败",
+    retrying: "重试中",
+  };
+  return labels[status];
+}
+
+function jobStages(
+  job: BackgroundJobRecord,
+): BackgroundJobRecord["checkpoint"]["stages"] {
+  const stages = Array.isArray(job.checkpoint.stages)
+    ? job.checkpoint.stages
+    : [];
+  const byId = new Map(stages.map((stage) => [stage.id, stage]));
+  const stageTemplates: Array<
+    Pick<BackgroundJobRecord["checkpoint"]["stages"][number], "id" | "label">
+  > = [
+    { id: "parse", label: "解析" },
+    { id: "ocr", label: "OCR" },
+    { id: "embedding", label: "Embedding" },
+    { id: "index", label: "索引" },
+  ];
+  return stageTemplates.map((stage) => ({
+    id: stage.id,
+    label: stage.label,
+    status: byId.get(stage.id)?.status ?? "pending",
+    progress: byId.get(stage.id)?.progress ?? 0,
+  }));
+}
+
+function jobCanCancel(status: BackgroundJobStatus): boolean {
+  return !["completed", "cancelled"].includes(status);
 }
 
 export default App;

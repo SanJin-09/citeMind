@@ -62,3 +62,80 @@ def test_health_reports_initialized_storage(tmp_path: Path) -> None:
         "fts5Enabled": True,
         "vectorDimension": 3,
     }
+
+
+def test_knowledge_base_rpc_creates_and_lists_sources(tmp_path: Path) -> None:
+    storage = StorageRuntime(tmp_path, vector_dimension=3)
+    storage.initialize()
+    server = create_server(storage)
+    output = StringIO()
+    asyncio.run(
+        server.serve(
+            StringIO(
+                '{"jsonrpc":"2.0","id":"1","method":"knowledge_bases.create",'
+                '"params":{"name":"测试知识库"}}\n'
+            ),
+            output,
+        )
+    )
+    created = json.loads(output.getvalue())["result"]
+
+    output = StringIO()
+    asyncio.run(
+        server.serve(
+            StringIO(
+                '{"jsonrpc":"2.0","id":"2","method":"knowledge_bases.sources",'
+                f'"params":{{"knowledgeBaseId":"{created["id"]}"}}}}\n'
+            ),
+            output,
+        )
+    )
+    response = json.loads(output.getvalue())
+
+    assert response["result"]["knowledgeBaseId"] == created["id"]
+    assert response["result"]["sources"] == []
+
+
+def test_background_job_rpc_create_update_and_list(tmp_path: Path) -> None:
+    storage = StorageRuntime(tmp_path, vector_dimension=3)
+    storage.initialize()
+    server = create_server(storage)
+    output = StringIO()
+    asyncio.run(
+        server.serve(
+            StringIO(
+                '{"jsonrpc":"2.0","id":"1","method":"jobs.create",'
+                '"params":{"jobType":"source.import","targetId":"source-1"}}\n'
+            ),
+            output,
+        )
+    )
+    created = json.loads(output.getvalue())["result"]
+
+    output = StringIO()
+    asyncio.run(
+        server.serve(
+            StringIO(
+                '{"jsonrpc":"2.0","id":"2","method":"jobs.update",'
+                f'"params":{{"jobId":"{created["id"]}","status":"running","progress":0.25}}}}\n'
+            ),
+            output,
+        )
+    )
+    updated = json.loads(output.getvalue())["result"]
+
+    output = StringIO()
+    asyncio.run(
+        server.serve(
+            StringIO(
+                '{"jsonrpc":"2.0","id":"3","method":"jobs.list",'
+                '"params":{"includeTerminal":false}}\n'
+            ),
+            output,
+        )
+    )
+    listed = json.loads(output.getvalue())["result"]
+
+    assert updated["status"] == "running"
+    assert updated["progress"] == 0.25
+    assert [job["id"] for job in listed["jobs"]] == [created["id"]]

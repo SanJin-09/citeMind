@@ -3,6 +3,8 @@ import os
 import sys
 from pathlib import Path
 
+from citemind_worker.background_job_service import BackgroundJobService
+from citemind_worker.knowledge_base_service import KnowledgeBaseService
 from citemind_worker.logging_config import configure_logging
 from citemind_worker.model_catalog import (
     DEFAULT_ARK_BASE_URL,
@@ -18,9 +20,17 @@ from citemind_worker.storage import StorageRuntime
 def create_server(
     storage: StorageRuntime | None = None,
     model_service: SeedModelService | None = None,
+    knowledge_base_service: KnowledgeBaseService | None = None,
+    background_job_service: BackgroundJobService | None = None,
 ) -> RpcServer:
     server = RpcServer()
     seed_models = model_service or (SeedModelService(storage) if storage is not None else None)
+    knowledge_bases = knowledge_base_service or (
+        KnowledgeBaseService(storage) if storage is not None else None
+    )
+    background_jobs = background_job_service or (
+        BackgroundJobService(storage) if storage is not None else None
+    )
 
     def health(params: JsonValue) -> JsonValue:
         require_object_params(params)
@@ -79,12 +89,159 @@ def create_server(
         credential_id = _optional_str(values, "credentialId", DEFAULT_CREDENTIAL_ID)
         return service.delete_credential(credential_id)  # type: ignore[return-value]
 
+    def list_knowledge_bases(params: JsonValue) -> JsonValue:
+        require_object_params(params)
+        service = _require_knowledge_base_service(knowledge_bases)
+        return service.list_knowledge_bases()  # type: ignore[return-value]
+
+    def create_knowledge_base(params: JsonValue) -> JsonValue:
+        values = require_object_params(params)
+        service = _require_knowledge_base_service(knowledge_bases)
+        name = _required_str(values, "name")
+        description = _optional_nullable_str(values, "description")
+        try:
+            return service.create(name, description)  # type: ignore[return-value]
+        except ValueError as error:
+            raise RpcError(-32602, str(error)) from error
+
+    def rename_knowledge_base(params: JsonValue) -> JsonValue:
+        values = require_object_params(params)
+        service = _require_knowledge_base_service(knowledge_bases)
+        knowledge_base_id = _required_str(values, "knowledgeBaseId")
+        name = _required_str(values, "name")
+        description = _optional_nullable_str(values, "description")
+        try:
+            return service.rename(knowledge_base_id, name, description)  # type: ignore[return-value]
+        except ValueError as error:
+            raise RpcError(-32602, str(error)) from error
+
+    def delete_knowledge_base(params: JsonValue) -> JsonValue:
+        values = require_object_params(params)
+        service = _require_knowledge_base_service(knowledge_bases)
+        knowledge_base_id = _required_str(values, "knowledgeBaseId")
+        try:
+            return service.delete(knowledge_base_id)  # type: ignore[return-value]
+        except ValueError as error:
+            raise RpcError(-32602, str(error)) from error
+
+    def list_sources(params: JsonValue) -> JsonValue:
+        values = require_object_params(params)
+        service = _require_knowledge_base_service(knowledge_bases)
+        knowledge_base_id = _required_str(values, "knowledgeBaseId")
+        try:
+            return service.sources(knowledge_base_id)  # type: ignore[return-value]
+        except ValueError as error:
+            raise RpcError(-32602, str(error)) from error
+
+    def create_job(params: JsonValue) -> JsonValue:
+        values = require_object_params(params)
+        service = _require_background_job_service(background_jobs)
+        job_type = _required_str(values, "jobType")
+        target_id = _required_str(values, "targetId")
+        checkpoint = _optional_dict(values, "checkpoint")
+        try:
+            return service.create(job_type, target_id, checkpoint=checkpoint)  # type: ignore[return-value]
+        except ValueError as error:
+            raise RpcError(-32602, str(error)) from error
+
+    def list_jobs(params: JsonValue) -> JsonValue:
+        values = require_object_params(params)
+        service = _require_background_job_service(background_jobs)
+        status = _optional_nullable_str(values, "status")
+        target_id = _optional_nullable_str(values, "targetId")
+        include_terminal = _optional_bool(values, "includeTerminal", True)
+        limit = _optional_int(values, "limit", 50)
+        try:
+            return service.list_jobs(
+                status=status,
+                target_id=target_id,
+                include_terminal=include_terminal,
+                limit=limit,
+            )  # type: ignore[return-value]
+        except ValueError as error:
+            raise RpcError(-32602, str(error)) from error
+
+    def list_unfinished_jobs(params: JsonValue) -> JsonValue:
+        require_object_params(params)
+        service = _require_background_job_service(background_jobs)
+        return service.list_unfinished()  # type: ignore[return-value]
+
+    def update_job(params: JsonValue) -> JsonValue:
+        values = require_object_params(params)
+        service = _require_background_job_service(background_jobs)
+        job_id = _required_str(values, "jobId")
+        status = _optional_nullable_str(values, "status")
+        progress = _optional_float(values, "progress")
+        checkpoint = _optional_dict(values, "checkpoint")
+        error_message = _optional_nullable_str(values, "errorMessage")
+        try:
+            return service.update_progress(
+                job_id,
+                status=status,
+                progress=progress,
+                checkpoint=checkpoint,
+                error_message=error_message,
+            )  # type: ignore[return-value]
+        except ValueError as error:
+            raise RpcError(-32602, str(error)) from error
+
+    def pause_job(params: JsonValue) -> JsonValue:
+        service = _require_background_job_service(background_jobs)
+        job_id = _required_str(require_object_params(params), "jobId")
+        try:
+            return service.pause(job_id)  # type: ignore[return-value]
+        except ValueError as error:
+            raise RpcError(-32602, str(error)) from error
+
+    def resume_job(params: JsonValue) -> JsonValue:
+        service = _require_background_job_service(background_jobs)
+        job_id = _required_str(require_object_params(params), "jobId")
+        try:
+            return service.resume(job_id)  # type: ignore[return-value]
+        except ValueError as error:
+            raise RpcError(-32602, str(error)) from error
+
+    def cancel_job(params: JsonValue) -> JsonValue:
+        service = _require_background_job_service(background_jobs)
+        job_id = _required_str(require_object_params(params), "jobId")
+        try:
+            return service.cancel(job_id)  # type: ignore[return-value]
+        except ValueError as error:
+            raise RpcError(-32602, str(error)) from error
+
+    def retry_job(params: JsonValue) -> JsonValue:
+        service = _require_background_job_service(background_jobs)
+        job_id = _required_str(require_object_params(params), "jobId")
+        try:
+            return service.retry(job_id)  # type: ignore[return-value]
+        except ValueError as error:
+            raise RpcError(-32602, str(error)) from error
+
+    def recover_jobs(params: JsonValue) -> JsonValue:
+        require_object_params(params)
+        service = _require_background_job_service(background_jobs)
+        return service.recover_unfinished()  # type: ignore[return-value]
+
     server.register("system.health", health)
     server.register("system.storage_status", storage_status)
     server.register("system.shutdown", shutdown)
     server.register("models.status", models_status)
     server.register("models.validate_defaults", validate_models)
     server.register("models.delete_credential", delete_credential)
+    server.register("knowledge_bases.list", list_knowledge_bases)
+    server.register("knowledge_bases.create", create_knowledge_base)
+    server.register("knowledge_bases.rename", rename_knowledge_base)
+    server.register("knowledge_bases.delete", delete_knowledge_base)
+    server.register("knowledge_bases.sources", list_sources)
+    server.register("jobs.create", create_job)
+    server.register("jobs.list", list_jobs)
+    server.register("jobs.unfinished", list_unfinished_jobs)
+    server.register("jobs.update", update_job)
+    server.register("jobs.pause", pause_job)
+    server.register("jobs.resume", resume_job)
+    server.register("jobs.cancel", cancel_job)
+    server.register("jobs.retry", retry_job)
+    server.register("jobs.recover", recover_jobs)
     return server
 
 
@@ -92,6 +249,7 @@ async def serve() -> None:
     configure_logging()
     storage = StorageRuntime(_resolve_data_root())
     storage.initialize()
+    BackgroundJobService(storage).recover_unfinished()
     server = create_server(storage)
     await server.serve(sys.stdin, sys.stdout)
 
@@ -115,10 +273,35 @@ def _require_model_service(service: SeedModelService | None) -> SeedModelService
     return service
 
 
+def _require_knowledge_base_service(
+    service: KnowledgeBaseService | None,
+) -> KnowledgeBaseService:
+    if service is None:
+        raise RpcError(-32011, "Knowledge base service is not available")
+    return service
+
+
+def _require_background_job_service(
+    service: BackgroundJobService | None,
+) -> BackgroundJobService:
+    if service is None:
+        raise RpcError(-32012, "Background job service is not available")
+    return service
+
+
 def _required_str(values: dict[str, JsonValue], key: str) -> str:
     value = values.get(key)
     if not isinstance(value, str) or not value:
         raise RpcError(-32602, f"{key} must be a non-empty string")
+    return value
+
+
+def _optional_nullable_str(values: dict[str, JsonValue], key: str) -> str | None:
+    value = values.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise RpcError(-32602, f"{key} must be a string")
     return value
 
 
@@ -129,3 +312,39 @@ def _optional_str(values: dict[str, JsonValue], key: str, fallback: str) -> str:
     if not isinstance(value, str) or not value:
         raise RpcError(-32602, f"{key} must be a non-empty string")
     return value
+
+
+def _optional_bool(values: dict[str, JsonValue], key: str, fallback: bool) -> bool:
+    value = values.get(key)
+    if value is None:
+        return fallback
+    if not isinstance(value, bool):
+        raise RpcError(-32602, f"{key} must be a boolean")
+    return value
+
+
+def _optional_int(values: dict[str, JsonValue], key: str, fallback: int) -> int:
+    value = values.get(key)
+    if value is None:
+        return fallback
+    if not isinstance(value, int):
+        raise RpcError(-32602, f"{key} must be an integer")
+    return value
+
+
+def _optional_float(values: dict[str, JsonValue], key: str) -> float | None:
+    value = values.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, int | float):
+        raise RpcError(-32602, f"{key} must be a number")
+    return float(value)
+
+
+def _optional_dict(values: dict[str, JsonValue], key: str) -> dict[str, object] | None:
+    value = values.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise RpcError(-32602, f"{key} must be an object")
+    return value  # type: ignore[return-value]

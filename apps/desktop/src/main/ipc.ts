@@ -1,11 +1,21 @@
 import { ipcMain } from "electron";
 import {
+  type BackgroundJobListResponse,
+  type BackgroundJobRecord,
+  type BackgroundJobStatus,
+  type CreateBackgroundJobRequest,
   IPC_CHANNELS,
+  type KnowledgeBaseListResponse,
+  type KnowledgeBaseRecord,
+  type KnowledgeBaseSourcesResponse,
   type ModelCapabilityStatus,
+  type RenameKnowledgeBaseRequest,
   type SaveSeedCredentialRequest,
+  type SaveKnowledgeBaseRequest,
   SEED_DEFAULTS,
   type SeedCredentialStatus,
   type SeedModelDescriptor,
+  type UpdateBackgroundJobRequest,
 } from "../shared/contracts";
 import type { PythonWorkerManager } from "./python-worker-manager";
 import {
@@ -61,6 +71,98 @@ export function registerIpcHandlers(workerManager: PythonWorkerManager): void {
     );
     return buildSeedStatus(summary, workerStatus);
   });
+  ipcMain.handle(IPC_CHANNELS.listKnowledgeBases, () =>
+    workerManager.call<KnowledgeBaseListResponse>("knowledge_bases.list"),
+  );
+  ipcMain.handle(IPC_CHANNELS.createKnowledgeBase, (_event, payload) => {
+    const request = normalizeSaveKnowledgeBaseRequest(payload);
+    return workerManager.call<KnowledgeBaseRecord>("knowledge_bases.create", {
+      name: request.name,
+      description: request.description,
+    });
+  });
+  ipcMain.handle(IPC_CHANNELS.renameKnowledgeBase, (_event, payload) => {
+    const request = normalizeRenameKnowledgeBaseRequest(payload);
+    return workerManager.call<KnowledgeBaseRecord>("knowledge_bases.rename", {
+      knowledgeBaseId: request.knowledgeBaseId,
+      name: request.name,
+      description: request.description,
+    });
+  });
+  ipcMain.handle(
+    IPC_CHANNELS.deleteKnowledgeBase,
+    (_event, knowledgeBaseId) => {
+      if (typeof knowledgeBaseId !== "string" || !knowledgeBaseId) {
+        throw new Error("知识库 ID 无效");
+      }
+      return workerManager.call<KnowledgeBaseListResponse>(
+        "knowledge_bases.delete",
+        {
+          knowledgeBaseId,
+        },
+      );
+    },
+  );
+  ipcMain.handle(
+    IPC_CHANNELS.listKnowledgeBaseSources,
+    (_event, knowledgeBaseId) => {
+      if (typeof knowledgeBaseId !== "string" || !knowledgeBaseId) {
+        throw new Error("知识库 ID 无效");
+      }
+      return workerManager.call<KnowledgeBaseSourcesResponse>(
+        "knowledge_bases.sources",
+        { knowledgeBaseId },
+      );
+    },
+  );
+  ipcMain.handle(IPC_CHANNELS.listJobs, (_event, payload) => {
+    const options = normalizeListJobsOptions(payload);
+    return workerManager.call<BackgroundJobListResponse>("jobs.list", options);
+  });
+  ipcMain.handle(IPC_CHANNELS.listUnfinishedJobs, () =>
+    workerManager.call<BackgroundJobListResponse>("jobs.unfinished"),
+  );
+  ipcMain.handle(IPC_CHANNELS.createJob, (_event, payload) => {
+    const request = normalizeCreateJobRequest(payload);
+    return workerManager.call<BackgroundJobRecord>("jobs.create", {
+      jobType: request.jobType,
+      targetId: request.targetId,
+      checkpoint: request.checkpoint,
+    });
+  });
+  ipcMain.handle(IPC_CHANNELS.updateJob, (_event, payload) => {
+    const request = normalizeUpdateJobRequest(payload);
+    return workerManager.call<BackgroundJobRecord>("jobs.update", {
+      jobId: request.jobId,
+      status: request.status,
+      progress: request.progress,
+      checkpoint: request.checkpoint,
+      errorMessage: request.errorMessage,
+    });
+  });
+  ipcMain.handle(IPC_CHANNELS.pauseJob, (_event, jobId) =>
+    workerManager.call<BackgroundJobRecord>("jobs.pause", {
+      jobId: normalizeJobId(jobId),
+    }),
+  );
+  ipcMain.handle(IPC_CHANNELS.resumeJob, (_event, jobId) =>
+    workerManager.call<BackgroundJobRecord>("jobs.resume", {
+      jobId: normalizeJobId(jobId),
+    }),
+  );
+  ipcMain.handle(IPC_CHANNELS.cancelJob, (_event, jobId) =>
+    workerManager.call<BackgroundJobRecord>("jobs.cancel", {
+      jobId: normalizeJobId(jobId),
+    }),
+  );
+  ipcMain.handle(IPC_CHANNELS.retryJob, (_event, jobId) =>
+    workerManager.call<BackgroundJobRecord>("jobs.retry", {
+      jobId: normalizeJobId(jobId),
+    }),
+  );
+  ipcMain.handle(IPC_CHANNELS.recoverJobs, () =>
+    workerManager.call<BackgroundJobListResponse>("jobs.recover"),
+  );
 }
 
 async function getWorkerSeedStatus(
@@ -135,6 +237,171 @@ function normalizeSaveRequest(payload: unknown): SaveSeedCredentialRequest {
         ? defaultEmbeddingModel
         : undefined,
   };
+}
+
+function normalizeSaveKnowledgeBaseRequest(
+  payload: unknown,
+): SaveKnowledgeBaseRequest {
+  if (!isRecord(payload)) {
+    throw new Error("知识库参数无效");
+  }
+  const name = payload.name;
+  const description = payload.description;
+  if (typeof name !== "string" || !name.trim()) {
+    throw new Error("知识库名称不能为空");
+  }
+  if (
+    description !== undefined &&
+    description !== null &&
+    typeof description !== "string"
+  ) {
+    throw new Error("知识库描述必须是字符串");
+  }
+  return { name, description };
+}
+
+function normalizeRenameKnowledgeBaseRequest(
+  payload: unknown,
+): RenameKnowledgeBaseRequest {
+  const request = normalizeSaveKnowledgeBaseRequest(payload);
+  if (!isRecord(payload)) {
+    throw new Error("知识库参数无效");
+  }
+  const knowledgeBaseId = payload.knowledgeBaseId;
+  if (typeof knowledgeBaseId !== "string" || !knowledgeBaseId) {
+    throw new Error("知识库 ID 无效");
+  }
+  return { ...request, knowledgeBaseId };
+}
+
+const JOB_STATUSES = new Set<BackgroundJobStatus>([
+  "pending",
+  "running",
+  "completed",
+  "paused",
+  "cancelled",
+  "failed",
+  "retrying",
+]);
+
+function normalizeListJobsOptions(payload: unknown): Record<string, unknown> {
+  if (payload === undefined || payload === null) {
+    return {};
+  }
+  if (!isRecord(payload)) {
+    throw new Error("任务查询参数无效");
+  }
+  const result: Record<string, unknown> = {};
+  if (payload.status !== undefined) {
+    if (!isJobStatus(payload.status)) {
+      throw new Error("任务状态无效");
+    }
+    result.status = payload.status;
+  }
+  if (payload.targetId !== undefined) {
+    if (typeof payload.targetId !== "string" || !payload.targetId) {
+      throw new Error("任务目标 ID 无效");
+    }
+    result.targetId = payload.targetId;
+  }
+  if (payload.includeTerminal !== undefined) {
+    if (typeof payload.includeTerminal !== "boolean") {
+      throw new Error("任务完成状态筛选参数无效");
+    }
+    result.includeTerminal = payload.includeTerminal;
+  }
+  if (payload.limit !== undefined) {
+    if (typeof payload.limit !== "number" || !Number.isInteger(payload.limit)) {
+      throw new Error("任务数量限制无效");
+    }
+    result.limit = payload.limit;
+  }
+  return result;
+}
+
+function normalizeCreateJobRequest(
+  payload: unknown,
+): CreateBackgroundJobRequest {
+  if (!isRecord(payload)) {
+    throw new Error("任务创建参数无效");
+  }
+  const jobType = payload.jobType;
+  const targetId = payload.targetId;
+  if (typeof jobType !== "string" || !jobType.trim()) {
+    throw new Error("任务类型不能为空");
+  }
+  if (typeof targetId !== "string" || !targetId.trim()) {
+    throw new Error("任务目标不能为空");
+  }
+  return {
+    jobType,
+    targetId,
+    checkpoint: normalizeCheckpoint(payload.checkpoint),
+  };
+}
+
+function normalizeUpdateJobRequest(
+  payload: unknown,
+): UpdateBackgroundJobRequest {
+  if (!isRecord(payload)) {
+    throw new Error("任务更新参数无效");
+  }
+  const jobId = normalizeJobId(payload.jobId);
+  const request: UpdateBackgroundJobRequest = { jobId };
+  if (payload.status !== undefined) {
+    if (!isJobStatus(payload.status)) {
+      throw new Error("任务状态无效");
+    }
+    request.status = payload.status;
+  }
+  if (payload.progress !== undefined) {
+    if (
+      typeof payload.progress !== "number" ||
+      payload.progress < 0 ||
+      payload.progress > 1
+    ) {
+      throw new Error("任务进度必须在 0 到 1 之间");
+    }
+    request.progress = payload.progress;
+  }
+  if (payload.checkpoint !== undefined) {
+    request.checkpoint = normalizeCheckpoint(payload.checkpoint);
+  }
+  if (payload.errorMessage !== undefined) {
+    if (
+      payload.errorMessage !== null &&
+      typeof payload.errorMessage !== "string"
+    ) {
+      throw new Error("任务错误信息必须是字符串");
+    }
+    request.errorMessage = payload.errorMessage;
+  }
+  return request;
+}
+
+function normalizeJobId(value: unknown): string {
+  if (typeof value !== "string" || !value.trim()) {
+    throw new Error("任务 ID 无效");
+  }
+  return value;
+}
+
+function normalizeCheckpoint(
+  value: unknown,
+): CreateBackgroundJobRequest["checkpoint"] {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (!isRecord(value)) {
+    throw new Error("任务检查点必须是对象");
+  }
+  return value as CreateBackgroundJobRequest["checkpoint"];
+}
+
+function isJobStatus(value: unknown): value is BackgroundJobStatus {
+  return (
+    typeof value === "string" && JOB_STATUSES.has(value as BackgroundJobStatus)
+  );
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
