@@ -47,6 +47,18 @@ export class PythonWorkerManager {
     return this.start();
   }
 
+  async call<T>(
+    method: string,
+    params: Record<string, unknown> = {},
+    timeoutMs = 10_000,
+  ): Promise<T> {
+    await this.start();
+    if (!this.rpc) {
+      throw new Error("Python Worker is not connected");
+    }
+    return this.rpc.call<T>(method, params, timeoutMs);
+  }
+
   async stop(): Promise<void> {
     if (this.restartTimer) {
       clearTimeout(this.restartTimer);

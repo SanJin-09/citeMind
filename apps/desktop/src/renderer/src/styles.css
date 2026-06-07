@@ -209,6 +209,16 @@ kbd {
   background: transparent;
 }
 
+.button.danger {
+  border-color: #efc8c5;
+  color: #b8403a;
+  background: #fff6f5;
+}
+
+.button.danger:hover {
+  background: #fdecea;
+}
+
 .avatar {
   display: grid;
   width: 34px;
@@ -860,6 +870,219 @@ blockquote {
   margin-top: 10px;
 }
 
+.modal-backdrop {
+  position: fixed;
+  z-index: 20;
+  inset: 0;
+  display: grid;
+  padding: 28px;
+  background: rgb(23 32 27 / 28%);
+  backdrop-filter: blur(8px);
+  place-items: center;
+}
+
+.settings-modal {
+  display: grid;
+  width: min(720px, calc(100vw - 56px));
+  max-height: calc(100vh - 56px);
+  grid-template-rows: auto auto auto auto minmax(0, 1fr);
+  border: 1px solid #dfe5df;
+  border-radius: 18px;
+  background: #fff;
+  box-shadow: 0 24px 80px rgb(19 34 25 / 22%);
+  overflow: hidden;
+}
+
+.settings-heading {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  padding: 20px 22px 16px;
+  border-bottom: 1px solid #e8ece8;
+}
+
+.settings-heading h2 {
+  margin: 4px 0 6px;
+  font-size: 22px;
+  letter-spacing: -0.04em;
+}
+
+.settings-heading span {
+  color: #738079;
+  font-size: 12px;
+}
+
+.settings-form {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  padding: 16px 22px;
+}
+
+.settings-form label,
+.seed-status-line {
+  display: grid;
+  gap: 7px;
+}
+
+.settings-form label span,
+.seed-status-line span {
+  color: #6f7b73;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.settings-form input {
+  height: 38px;
+  min-width: 0;
+  padding: 0 11px;
+  border: 1px solid #d8dfd9;
+  border-radius: 10px;
+  outline: 0;
+  background: #fbfcfa;
+}
+
+.settings-form input:focus {
+  border-color: #83aa91;
+  box-shadow: 0 0 0 3px rgb(58 128 84 / 8%);
+}
+
+.seed-status-line {
+  min-height: 48px;
+  padding: 10px 11px;
+  border: 1px solid #e4e8e4;
+  border-radius: 11px;
+  background: #fafbf9;
+}
+
+.seed-status-line strong {
+  overflow: hidden;
+  color: #2f4437;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.seed-status-line strong.online {
+  color: #278153;
+}
+
+.seed-status-line strong.offline {
+  color: #bf4747;
+}
+
+.settings-error {
+  margin: 0 22px 12px;
+  padding: 10px 12px;
+  border: 1px solid #f0ceca;
+  border-radius: 10px;
+  color: #b8403a;
+  background: #fff3f1;
+  font-size: 12px;
+}
+
+.settings-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 0 22px 16px;
+}
+
+.model-validation {
+  min-height: 0;
+  padding: 16px 22px 22px;
+  border-top: 1px solid #e8ece8;
+  overflow: auto;
+}
+
+.model-validation-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 11px;
+}
+
+.model-validation-heading strong {
+  font-size: 13px;
+}
+
+.model-validation-heading span {
+  color: #8a928d;
+  font-size: 11px;
+}
+
+.model-list {
+  display: grid;
+  gap: 9px;
+}
+
+.model-card {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  padding: 12px;
+  border: 1px solid #e4e8e3;
+  border-radius: 12px;
+  background: #fafbf9;
+}
+
+.model-card > div:first-child {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+}
+
+.model-card strong {
+  font-size: 12px;
+}
+
+.model-card span,
+.model-card small {
+  overflow: hidden;
+  color: #7c8780;
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.model-card-meta {
+  display: grid;
+  justify-items: end;
+  gap: 6px;
+  min-width: 120px;
+}
+
+.validation-pill {
+  padding: 4px 8px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 750;
+}
+
+.validation-pill.callable {
+  color: #24784e;
+  background: #e5f3e9;
+}
+
+.validation-pill.unknown {
+  color: #7c8780;
+  background: #eef1ee;
+}
+
+.validation-pill.not_enabled,
+.validation-pill.unauthorized {
+  color: #9a6b12;
+  background: #fff2d2;
+}
+
+.validation-pill.rate_limited,
+.validation-pill.failed {
+  color: #b8403a;
+  background: #fdebea;
+}
+
 @media (max-width: 1180px) {
   .topbar {
     grid-template-columns: 1fr minmax(250px, 400px) auto;
@@ -898,5 +1121,14 @@ blockquote {
   .workspace,
   .app-shell.evidence-collapsed .workspace {
     grid-template-columns: 218px minmax(420px, 1fr);
+  }
+
+  .settings-form,
+  .model-card {
+    grid-template-columns: 1fr;
+  }
+
+  .model-card-meta {
+    justify-items: start;
   }
 }

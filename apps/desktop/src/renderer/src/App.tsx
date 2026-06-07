@@ -1,5 +1,12 @@
 import { useCallback, useEffect, useState } from "react";
-import type { WorkerHealth } from "../../shared/contracts";
+import type {
+  ModelCapabilityStatus,
+  ModelValidationStatus,
+  SeedCredentialStatus,
+  SeedModelDescriptor,
+  WorkerHealth,
+} from "../../shared/contracts";
+import { SEED_DEFAULTS } from "../../shared/contracts";
 
 type WorkerState =
   | { kind: "checking" }
@@ -67,6 +74,36 @@ const SUGGESTIONS = [
   "总结当前知识库的核心架构决策",
   "为什么回答必须经过引用校验？",
   "比较关键词检索与向量检索的用途",
+];
+
+const FALLBACK_SEED_MODELS: SeedModelDescriptor[] = [
+  {
+    id: SEED_DEFAULTS.defaultChatModel,
+    label: "默认对话",
+    role: "default_chat",
+    api: "responses",
+    contextWindow: 256_000,
+    vectorDimension: null,
+    capabilities: ["chat", "vision", "structured_output", "streaming"],
+  },
+  {
+    id: SEED_DEFAULTS.qualityChatModel,
+    label: "高质量对话",
+    role: "quality_chat",
+    api: "responses",
+    contextWindow: 256_000,
+    vectorDimension: null,
+    capabilities: ["chat", "vision", "structured_output", "streaming"],
+  },
+  {
+    id: SEED_DEFAULTS.defaultEmbeddingModel,
+    label: "Embedding",
+    role: "embedding",
+    api: "multimodal_embeddings",
+    contextWindow: null,
+    vectorDimension: 2048,
+    capabilities: ["embedding", "vision_embedding"],
+  },
 ];
 
 function getDesktopApi(): Window["citeMind"] {
@@ -142,6 +179,16 @@ function App(): React.JSX.Element {
   const [evidenceOpen, setEvidenceOpen] = useState(true);
   const [systemOpen, setSystemOpen] = useState(false);
   const [sentQuestion, setSentQuestion] = useState("");
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [seedStatus, setSeedStatus] = useState<SeedCredentialStatus | null>(
+    null,
+  );
+  const [seedForm, setSeedForm] = useState({
+    name: "我的 Seed API",
+    apiKey: "",
+  });
+  const [seedBusy, setSeedBusy] = useState(false);
+  const [seedError, setSeedError] = useState("");
 
   const checkHealth = useCallback(async () => {
     setWorker({ kind: "checking" });
@@ -173,9 +220,24 @@ function App(): React.JSX.Element {
     }
   }, []);
 
+  const loadSeedStatus = useCallback(async () => {
+    try {
+      const status = await getDesktopApi().seed.getStatus();
+      setSeedStatus(status);
+      if (status.name) {
+        setSeedForm((form) => ({ ...form, name: status.name ?? form.name }));
+      }
+    } catch (error) {
+      setSeedError(
+        error instanceof Error ? error.message : "Seed API 状态读取失败",
+      );
+    }
+  }, []);
+
   useEffect(() => {
     void checkHealth();
-  }, [checkHealth]);
+    void loadSeedStatus();
+  }, [checkHealth, loadSeedStatus]);
 
   const online = worker.kind === "online";
   const selectedCount = sources.filter((source) => source.selected).length;
@@ -193,6 +255,51 @@ function App(): React.JSX.Element {
     if (!value) return;
     setSentQuestion(value);
     setQuery("");
+  };
+
+  const saveSeedCredential = async (): Promise<void> => {
+    setSeedBusy(true);
+    setSeedError("");
+    try {
+      const status = await getDesktopApi().seed.saveCredential(seedForm);
+      setSeedStatus(status);
+      setSeedForm((form) => ({ ...form, apiKey: "" }));
+    } catch (error) {
+      setSeedError(
+        error instanceof Error ? error.message : "Seed API 保存失败",
+      );
+    } finally {
+      setSeedBusy(false);
+    }
+  };
+
+  const validateSeedCredential = async (): Promise<void> => {
+    setSeedBusy(true);
+    setSeedError("");
+    try {
+      setSeedStatus(await getDesktopApi().seed.validateCredential());
+    } catch (error) {
+      setSeedError(
+        error instanceof Error ? error.message : "Seed API 验证失败",
+      );
+    } finally {
+      setSeedBusy(false);
+    }
+  };
+
+  const deleteSeedCredential = async (): Promise<void> => {
+    setSeedBusy(true);
+    setSeedError("");
+    try {
+      setSeedStatus(await getDesktopApi().seed.deleteCredential());
+      setSeedForm({ name: "我的 Seed API", apiKey: "" });
+    } catch (error) {
+      setSeedError(
+        error instanceof Error ? error.message : "Seed API 删除失败",
+      );
+    } finally {
+      setSeedBusy(false);
+    }
   };
 
   return (
@@ -214,7 +321,14 @@ function App(): React.JSX.Element {
           <kbd>⌘ K</kbd>
         </label>
         <div className="top-actions">
-          <button className="button ghost" type="button">
+          <button
+            className="button ghost"
+            type="button"
+            onClick={() => {
+              setSettingsOpen(true);
+              void loadSeedStatus();
+            }}
+          >
             <Icon name="settings" size={17} /> 设置
           </button>
           <button className="button primary" type="button">
@@ -494,6 +608,15 @@ function App(): React.JSX.Element {
               }
               online={Boolean(online && worker.health.storage?.ready)}
             />
+            <StatusRow
+              label="Seed API"
+              value={
+                seedStatus?.configured
+                  ? `已配置 · ${seedStatus.maskedKey ?? "已加密"}`
+                  : "未配置"
+              }
+              online={Boolean(seedStatus?.configured)}
+            />
             <div className="system-actions">
               <button
                 className="button ghost"
@@ -515,7 +638,204 @@ function App(): React.JSX.Element {
           </div>
         )}
       </footer>
+
+      {settingsOpen && (
+        <SeedSettingsModal
+          busy={seedBusy}
+          error={seedError}
+          form={seedForm}
+          status={seedStatus}
+          onClose={() => setSettingsOpen(false)}
+          onDelete={() => void deleteSeedCredential()}
+          onFormChange={setSeedForm}
+          onReload={() => void loadSeedStatus()}
+          onSave={() => void saveSeedCredential()}
+          onValidate={() => void validateSeedCredential()}
+        />
+      )}
     </main>
+  );
+}
+
+function SeedSettingsModal({
+  busy,
+  error,
+  form,
+  status,
+  onClose,
+  onDelete,
+  onFormChange,
+  onReload,
+  onSave,
+  onValidate,
+}: {
+  busy: boolean;
+  error: string;
+  form: { name: string; apiKey: string };
+  status: SeedCredentialStatus | null;
+  onClose: () => void;
+  onDelete: () => void;
+  onFormChange: (next: { name: string; apiKey: string }) => void;
+  onReload: () => void;
+  onSave: () => void;
+  onValidate: () => void;
+}): React.JSX.Element {
+  const configured = Boolean(status?.configured);
+  const models = status?.models.length ? status.models : FALLBACK_SEED_MODELS;
+
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <section className="settings-modal" role="dialog" aria-modal="true">
+        <header className="settings-heading">
+          <div>
+            <p className="eyebrow">Seed API</p>
+            <h2>配置火山方舟 Ark API</h2>
+            <span>
+              Key 会在 Electron Main 中加密保存，前端只显示掩码和验证状态。
+            </span>
+          </div>
+          <button
+            aria-label="关闭设置"
+            className="icon-button"
+            type="button"
+            onClick={onClose}
+          >
+            <Icon name="close" size={17} />
+          </button>
+        </header>
+
+        <div className="settings-form">
+          <label>
+            <span>配置名称</span>
+            <input
+              value={form.name}
+              onChange={(event) =>
+                onFormChange({ ...form, name: event.target.value })
+              }
+            />
+          </label>
+          <label>
+            <span>Ark API Key</span>
+            <input
+              type="password"
+              value={form.apiKey}
+              placeholder={
+                configured
+                  ? `已保存 ${status?.maskedKey ?? "加密 Key"}，输入新 Key 可覆盖`
+                  : "粘贴 Ark API Key"
+              }
+              onChange={(event) =>
+                onFormChange({ ...form, apiKey: event.target.value })
+              }
+            />
+          </label>
+          <div className="seed-status-line">
+            <span>Base URL</span>
+            <strong>
+              {status?.baseUrl ?? "https://ark.cn-beijing.volces.com/api/v3"}
+            </strong>
+          </div>
+          <div className="seed-status-line">
+            <span>safeStorage</span>
+            <strong
+              className={
+                status
+                  ? status.safeStorageAvailable
+                    ? "online"
+                    : "offline"
+                  : "offline"
+              }
+            >
+              {status
+                ? status.safeStorageAvailable
+                  ? "可用"
+                  : "不可用"
+                : "待连接"}
+            </strong>
+          </div>
+        </div>
+
+        {error && <div className="settings-error">{error}</div>}
+
+        <div className="settings-actions">
+          <button
+            className="button primary"
+            disabled={busy || !form.apiKey.trim()}
+            type="button"
+            onClick={onSave}
+          >
+            {busy ? "验证中..." : "保存并验证"}
+          </button>
+          <button
+            className="button ghost"
+            disabled={busy || !configured}
+            type="button"
+            onClick={onValidate}
+          >
+            重新验证
+          </button>
+          <button
+            className="button ghost"
+            disabled={busy}
+            type="button"
+            onClick={onReload}
+          >
+            刷新状态
+          </button>
+          <button
+            className="button danger"
+            disabled={busy || !configured}
+            type="button"
+            onClick={onDelete}
+          >
+            删除配置
+          </button>
+        </div>
+
+        <section className="model-validation">
+          <div className="model-validation-heading">
+            <strong>默认 Seed 模型权限</strong>
+            <span>
+              {configured ? "已绑定当前 Ark Key" : "保存 Key 后执行验证"}
+            </span>
+          </div>
+          <div className="model-list">
+            {models.map((model) => (
+              <ModelValidationCard
+                key={`${model.role}:${model.id}`}
+                capability={findCapability(status?.capabilities ?? [], model)}
+                model={model}
+              />
+            ))}
+          </div>
+        </section>
+      </section>
+    </div>
+  );
+}
+
+function ModelValidationCard({
+  capability,
+  model,
+}: {
+  capability?: ModelCapabilityStatus;
+  model: SeedModelDescriptor;
+}): React.JSX.Element {
+  const status = capability?.status ?? "unknown";
+  return (
+    <article className="model-card">
+      <div>
+        <strong>{model.label}</strong>
+        <span>{model.id}</span>
+        <small>{model.capabilities.join(" · ")}</small>
+      </div>
+      <div className="model-card-meta">
+        <span className={`validation-pill ${status}`}>
+          {validationLabel(status)}
+        </span>
+        <small>{capabilityDetails(model, capability)}</small>
+      </div>
+    </article>
   );
 }
 
@@ -568,6 +888,55 @@ function StatusRow({
       <strong className={online ? "online" : "offline"}>{value}</strong>
     </div>
   );
+}
+
+function findCapability(
+  capabilities: ModelCapabilityStatus[],
+  model: SeedModelDescriptor,
+): ModelCapabilityStatus | undefined {
+  return capabilities.find(
+    (capability) =>
+      capability.modelId === model.id && capability.role === model.role,
+  );
+}
+
+function validationLabel(status: ModelValidationStatus): string {
+  const labels: Record<ModelValidationStatus, string> = {
+    unknown: "未验证",
+    callable: "可调用",
+    not_enabled: "未开通",
+    unauthorized: "无权限",
+    rate_limited: "限流",
+    failed: "失败",
+  };
+  return labels[status];
+}
+
+function capabilityDetails(
+  model: SeedModelDescriptor,
+  capability?: ModelCapabilityStatus,
+): string {
+  if (!capability) {
+    return model.vectorDimension
+      ? `${model.vectorDimension} 维 · 待验证`
+      : "待验证";
+  }
+  const values = capability.capability;
+  if (typeof values.vectorDimension === "number") {
+    const vision =
+      typeof values.visionEmbedding === "string"
+        ? ` · 视觉 ${values.visionEmbedding === "callable" ? "可用" : "待确认"}`
+        : "";
+    return `${values.vectorDimension} 维${vision}`;
+  }
+  if (typeof values.structuredOutput === "string") {
+    const vision =
+      typeof values.vision === "string"
+        ? ` · 视觉 ${values.vision === "callable" ? "可用" : "待确认"}`
+        : "";
+    return `结构化 ${values.structuredOutput}${vision}`;
+  }
+  return capability.message ?? "已验证";
 }
 
 export default App;

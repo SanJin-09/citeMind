@@ -10,7 +10,7 @@
 - [x] `P0` 采用可版本化的精简 Seed 模型目录，并通过实际轻量调用探测当前 Ark API Key 的可用能力：
   - 默认对话：`doubao-seed-2-0-lite-260428`。
   - 高质量对话：`doubao-seed-2-0-pro-260215`。
-  - Embedding：`doubao-embedding-vision-251215`，首版固定使用 1024 维 Dense Vector。
+  - Embedding：`doubao-embedding-vision-251215`，实测返回 2048 维 Dense Vector，首版固定使用 2048 维。
 - [x] `P0` 确认解析与 OCR 方案，解析失败必须可见，不允许静默跳过：
   - PDF、DOCX、图片以 Docling 为主。
   - 网页优先使用正文提取器，Playwright 仅作为动态网页兜底。
@@ -60,24 +60,24 @@
 
 - [x] Electron 可稳定启动并调用 Python Worker 的健康检查接口。
 - [x] 数据库可迁移、可重建，FTS5 和 LanceDB 均可完成最小读写测试。
-- [ ] Renderer 无法直接读取 Ark API Key。
+- [x] Renderer 无法直接读取 Ark API Key。
 
 ## 2. Seed API 配置与模型网关
 
-- [ ] `P0` 使用 Electron `safeStorage` 加密保存和读取 Ark API Key。
-- [ ] `P0` 内置已确认的 3 项 Seed 模型目录，目录配置可版本化，不依赖 Ark API Key 自动枚举全部模型。
-- [ ] `P0` 实现对话、Embedding、视觉和结构化输出的轻量能力探测。
-- [ ] `P0` 展示可调用、未开通、无权限、限流、调用失败等验证状态。
-- [ ] `P0` 实现 Ark SDK 模型网关：流式回答、结构化生成、Embedding、超时、重试和用量统计。
-- [ ] `P0` 结构化输出探测失败时，降级为 JSON Prompt，并执行解析校验。
-- [ ] `P0` 实现 Seed API 设置页和模型选择页。
-- [ ] `P0` 为模型验证、密钥隔离和错误映射补充自动化测试。
+- [x] `P0` 使用 Electron `safeStorage` 加密保存和读取 Ark API Key。
+- [x] `P0` 内置已确认的 3 项 Seed 模型目录，目录配置可版本化，不依赖 Ark API Key 自动枚举全部模型。
+- [x] `P0` 实现对话、Embedding、视觉和结构化输出的轻量能力探测。
+- [x] `P0` 展示可调用、未开通、无权限、限流、调用失败等验证状态。
+- [x] `P0` 实现 Ark SDK 模型网关：流式回答、结构化生成、Embedding、超时、重试和用量统计。
+- [x] `P0` 结构化输出探测失败时，降级为 JSON Prompt，并执行解析校验。
+- [x] `P0` 实现 Seed API 设置页和模型选择页。
+- [x] `P0` 为模型验证、密钥隔离和错误映射补充自动化测试。
 
 **里程碑验收**
 
-- [ ] 用户可保存 Ark API Key、验证指定模型并看到明确状态。
-- [ ] React Renderer 全程接触不到明文 API Key。
-- [ ] 对话与 Embedding 模型可通过统一 `ModelGateway` 调用。
+- [x] 用户可保存 Ark API Key、验证指定模型并看到明确状态。
+- [x] React Renderer 全程接触不到明文 API Key。
+- [x] 对话与 Embedding 模型可通过统一 `ModelGateway` 调用。
 
 ## 3. 知识库与导入闭环
 

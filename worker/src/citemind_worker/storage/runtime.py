@@ -6,7 +6,7 @@ from citemind_worker.storage.vector_index import VectorIndex
 
 
 class StorageRuntime:
-    def __init__(self, root: Path, vector_dimension: int = 1024) -> None:
+    def __init__(self, root: Path, vector_dimension: int = 2048) -> None:
         self.paths = AppDataPaths(root.expanduser().resolve())
         self.database = SqliteDatabase(self.paths)
         self.vector_index = VectorIndex(self.paths, vector_dimension)

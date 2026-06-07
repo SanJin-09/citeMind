@@ -15,7 +15,7 @@ class VectorResult:
 
 
 class VectorIndex:
-    def __init__(self, paths: AppDataPaths, dimension: int = 1024) -> None:
+    def __init__(self, paths: AppDataPaths, dimension: int = 2048) -> None:
         if dimension <= 0:
             raise ValueError("Vector dimension must be positive")
         self.paths = paths
