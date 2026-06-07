@@ -73,6 +73,18 @@ function App(): React.JSX.Element {
             {online ? `已连接 · PID ${state.health.pid}` : "未连接"}
           </strong>
         </div>
+        <div className="status-row">
+          <span>本地存储</span>
+          <strong
+            className={
+              online && state.health.storage?.ready ? "online" : "offline"
+            }
+          >
+            {online && state.health.storage?.ready
+              ? `就绪 · Schema v${state.health.storage.schemaVersion} · FTS5 · Vector ${state.health.storage.vectorDimension}`
+              : "未就绪"}
+          </strong>
+        </div>
 
         {state.kind === "offline" && (
           <p className="error-message">{state.message}</p>

@@ -85,6 +85,7 @@ export class PythonWorkerManager {
       cwd: workerRoot,
       env: {
         ...process.env,
+        CITEMIND_DATA_DIR: app.getPath("userData"),
         PYTHONPATH: path.join(workerRoot, "src"),
       },
       stdio: ["pipe", "pipe", "pipe"],

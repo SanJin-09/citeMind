@@ -3,6 +3,12 @@ export interface WorkerHealth {
   service: "citemind-worker";
   protocolVersion: "2.0";
   pid: number;
+  storage?: {
+    ready: boolean;
+    schemaVersion: number;
+    fts5Enabled: boolean;
+    vectorDimension: number;
+  };
 }
 
 export interface DesktopApi {

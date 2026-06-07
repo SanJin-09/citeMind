@@ -50,16 +50,16 @@
 
 ### 1.3 本地存储
 
-- [ ] `P0` 建立 SQLite 数据库迁移机制。
-- [ ] `P0` 创建首版必要表：KnowledgeBase、Source、SourceVersion、Chunk、IndexVersion、SeedApiCredential、ModelCapability、Conversation、Message、AnswerCitation、BackgroundJob；允许非 PDF 来源的 `page_number` 为空。
-- [ ] `P0` 配置 SQLite FTS5，并验证中文关键词检索效果。
-- [ ] `P0` 初始化 LanceDB，定义向量表与 `index_version` 隔离规则。
-- [ ] `P0` 基于 Electron `app.getPath("userData")` 实现原始文件、网页快照、解析产物、SQLite 和 LanceDB 的本地目录管理。
+- [x] `P0` 建立 SQLite 数据库迁移机制。
+- [x] `P0` 创建首版必要表：KnowledgeBase、Source、SourceVersion、Chunk、IndexVersion、SeedApiCredential、ModelCapability、Conversation、Message、AnswerCitation、BackgroundJob；允许非 PDF 来源的 `page_number` 为空。
+- [x] `P0` 配置 SQLite FTS5，并验证中文关键词检索效果。
+- [x] `P0` 初始化 LanceDB，定义向量表与 `index_version` 隔离规则。
+- [x] `P0` 基于 Electron `app.getPath("userData")` 实现原始文件、网页快照、解析产物、SQLite 和 LanceDB 的本地目录管理。
 
 **里程碑验收**
 
-- [ ] Electron 可稳定启动并调用 Python Worker 的健康检查接口。
-- [ ] 数据库可迁移、可重建，FTS5 和 LanceDB 均可完成最小读写测试。
+- [x] Electron 可稳定启动并调用 Python Worker 的健康检查接口。
+- [x] 数据库可迁移、可重建，FTS5 和 LanceDB 均可完成最小读写测试。
 - [ ] Renderer 无法直接读取 Ark API Key。
 
 ## 2. Seed API 配置与模型网关

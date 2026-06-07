@@ -1,9 +1,11 @@
 import asyncio
 import json
 from io import StringIO
+from pathlib import Path
 
 from citemind_worker.main import create_server
 from citemind_worker.rpc import JsonValue
+from citemind_worker.storage import StorageRuntime
 
 
 def run_server(payload: str) -> list[dict[str, JsonValue]]:
@@ -39,3 +41,24 @@ def test_invalid_params() -> None:
     error = responses[0]["error"]
     assert isinstance(error, dict)
     assert error["code"] == -32602
+
+
+def test_health_reports_initialized_storage(tmp_path: Path) -> None:
+    storage = StorageRuntime(tmp_path, vector_dimension=3)
+    storage.initialize()
+    server = create_server(storage)
+    output = StringIO()
+    asyncio.run(
+        server.serve(
+            StringIO('{"jsonrpc":"2.0","id":"1","method":"system.health","params":{}}\n'),
+            output,
+        )
+    )
+    response = json.loads(output.getvalue())
+
+    assert response["result"]["storage"] == {
+        "ready": True,
+        "schemaVersion": 1,
+        "fts5Enabled": True,
+        "vectorDimension": 3,
+    }

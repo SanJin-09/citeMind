@@ -7,6 +7,8 @@ import { PythonWorkerManager } from "./python-worker-manager";
 const workerManager = new PythonWorkerManager();
 let allowQuit = false;
 
+app.setName("citeMind");
+
 function createWindow(): BrowserWindow {
   const window = new BrowserWindow({
     width: 1080,
