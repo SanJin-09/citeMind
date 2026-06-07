@@ -1,0 +1,25 @@
+{
+  "name": "citemind",
+  "version": "0.1.0",
+  "private": true,
+  "packageManager": "pnpm@10.3.0",
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "electron",
+      "electron-winstaller",
+      "esbuild"
+    ]
+  },
+  "scripts": {
+    "setup": "pnpm install && uv sync --project worker --python 3.12 && pnpm --filter @citemind/desktop setup:electron",
+    "dev": "pnpm --filter @citemind/desktop dev",
+    "build": "pnpm --filter @citemind/desktop build",
+    "build:mac": "pnpm --filter @citemind/desktop build:mac",
+    "format": "pnpm --filter @citemind/desktop format && uv run --project worker ruff format worker/src worker/tests",
+    "format:check": "pnpm --filter @citemind/desktop format:check && uv run --project worker ruff format --check worker/src worker/tests",
+    "lint": "pnpm --filter @citemind/desktop lint && uv run --project worker ruff check worker/src worker/tests",
+    "test": "pnpm --filter @citemind/desktop test && uv run --project worker pytest",
+    "typecheck": "pnpm --filter @citemind/desktop typecheck && uv run --project worker mypy worker/src",
+    "check": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm test && pnpm build"
+  }
+}
