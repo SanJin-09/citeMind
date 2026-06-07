@@ -11,10 +11,10 @@ app.setName("citeMind");
 
 function createWindow(): BrowserWindow {
   const window = new BrowserWindow({
-    width: 1080,
-    height: 720,
-    minWidth: 720,
-    minHeight: 520,
+    width: 1440,
+    height: 900,
+    minWidth: 960,
+    minHeight: 640,
     show: false,
     webPreferences: {
       preload: path.join(__dirname, "../preload/index.cjs"),
