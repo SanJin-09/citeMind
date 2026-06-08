@@ -8,6 +8,7 @@ from uuid import uuid4
 from citemind_worker.ark_gateway import ArkModelGateway
 from citemind_worker.background_job_service import BackgroundJobService
 from citemind_worker.model_catalog import DEFAULT_ARK_BASE_URL, DEFAULT_EMBEDDING_MODEL
+from citemind_worker.source_import_service import artifact_contains_raw_pdf_text
 from citemind_worker.storage import StorageRuntime
 from citemind_worker.storage.full_text import FullTextIndex
 
@@ -133,6 +134,94 @@ class IndexingService:
 
         return self.index_status(knowledge_base_id, index_version_id=index_version_id)
 
+    def delete_indexes(self, knowledge_base_id: str) -> dict[str, object]:
+        self._ensure_knowledge_base(knowledge_base_id)
+        with self.storage.database.connect() as connection:
+            index_version_ids = [
+                str(row["id"])
+                for row in connection.execute(
+                    "SELECT id FROM index_versions WHERE knowledge_base_id = ?",
+                    (knowledge_base_id,),
+                ).fetchall()
+            ]
+            chunk_ids = [
+                str(row["id"])
+                for row in connection.execute(
+                    "SELECT id FROM chunks WHERE knowledge_base_id = ?",
+                    (knowledge_base_id,),
+                ).fetchall()
+            ]
+            if chunk_ids:
+                placeholders = ",".join("?" for _ in chunk_ids)
+                connection.execute(
+                    f"DELETE FROM answer_citations WHERE chunk_id IN ({placeholders})",
+                    tuple(chunk_ids),
+                )
+                connection.execute(
+                    f"DELETE FROM chunks_fts WHERE chunk_id IN ({placeholders})",
+                    tuple(chunk_ids),
+                )
+                connection.execute(
+                    f"DELETE FROM chunks WHERE id IN ({placeholders})",
+                    tuple(chunk_ids),
+                )
+            connection.execute(
+                """
+                UPDATE source_versions
+                SET status = 'parsed'
+                WHERE status = 'ready'
+                  AND source_id IN (
+                      SELECT id FROM sources WHERE knowledge_base_id = ?
+                  )
+                """,
+                (knowledge_base_id,),
+            )
+            connection.execute(
+                """
+                UPDATE sources
+                SET status = 'processing',
+                    updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                WHERE knowledge_base_id = ?
+                  AND status = 'ready'
+                """,
+                (knowledge_base_id,),
+            )
+            connection.execute(
+                "DELETE FROM index_versions WHERE knowledge_base_id = ?",
+                (knowledge_base_id,),
+            )
+            connection.execute(
+                """
+                UPDATE knowledge_bases
+                SET updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                WHERE id = ?
+                """,
+                (knowledge_base_id,),
+            )
+            connection.commit()
+
+        self.storage.vector_index.delete_index_versions(index_version_ids)
+        return {
+            **self.index_status(knowledge_base_id),
+            "deletedIndexCount": len(index_version_ids),
+            "deletedChunkCount": len(chunk_ids),
+        }
+
+    async def rebuild_index(
+        self,
+        knowledge_base_id: str,
+        *,
+        api_key: str | None = None,
+        base_url: str = DEFAULT_ARK_BASE_URL,
+        embedding_model: str = DEFAULT_EMBEDDING_MODEL,
+    ) -> dict[str, object]:
+        return await self.build_index(
+            knowledge_base_id,
+            api_key=api_key,
+            base_url=base_url,
+            embedding_model=embedding_model,
+        )
+
     def index_status(
         self, knowledge_base_id: str, *, index_version_id: str | None = None
     ) -> dict[str, object]:
@@ -218,6 +307,8 @@ class IndexingService:
         chunks: list[ChunkCandidate] = []
         for candidate in candidates:
             artifact = _read_artifact(candidate.parse_artifact_path)
+            if artifact_contains_raw_pdf_text(candidate.source_type, artifact):
+                continue
             raw_chunks = artifact.get("chunks")
             if not isinstance(raw_chunks, list):
                 continue
@@ -446,7 +537,8 @@ def _chunk_from_artifact(
                 source_id=candidate.source_id,
                 source_version_id=candidate.source_version_id,
                 page_number=_optional_int(raw_chunk.get("pageNumber")),
-                bounding_box=_optional_dict(raw_chunk.get("boundingBox")),
+                bounding_box=_optional_dict(raw_chunk.get("boundingBox"))
+                or _ocr_region_bounding_box(raw_chunk.get("ocrRegions")),
                 heading_path=_string_list(raw_chunk.get("headingPath")),
                 anchor=anchor,
                 original_text=original,
@@ -500,6 +592,16 @@ def _optional_int(value: object) -> int | None:
 
 def _optional_dict(value: object) -> dict[str, object] | None:
     return value if isinstance(value, dict) else None
+
+
+def _ocr_region_bounding_box(value: object) -> dict[str, object] | None:
+    if not isinstance(value, list) or not value:
+        return None
+    first = value[0]
+    if not isinstance(first, dict):
+        return None
+    bounding_box = first.get("boundingBox")
+    return bounding_box if isinstance(bounding_box, dict) else None
 
 
 def _string_list(value: object) -> list[str]:

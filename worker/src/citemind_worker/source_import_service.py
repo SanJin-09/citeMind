@@ -8,6 +8,7 @@ import urllib.error
 import urllib.request
 import zipfile
 from collections.abc import Iterable
+from contextlib import suppress
 from dataclasses import dataclass, field
 from html.parser import HTMLParser
 from pathlib import Path
@@ -104,6 +105,11 @@ class SourceImportService:
         artifact_path.parent.mkdir(parents=True, exist_ok=True)
 
         duplicate_source_id = self._find_duplicate_original(knowledge_base_id, file_hash)
+        if duplicate_source_id and self._duplicate_needs_reparse(
+            duplicate_source_id,
+            source_type,
+        ):
+            duplicate_source_id = None
         self._insert_source(
             source_id=source_id,
             knowledge_base_id=knowledge_base_id,
@@ -295,6 +301,101 @@ class SourceImportService:
             "processing": sum(1 for item in items if item["status"] == "processing"),
         }
         return {"knowledgeBaseId": knowledge_base_id, "summary": summary, "items": items}
+
+    def delete_source(self, source_id: str) -> dict[str, object]:
+        with self.storage.database.connect() as connection:
+            source = connection.execute(
+                """
+                SELECT knowledge_base_id, display_name
+                FROM sources
+                WHERE id = ?
+                """,
+                (source_id,),
+            ).fetchone()
+            if source is None:
+                raise ValueError("Source not found")
+
+            version_rows = connection.execute(
+                """
+                SELECT id, original_path, snapshot_path, parse_artifact_path
+                FROM source_versions
+                WHERE source_id = ?
+                """,
+                (source_id,),
+            ).fetchall()
+            source_version_ids = [str(row["id"]) for row in version_rows]
+            chunk_rows = (
+                connection.execute(
+                    """
+                    SELECT id, index_version_id
+                    FROM chunks
+                    WHERE source_version_id IN ({placeholders})
+                    """.format(placeholders=",".join("?" for _ in source_version_ids)),
+                    tuple(source_version_ids),
+                ).fetchall()
+                if source_version_ids
+                else []
+            )
+            chunk_ids = [str(row["id"]) for row in chunk_rows]
+            index_version_ids = list(
+                dict.fromkeys(
+                    str(row["index_version_id"])
+                    for row in chunk_rows
+                    if row["index_version_id"] is not None
+                )
+            )
+
+            if chunk_ids:
+                placeholders = ",".join("?" for _ in chunk_ids)
+                connection.execute(
+                    f"DELETE FROM answer_citations WHERE chunk_id IN ({placeholders})",
+                    tuple(chunk_ids),
+                )
+                connection.execute(
+                    f"DELETE FROM chunks_fts WHERE chunk_id IN ({placeholders})",
+                    tuple(chunk_ids),
+                )
+                connection.execute(
+                    f"DELETE FROM chunks WHERE id IN ({placeholders})",
+                    tuple(chunk_ids),
+                )
+            connection.execute("DELETE FROM background_jobs WHERE target_id = ?", (source_id,))
+            connection.execute("DELETE FROM sources WHERE id = ?", (source_id,))
+            if index_version_ids:
+                placeholders = ",".join("?" for _ in index_version_ids)
+                connection.execute(
+                    f"""
+                    UPDATE index_versions
+                    SET status = CASE WHEN status = 'ready' THEN 'retired' ELSE status END,
+                        is_current = 0
+                    WHERE id IN ({placeholders})
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM chunks
+                          WHERE chunks.index_version_id = index_versions.id
+                      )
+                    """,
+                    tuple(index_version_ids),
+                )
+            connection.execute(
+                """
+                UPDATE knowledge_bases
+                SET updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                WHERE id = ?
+                """,
+                (str(source["knowledge_base_id"]),),
+            )
+            connection.commit()
+
+        self.storage.vector_index.delete_chunk_ids(chunk_ids)
+        _remove_source_files(self.storage, version_rows)
+        return {
+            "knowledgeBaseId": str(source["knowledge_base_id"]),
+            "sourceId": source_id,
+            "displayName": str(source["display_name"]),
+            "deleted": True,
+            "deletedChunkCount": len(chunk_ids),
+        }
 
     def _complete_parsed_import(
         self,
@@ -595,6 +696,23 @@ class SourceImportService:
             row = connection.execute(query, params).fetchone()
         return str(row["id"]) if row is not None else None
 
+    def _duplicate_needs_reparse(self, source_id: str, source_type: str) -> bool:
+        with self.storage.database.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT parse_artifact_path
+                FROM source_versions
+                WHERE source_id = ?
+                ORDER BY version_number DESC
+                LIMIT 1
+                """,
+                (source_id,),
+            ).fetchone()
+        if row is None:
+            return False
+        artifact = _read_artifact(row["parse_artifact_path"])
+        return artifact_contains_raw_pdf_text(source_type, artifact)
+
     def _duplicate_artifact(
         self,
         *,
@@ -618,22 +736,28 @@ class SourceImportService:
     def _check_record(self, row: object) -> dict[str, object]:
         artifact = _read_artifact(row["parse_artifact_path"])  # type: ignore[index]
         version_status = row["version_status"]  # type: ignore[index]
+        source_type = str(row["source_type"])  # type: ignore[index]
         source_status = str(row["source_status"])  # type: ignore[index]
-        status = _check_status(source_status, str(version_status), artifact)
+        raw_pdf_error = _raw_pdf_artifact_error(source_type, artifact)
+        status = (
+            "failed"
+            if raw_pdf_error
+            else _check_status(source_status, str(version_status), artifact)
+        )
         raw_chunks = artifact.get("chunks")
         chunks = raw_chunks if isinstance(raw_chunks, list) else []
-        preview = _preview_text(artifact)
+        preview = "" if raw_pdf_error else _preview_text(artifact)
         return {
             "sourceId": str(row["source_id"]),  # type: ignore[index]
             "sourceVersionId": row["source_version_id"],  # type: ignore[index]
-            "sourceType": str(row["source_type"]),  # type: ignore[index]
+            "sourceType": source_type,
             "displayName": str(row["display_name"]),  # type: ignore[index]
             "uri": row["uri"],  # type: ignore[index]
             "status": status,
             "sourceStatus": source_status,
             "versionStatus": version_status,
             "jobStatus": row["job_status"],  # type: ignore[index]
-            "errorMessage": artifact.get("errorMessage") or row["job_error"],  # type: ignore[index]
+            "errorMessage": raw_pdf_error or artifact.get("errorMessage") or row["job_error"],  # type: ignore[index]
             "duplicateOfSourceId": artifact.get("duplicateOfSourceId"),
             "originalHash": row["original_hash"],  # type: ignore[index]
             "contentHash": row["content_hash"],  # type: ignore[index]
@@ -702,6 +826,20 @@ class DoclingFirstParser:
         reason: str,
     ) -> ParsedDocument | None:
         warnings = [f"Docling 不可用或解析失败，已使用有限降级解析：{reason}"]
+        if source_type == "pdf":
+            blocks = _extract_pdf_blocks(path)
+            if blocks:
+                text = "\n\n".join(block.original_text for block in blocks)
+                return ParsedDocument(
+                    parser="pypdf-fallback",
+                    parser_version=PARSER_VERSION,
+                    source_type=source_type,
+                    original_text=text,
+                    normalized_text=_normalize_text(text),
+                    blocks=blocks,
+                    warnings=warnings,
+                )
+            raise ParseFailure(f"Docling 不可用或解析失败：{reason}；PDF 文本提取失败或结果为空")
         if source_type == "docx":
             text = _extract_docx_text(path)
             if text:
@@ -718,14 +856,14 @@ class DoclingFirstParser:
                     blocks=blocks,
                     warnings=warnings,
                 )
-        if source_type in {"pdf", "docx"}:
+        if source_type == "docx":
             text = _decode_text_file(path)
             if text:
                 blocks = [
                     _block(
                         paragraph,
                         ParsedLocation(
-                            page_number=1 if source_type == "pdf" else None,
+                            page_number=None,
                             heading_path=[],
                             anchor=f"p-{index + 1}",
                         ),
@@ -1076,6 +1214,23 @@ def _artifact_path(storage: StorageRuntime, source_version_id: str) -> Path:
     return storage.paths.artifacts / f"{source_version_id}.json"
 
 
+def _remove_source_files(storage: StorageRuntime, version_rows: Iterable[Any]) -> None:
+    object_directories: set[Path] = set()
+    for row in version_rows:
+        original_path = row["original_path"]
+        for key in ("original_path", "snapshot_path", "parse_artifact_path"):
+            value = row[key]
+            if value:
+                with suppress(OSError):
+                    Path(str(value)).unlink(missing_ok=True)
+        if original_path:
+            parent = Path(str(original_path)).parent
+            if parent.is_relative_to(storage.paths.objects):
+                object_directories.add(parent)
+    for directory in object_directories:
+        shutil.rmtree(directory, ignore_errors=True)
+
+
 def _clean_url(url: str) -> str:
     clean = url.strip()
     if not clean.startswith(("http://", "https://")):
@@ -1088,6 +1243,51 @@ def _decode_text_file(path: Path) -> str:
         return path.read_text(encoding="utf-8")
     except UnicodeDecodeError:
         return path.read_text(encoding="utf-8", errors="ignore")
+
+
+def _extract_pdf_blocks(path: Path) -> list[ParsedBlock]:
+    try:
+        module = importlib.import_module("pypdf")
+        reader = module.PdfReader(str(path))
+    except Exception:
+        return []
+
+    blocks: list[ParsedBlock] = []
+    for page_index, page in enumerate(reader.pages):
+        try:
+            page_text = page.extract_text() or ""
+        except Exception:
+            page_text = ""
+        bounding_box = _pdf_page_bounding_box(page)
+        for paragraph_index, paragraph in enumerate(_paragraphs(page_text)):
+            blocks.append(
+                _block(
+                    paragraph,
+                    ParsedLocation(
+                        page_number=page_index + 1,
+                        bounding_box=bounding_box,
+                        anchor=f"page-{page_index + 1}-p-{paragraph_index + 1}",
+                    ),
+                )
+            )
+    return blocks
+
+
+def _pdf_page_bounding_box(page: Any) -> dict[str, float] | None:
+    media_box = getattr(page, "mediabox", None)
+    width = getattr(media_box, "width", None)
+    height = getattr(media_box, "height", None)
+    if width is None or height is None:
+        return None
+    try:
+        return {
+            "x": 0.0,
+            "y": 0.0,
+            "width": float(str(width)),
+            "height": float(str(height)),
+        }
+    except (TypeError, ValueError):
+        return None
 
 
 def _extract_docx_text(path: Path) -> str:
@@ -1134,6 +1334,46 @@ def _preview_text(artifact: dict[str, object]) -> str:
     if isinstance(normalized_text, str):
         return normalized_text[:240]
     return ""
+
+
+def _raw_pdf_artifact_error(source_type: str, artifact: dict[str, object]) -> str | None:
+    if not artifact_contains_raw_pdf_text(source_type, artifact):
+        return None
+    return "PDF 解析结果疑似原始文件内容，请重新导入该 PDF"
+
+
+def artifact_contains_raw_pdf_text(source_type: str, artifact: dict[str, object]) -> bool:
+    if source_type != "pdf":
+        return False
+    return any(_looks_like_raw_pdf_text(text) for text in _artifact_text_values(artifact))
+
+
+def _artifact_text_values(artifact: dict[str, object]) -> list[str]:
+    values: list[str] = []
+    for key in ("normalizedText", "originalText"):
+        value = artifact.get(key)
+        if isinstance(value, str):
+            values.append(value)
+    chunks = artifact.get("chunks")
+    if isinstance(chunks, list):
+        for chunk in chunks:
+            if not isinstance(chunk, dict):
+                continue
+            for key in ("normalizedText", "originalText"):
+                value = chunk.get(key)
+                if isinstance(value, str):
+                    values.append(value)
+    return values
+
+
+def _looks_like_raw_pdf_text(text: str) -> bool:
+    sample = text[:2000].lstrip()
+    if sample.startswith("%PDF-"):
+        return True
+    control_count = sum(
+        1 for character in sample if ord(character) < 32 and character not in "\n\r\t"
+    )
+    return control_count > max(8, len(sample) // 20)
 
 
 def _stage_checkpoint(

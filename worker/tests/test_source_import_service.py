@@ -11,6 +11,43 @@ from citemind_worker.source_import_service import (
 from citemind_worker.storage import StorageRuntime
 
 
+def write_text_pdf(path: Path, text: str) -> None:
+    stream = f"BT /F1 24 Tf 100 700 Td ({text}) Tj ET".encode("latin-1")
+    objects = [
+        b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n",
+        b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n",
+        (
+            b"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
+            b"/Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>\nendobj\n"
+        ),
+        (
+            b"4 0 obj\n<< /Length "
+            + str(len(stream)).encode("ascii")
+            + b" >>\nstream\n"
+            + stream
+            + b"\nendstream\nendobj\n"
+        ),
+        b"5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n",
+    ]
+    output = bytearray(b"%PDF-1.4\n")
+    offsets: list[int] = []
+    for pdf_object in objects:
+        offsets.append(len(output))
+        output.extend(pdf_object)
+    xref_offset = len(output)
+    output.extend(f"xref\n0 {len(objects) + 1}\n".encode("ascii"))
+    output.extend(b"0000000000 65535 f \n")
+    for offset in offsets:
+        output.extend(f"{offset:010d} 00000 n \n".encode("ascii"))
+    output.extend(
+        (
+            f"trailer\n<< /Root 1 0 R /Size {len(objects) + 1} >>\n"
+            f"startxref\n{xref_offset}\n%%EOF\n"
+        ).encode("ascii")
+    )
+    path.write_bytes(bytes(output))
+
+
 class FakeParser:
     def __init__(self, *, fail: bool = False, normalized_text: str | None = None) -> None:
         self.fail = fail
@@ -144,3 +181,61 @@ def test_import_failure_is_visible_in_parse_checks(tmp_path: Path) -> None:
     assert result["parseCheck"]["status"] == "failed"
     assert checks["summary"]["failed"] == 1
     assert checks["items"][0]["errorMessage"] == "fake parser failed"
+
+
+def test_pdf_fallback_extracts_text_without_indexing_raw_pdf_bytes(tmp_path: Path) -> None:
+    storage = StorageRuntime(tmp_path, vector_dimension=3)
+    storage.initialize()
+    knowledge_base_id = KnowledgeBaseService(storage).create("PDF 兜底测试")["id"]
+    assert isinstance(knowledge_base_id, str)
+    source_file = tmp_path / "sample.pdf"
+    write_text_pdf(source_file, "PDF alpha searchable text")
+
+    result = SourceImportService(storage).import_file(knowledge_base_id, str(source_file))
+    checks = SourceImportService(storage).parse_checks(knowledge_base_id)
+
+    assert result["parseCheck"]["status"] == "success"
+    assert checks["items"][0]["preview"] == "PDF alpha searchable text"
+    artifact = Path(checks["items"][0]["parseArtifactPath"]).read_text(encoding="utf-8")
+    assert '"parser": "pypdf-fallback"' in artifact
+    assert '"boundingBox"' in artifact
+    assert "%PDF-1." not in artifact
+
+
+def test_pdf_fallback_failure_is_visible_instead_of_raw_pdf_preview(tmp_path: Path) -> None:
+    storage = StorageRuntime(tmp_path, vector_dimension=3)
+    storage.initialize()
+    knowledge_base_id = KnowledgeBaseService(storage).create("PDF 失败测试")["id"]
+    assert isinstance(knowledge_base_id, str)
+    source_file = tmp_path / "broken.pdf"
+    source_file.write_bytes(b"%PDF-1.7\n3 0 obj\n<< /Broken true >>\n")
+
+    result = SourceImportService(storage).import_file(knowledge_base_id, str(source_file))
+    checks = SourceImportService(storage).parse_checks(knowledge_base_id)
+
+    assert result["parseCheck"]["status"] == "failed"
+    assert checks["summary"]["failed"] == 1
+    assert not checks["items"][0]["preview"].startswith("%PDF-1.")
+    assert "PDF 文本提取失败" in str(checks["items"][0]["errorMessage"])
+
+
+def test_legacy_raw_pdf_duplicate_can_be_reimported(tmp_path: Path) -> None:
+    storage = StorageRuntime(tmp_path, vector_dimension=3)
+    storage.initialize()
+    knowledge_base_id = KnowledgeBaseService(storage).create("PDF 重导测试")["id"]
+    assert isinstance(knowledge_base_id, str)
+    source_file = tmp_path / "resume.pdf"
+    write_text_pdf(source_file, "PDF alpha searchable text")
+
+    legacy = SourceImportService(
+        storage,
+        parser=FakeParser(normalized_text="%PDF-1.7 raw legacy bytes"),
+    ).import_file(knowledge_base_id, str(source_file))
+    repaired = SourceImportService(storage).import_file(knowledge_base_id, str(source_file))
+    checks = SourceImportService(storage).parse_checks(knowledge_base_id)
+
+    assert legacy["parseCheck"]["status"] == "failed"
+    assert repaired["parseCheck"]["status"] == "success"
+    assert checks["summary"]["failed"] == 1
+    assert checks["summary"]["success"] == 1
+    assert not repaired["parseCheck"]["duplicateOfSourceId"]

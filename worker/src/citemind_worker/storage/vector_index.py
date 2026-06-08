@@ -1,3 +1,4 @@
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 import lancedb  # type: ignore[import-untyped]
@@ -55,6 +56,14 @@ class VectorIndex:
                 }
             ]
         )
+
+    def delete_chunk_ids(self, chunk_ids: Sequence[str]) -> None:
+        for chunk_id in dict.fromkeys(chunk_ids):
+            self.table.delete(f"chunk_id = '{_escape_sql(chunk_id)}'")
+
+    def delete_index_versions(self, index_version_ids: Sequence[str]) -> None:
+        for index_version_id in dict.fromkeys(index_version_ids):
+            self.table.delete(f"index_version_id = '{_escape_sql(index_version_id)}'")
 
     def search(
         self,

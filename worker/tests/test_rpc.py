@@ -16,6 +16,43 @@ class MiniEmbedder:
         return [[1.0, 0.0, 0.0] for _text in texts]
 
 
+def write_text_pdf(path: Path, text: str) -> None:
+    stream = f"BT /F1 24 Tf 100 700 Td ({text}) Tj ET".encode("latin-1")
+    objects = [
+        b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n",
+        b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n",
+        (
+            b"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
+            b"/Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>\nendobj\n"
+        ),
+        (
+            b"4 0 obj\n<< /Length "
+            + str(len(stream)).encode("ascii")
+            + b" >>\nstream\n"
+            + stream
+            + b"\nendstream\nendobj\n"
+        ),
+        b"5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n",
+    ]
+    output = bytearray(b"%PDF-1.4\n")
+    offsets: list[int] = []
+    for pdf_object in objects:
+        offsets.append(len(output))
+        output.extend(pdf_object)
+    xref_offset = len(output)
+    output.extend(f"xref\n0 {len(objects) + 1}\n".encode("ascii"))
+    output.extend(b"0000000000 65535 f \n")
+    for offset in offsets:
+        output.extend(f"{offset:010d} 00000 n \n".encode("ascii"))
+    output.extend(
+        (
+            f"trailer\n<< /Root 1 0 R /Size {len(objects) + 1} >>\n"
+            f"startxref\n{xref_offset}\n%%EOF\n"
+        ).encode("ascii")
+    )
+    path.write_bytes(bytes(output))
+
+
 def run_server(payload: str) -> list[dict[str, JsonValue]]:
     output = StringIO()
     asyncio.run(create_server().serve(StringIO(payload), output))
@@ -165,7 +202,7 @@ def test_source_import_rpc_imports_file_and_lists_parse_checks(tmp_path: Path) -
     )
     knowledge_base_id = json.loads(output.getvalue())["result"]["id"]
     sample = tmp_path / "sample.pdf"
-    sample.write_text("PDF fallback text\n\nwith location placeholder", encoding="utf-8")
+    write_text_pdf(sample, "PDF fallback text")
 
     output = StringIO()
     asyncio.run(
@@ -216,7 +253,7 @@ def test_index_build_rpc_marks_chunks_ready(tmp_path: Path) -> None:
     )
     knowledge_base_id = json.loads(output.getvalue())["result"]["id"]
     sample = tmp_path / "sample.pdf"
-    sample.write_text("PDF alpha searchable text", encoding="utf-8")
+    write_text_pdf(sample, "PDF alpha searchable text")
 
     output = StringIO()
     asyncio.run(

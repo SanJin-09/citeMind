@@ -276,6 +276,15 @@ def create_server(
         except ValueError as error:
             raise RpcError(-32602, str(error)) from error
 
+    def delete_source(params: JsonValue) -> JsonValue:
+        values = require_object_params(params)
+        service = _require_source_import_service(source_imports)
+        source_id = _required_str(values, "sourceId")
+        try:
+            return service.delete_source(source_id)  # type: ignore[return-value]
+        except ValueError as error:
+            raise RpcError(-32602, str(error)) from error
+
     async def build_index(params: JsonValue) -> JsonValue:
         values = require_object_params(params)
         service = _require_indexing_service(indexes)
@@ -285,6 +294,32 @@ def create_server(
         embedding_model = _optional_str(values, "embeddingModel", DEFAULT_EMBEDDING_MODEL)
         try:
             return await service.build_index(
+                knowledge_base_id,
+                api_key=api_key,
+                base_url=base_url,
+                embedding_model=embedding_model,
+            )  # type: ignore[return-value]
+        except ValueError as error:
+            raise RpcError(-32602, str(error)) from error
+
+    def delete_indexes(params: JsonValue) -> JsonValue:
+        values = require_object_params(params)
+        service = _require_indexing_service(indexes)
+        knowledge_base_id = _required_str(values, "knowledgeBaseId")
+        try:
+            return service.delete_indexes(knowledge_base_id)  # type: ignore[return-value]
+        except ValueError as error:
+            raise RpcError(-32602, str(error)) from error
+
+    async def rebuild_index(params: JsonValue) -> JsonValue:
+        values = require_object_params(params)
+        service = _require_indexing_service(indexes)
+        knowledge_base_id = _required_str(values, "knowledgeBaseId")
+        api_key = _optional_nullable_str(values, "apiKey")
+        base_url = _optional_str(values, "baseUrl", DEFAULT_ARK_BASE_URL)
+        embedding_model = _optional_str(values, "embeddingModel", DEFAULT_EMBEDDING_MODEL)
+        try:
+            return await service.rebuild_index(
                 knowledge_base_id,
                 api_key=api_key,
                 base_url=base_url,
@@ -354,7 +389,10 @@ def create_server(
     server.register("sources.import_file", import_file)
     server.register("sources.import_web", import_web)
     server.register("sources.parse_checks", parse_checks)
+    server.register("sources.delete", delete_source)
     server.register("indexes.build", build_index)
+    server.register("indexes.delete", delete_indexes)
+    server.register("indexes.rebuild", rebuild_index)
     server.register("indexes.status", index_status)
     server.register("retrieval.hybrid_search", hybrid_search)
     return server
