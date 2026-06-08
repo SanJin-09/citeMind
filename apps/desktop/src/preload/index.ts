@@ -47,16 +47,30 @@ const api: DesktopApi = {
       ipcRenderer.invoke(IPC_CHANNELS.importWebSource, request),
     parseChecks: (knowledgeBaseId) =>
       ipcRenderer.invoke(IPC_CHANNELS.listParseChecks, knowledgeBaseId),
+    delete: (sourceId) =>
+      ipcRenderer.invoke(IPC_CHANNELS.deleteSource, sourceId),
   },
   indexes: {
     build: (knowledgeBaseId) =>
       ipcRenderer.invoke(IPC_CHANNELS.buildIndex, knowledgeBaseId),
+    delete: (knowledgeBaseId) =>
+      ipcRenderer.invoke(IPC_CHANNELS.deleteIndex, knowledgeBaseId),
+    rebuild: (knowledgeBaseId) =>
+      ipcRenderer.invoke(IPC_CHANNELS.rebuildIndex, knowledgeBaseId),
     status: (knowledgeBaseId) =>
       ipcRenderer.invoke(IPC_CHANNELS.getIndexStatus, knowledgeBaseId),
   },
   retrieval: {
     hybridSearch: (request) =>
       ipcRenderer.invoke(IPC_CHANNELS.hybridSearch, request),
+  },
+  conversations: {
+    list: (knowledgeBaseId) =>
+      ipcRenderer.invoke(IPC_CHANNELS.listConversations, knowledgeBaseId),
+    messages: (conversationId) =>
+      ipcRenderer.invoke(IPC_CHANNELS.conversationMessages, conversationId),
+    answer: (request) =>
+      ipcRenderer.invoke(IPC_CHANNELS.answerConversation, request),
   },
 };
 

@@ -52,7 +52,9 @@ export class PythonWorkerManager {
     params: Record<string, unknown> = {},
     timeoutMs = 10_000,
   ): Promise<T> {
-    await this.start();
+    if (!this.rpc || this.workerProcess?.exitCode !== null) {
+      await this.start();
+    }
     if (!this.rpc) {
       throw new Error("Python Worker is not connected");
     }

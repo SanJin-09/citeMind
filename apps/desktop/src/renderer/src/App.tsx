@@ -1,8 +1,13 @@
 import { useCallback, useEffect, useState } from "react";
 import type {
+  AnswerCitation,
   BackgroundJobRecord,
   BackgroundJobStatus,
   BuildIndexResponse,
+  ConversationAnswerResponse,
+  ConversationMessageRecord,
+  ConversationRecord,
+  HybridSearchResult,
   KnowledgeBaseRecord,
   KnowledgeBaseSource,
   ModelCapabilityStatus,
@@ -36,11 +41,29 @@ type IconName =
   | "search"
   | "send"
   | "settings"
-  | "sparkle";
+  | "sparkle"
+  | "trash";
 
 type SourceTone = "amber" | "blue" | "violet" | "green";
 
 type KnowledgeBaseDialogMode = "create" | "rename" | "delete";
+
+type ConfirmAction =
+  | { kind: "delete-source"; source: KnowledgeBaseSource }
+  | { kind: "delete-index" }
+  | { kind: "rebuild-index" };
+
+type EvidenceSelection =
+  | {
+      kind: "citation";
+      citation: AnswerCitation;
+      retrievalResult?: HybridSearchResult;
+      response?: ConversationAnswerResponse;
+    }
+  | {
+      kind: "search";
+      result: HybridSearchResult;
+    };
 
 const SUGGESTIONS = [
   "总结当前知识库的核心架构决策",
@@ -263,6 +286,7 @@ function Icon({
     sparkle: (
       <path d="m12 3 1.6 4.4L18 9l-4.4 1.6L12 15l-1.6-4.4L6 9l4.4-1.6ZM19 15l.8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8Z" />
     ),
+    trash: <path d="M4 7h16M10 11v6M14 11v6M6 7l1 14h10l1-14M9 7V4h6v3" />,
   };
 
   return (
@@ -287,15 +311,14 @@ function App(): React.JSX.Element {
   const [knowledgeBases, setKnowledgeBases] = useState<KnowledgeBaseRecord[]>(
     FALLBACK_KNOWLEDGE_BASES,
   );
-  const [activeKnowledgeBaseId, setActiveKnowledgeBaseId] = useState(
-    FALLBACK_KNOWLEDGE_BASES[0]?.id ?? "",
-  );
+  const [activeKnowledgeBaseId, setActiveKnowledgeBaseId] = useState("");
   const [sources, setSources] =
     useState<KnowledgeBaseSource[]>(FALLBACK_SOURCES);
   const [selectedSourceIds, setSelectedSourceIds] = useState(
     FALLBACK_SOURCES.map((source) => source.id),
   );
   const [jobs, setJobs] = useState<BackgroundJobRecord[]>(FALLBACK_JOBS);
+  const [jobsPanelOpen, setJobsPanelOpen] = useState(true);
   const [jobBusyId, setJobBusyId] = useState("");
   const [jobError, setJobError] = useState("");
   const [parseChecks, setParseChecks] = useState<ParseCheckItem[]>(
@@ -304,11 +327,17 @@ function App(): React.JSX.Element {
   const [parseSummary, setParseSummary] = useState<ParseCheckSummary>(
     summarizeParseChecks(FALLBACK_PARSE_CHECKS),
   );
+  const [parsePanelOpen, setParsePanelOpen] = useState(true);
   const [indexStatus, setIndexStatus] = useState<BuildIndexResponse | null>(
     null,
   );
   const [indexBusy, setIndexBusy] = useState(false);
   const [indexError, setIndexError] = useState("");
+  const [sourceDeleteBusyId, setSourceDeleteBusyId] = useState("");
+  const [confirmAction, setConfirmAction] = useState<ConfirmAction | null>(
+    null,
+  );
+  const [confirmError, setConfirmError] = useState("");
   const [importBusy, setImportBusy] = useState(false);
   const [importError, setImportError] = useState("");
   const [webImportOpen, setWebImportOpen] = useState(false);
@@ -317,9 +346,24 @@ function App(): React.JSX.Element {
     displayName: "",
   });
   const [query, setQuery] = useState("");
+  const [searchQuery, setSearchQuery] = useState("");
+  const [lastSearchQuery, setLastSearchQuery] = useState("");
+  const [searchResults, setSearchResults] = useState<HybridSearchResult[]>([]);
+  const [searchBusy, setSearchBusy] = useState(false);
+  const [searchError, setSearchError] = useState("");
+  const [conversationId, setConversationId] = useState<string | null>(null);
+  const [conversations, setConversations] = useState<ConversationRecord[]>([]);
+  const [messages, setMessages] = useState<ConversationMessageRecord[]>([]);
+  const [answerResponses, setAnswerResponses] = useState<
+    Record<string, ConversationAnswerResponse>
+  >({});
+  const [chatBusy, setChatBusy] = useState(false);
+  const [chatError, setChatError] = useState("");
+  const [selectedEvidence, setSelectedEvidence] =
+    useState<EvidenceSelection | null>(null);
+  const [sourceJumpNotice, setSourceJumpNotice] = useState("");
   const [evidenceOpen, setEvidenceOpen] = useState(true);
   const [systemOpen, setSystemOpen] = useState(false);
-  const [sentQuestion, setSentQuestion] = useState("");
   const [knowledgeBaseMenuOpen, setKnowledgeBaseMenuOpen] = useState(false);
   const [knowledgeBaseDialog, setKnowledgeBaseDialog] =
     useState<KnowledgeBaseDialogMode | null>(null);
@@ -409,6 +453,7 @@ function App(): React.JSX.Element {
       try {
         const result = await getDesktopApi().knowledgeBases.list();
         setKnowledgeBases(result.knowledgeBases);
+        setKnowledgeBaseError("");
         const next =
           result.knowledgeBases.find((item) => item.id === preferredId) ??
           result.knowledgeBases[0];
@@ -484,27 +529,49 @@ function App(): React.JSX.Element {
     }
   }, []);
 
+  const loadConversations = useCallback(async (knowledgeBaseId: string) => {
+    if (!knowledgeBaseId) {
+      setConversations([]);
+      return;
+    }
+    try {
+      const result = await getDesktopApi().conversations.list(knowledgeBaseId);
+      setConversations(result.conversations);
+      setChatError("");
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "对话列表读取失败";
+      if (!message.includes("Preload IPC")) {
+        setChatError(message);
+      }
+    }
+  }, []);
+
   useEffect(() => {
     void checkHealth();
     void loadSeedStatus();
-    void loadKnowledgeBases(activeKnowledgeBaseId);
     void loadJobs();
+    void loadKnowledgeBases();
+  }, [checkHealth, loadJobs, loadKnowledgeBases, loadSeedStatus]);
+
+  useEffect(() => {
+    if (!activeKnowledgeBaseId) {
+      return;
+    }
+    void loadConversations(activeKnowledgeBaseId);
     void loadParseChecks(activeKnowledgeBaseId);
     void loadIndexStatus(activeKnowledgeBaseId);
   }, [
     activeKnowledgeBaseId,
-    checkHealth,
+    loadConversations,
     loadIndexStatus,
-    loadJobs,
-    loadKnowledgeBases,
     loadParseChecks,
-    loadSeedStatus,
   ]);
 
   const online = worker.kind === "online";
 
   useEffect(() => {
-    if (!online) {
+    if (!online || !activeKnowledgeBaseId || chatBusy) {
       return;
     }
     const timer = window.setInterval(() => {
@@ -519,6 +586,7 @@ function App(): React.JSX.Element {
     loadJobs,
     loadParseChecks,
     online,
+    chatBusy,
   ]);
 
   const activeKnowledgeBase =
@@ -527,6 +595,8 @@ function App(): React.JSX.Element {
   const selectedCount = selectedSourceIds.length;
   const sourceSummary =
     activeKnowledgeBase?.summary ?? emptyKnowledgeBaseSummary();
+  const focusedSourceId = evidenceSourceId(selectedEvidence);
+  const hasStartedConversation = messages.length > 0 || chatBusy;
 
   const toggleSource = (id: string): void => {
     setSelectedSourceIds((items) =>
@@ -534,11 +604,171 @@ function App(): React.JSX.Element {
     );
   };
 
-  const submitQuestion = (): void => {
-    const value = query.trim();
-    if (!value) return;
-    setSentQuestion(value);
+  const resetConversationWorkspace = (): void => {
+    setConversationId(null);
+    setMessages([]);
+    setAnswerResponses({});
+    setSelectedEvidence(null);
+    setSourceJumpNotice("");
+    setChatError("");
+    setSearchQuery("");
+    setLastSearchQuery("");
+    setSearchResults([]);
+    setSearchError("");
+  };
+
+  const startNewConversation = (): void => {
+    resetConversationWorkspace();
     setQuery("");
+  };
+
+  const openConversation = async (
+    targetConversationId: string,
+  ): Promise<void> => {
+    setChatBusy(true);
+    setChatError("");
+    try {
+      const result =
+        await getDesktopApi().conversations.messages(targetConversationId);
+      setConversationId(result.conversation.id);
+      setMessages(result.messages);
+      setAnswerResponses({});
+      setSelectedEvidence(null);
+      setSourceJumpNotice("");
+    } catch (error) {
+      setChatError(error instanceof Error ? error.message : "对话读取失败");
+    } finally {
+      setChatBusy(false);
+    }
+  };
+
+  const runSearch = async (): Promise<void> => {
+    const value = searchQuery.trim();
+    if (!value || searchBusy) {
+      return;
+    }
+    if (!activeKnowledgeBaseId) {
+      setSearchError("请先选择知识库");
+      return;
+    }
+    setSearchBusy(true);
+    setSearchError("");
+    try {
+      const response = await getDesktopApi().retrieval.hybridSearch({
+        knowledgeBaseId: activeKnowledgeBaseId,
+        query: value,
+        limit: 8,
+        candidateLimit: 24,
+      });
+      setLastSearchQuery(value);
+      setSearchResults(response.results);
+      if (response.results.length === 0) {
+        setSearchError("当前知识库没有检索到可引用片段");
+      }
+    } catch (error) {
+      setSearchError(error instanceof Error ? error.message : "资料搜索失败");
+    } finally {
+      setSearchBusy(false);
+    }
+  };
+
+  const selectCitation = (
+    citation: AnswerCitation,
+    response?: ConversationAnswerResponse,
+  ): void => {
+    setSelectedEvidence({
+      kind: "citation",
+      citation,
+      response,
+      retrievalResult: response
+        ? retrievalResultForCitation(response, citation)
+        : undefined,
+    });
+    setSourceJumpNotice("");
+    setEvidenceOpen(true);
+  };
+
+  const selectSearchResult = (result: HybridSearchResult): void => {
+    setSelectedEvidence({ kind: "search", result });
+    setSourceJumpNotice("");
+    setEvidenceOpen(true);
+  };
+
+  const focusEvidenceSource = (selection: EvidenceSelection): void => {
+    const sourceId = evidenceSourceId(selection);
+    if (!sourceId) {
+      return;
+    }
+    setSelectedSourceIds((items) =>
+      items.includes(sourceId) ? items : [...items, sourceId],
+    );
+    setSourceJumpNotice(
+      `已定位到来源列表：${evidenceDisplayName(selection)} · ${evidenceLocationLabel(selection)}`,
+    );
+    window.requestAnimationFrame(() => {
+      document
+        .getElementById(`source-${sourceId}`)
+        ?.scrollIntoView({ block: "center", behavior: "smooth" });
+    });
+  };
+
+  const submitQuestion = async (): Promise<void> => {
+    const value = query.trim();
+    if (!value || chatBusy) {
+      return;
+    }
+    if (!activeKnowledgeBaseId) {
+      setChatError("请先选择知识库");
+      return;
+    }
+    if (!seedStatus?.configured) {
+      setChatError("请先在设置中配置 Ark API Key");
+      return;
+    }
+    setChatBusy(true);
+    setChatError("");
+    setQuery("");
+    setSearchQuery("");
+    setLastSearchQuery("");
+    setSearchResults([]);
+    setSearchError("");
+    setSelectedEvidence(null);
+    setSourceJumpNotice("");
+    try {
+      const response = await getDesktopApi().conversations.answer({
+        knowledgeBaseId: activeKnowledgeBaseId,
+        query: value,
+        conversationId,
+        limit: 8,
+        candidateLimit: 24,
+      });
+      setConversationId(response.conversation.id);
+      setConversations((items) =>
+        upsertConversation(items, response.conversation),
+      );
+      setMessages((items) =>
+        uniqueMessages([
+          ...items,
+          response.userMessage,
+          response.assistantMessage,
+        ]),
+      );
+      setAnswerResponses((items) => ({
+        ...items,
+        [response.assistantMessage.id]: response,
+      }));
+      if (response.citations[0]) {
+        selectCitation(response.citations[0], response);
+      } else {
+        setSelectedEvidence(null);
+        setSourceJumpNotice("");
+      }
+    } catch (error) {
+      setQuery(value);
+      setChatError(error instanceof Error ? error.message : "回答生成失败");
+    } finally {
+      setChatBusy(false);
+    }
   };
 
   const switchKnowledgeBase = async (
@@ -547,8 +777,13 @@ function App(): React.JSX.Element {
     setActiveKnowledgeBaseId(knowledgeBaseId);
     setKnowledgeBaseMenuOpen(false);
     setKnowledgeBaseError("");
+    resetConversationWorkspace();
+    setSearchResults([]);
+    setLastSearchQuery("");
+    setSearchError("");
     try {
       await loadSources(knowledgeBaseId);
+      await loadConversations(knowledgeBaseId);
     } catch (error) {
       setKnowledgeBaseError(
         error instanceof Error ? error.message : "知识库切换失败",
@@ -585,28 +820,42 @@ function App(): React.JSX.Element {
           description: knowledgeBaseForm.description || null,
         });
         setKnowledgeBaseDialog(null);
+        resetConversationWorkspace();
+        setSearchResults([]);
+        setLastSearchQuery("");
         await loadKnowledgeBases(created.id);
       }
-      if (knowledgeBaseDialog === "rename" && activeKnowledgeBase) {
+      if (
+        knowledgeBaseDialog === "rename" &&
+        activeKnowledgeBase &&
+        activeKnowledgeBaseId
+      ) {
         const renamed = await getDesktopApi().knowledgeBases.rename({
-          knowledgeBaseId: activeKnowledgeBase.id,
+          knowledgeBaseId: activeKnowledgeBaseId,
           name: knowledgeBaseForm.name,
           description: knowledgeBaseForm.description || null,
         });
         setKnowledgeBaseDialog(null);
         await loadKnowledgeBases(renamed.id);
       }
-      if (knowledgeBaseDialog === "delete" && activeKnowledgeBase) {
+      if (
+        knowledgeBaseDialog === "delete" &&
+        activeKnowledgeBase &&
+        activeKnowledgeBaseId
+      ) {
         if (knowledgeBaseForm.confirmName !== activeKnowledgeBase.name) {
           throw new Error("请输入完整知识库名称以确认删除");
         }
         const result = await getDesktopApi().knowledgeBases.delete(
-          activeKnowledgeBase.id,
+          activeKnowledgeBaseId,
         );
         const next = result.knowledgeBases[0];
         setKnowledgeBaseDialog(null);
         setKnowledgeBases(result.knowledgeBases);
         setActiveKnowledgeBaseId(next?.id ?? "");
+        resetConversationWorkspace();
+        setSearchResults([]);
+        setLastSearchQuery("");
         if (next) {
           await loadSources(next.id);
         } else {
@@ -663,7 +912,7 @@ function App(): React.JSX.Element {
   };
 
   const importFiles = async (): Promise<void> => {
-    if (!activeKnowledgeBase) {
+    if (!activeKnowledgeBaseId) {
       setImportError("请先选择知识库");
       return;
     }
@@ -671,10 +920,10 @@ function App(): React.JSX.Element {
     setImportError("");
     try {
       const result = await getDesktopApi().sources.importFiles(
-        activeKnowledgeBase.id,
+        activeKnowledgeBaseId,
       );
       if (!result.cancelled) {
-        await refreshImportState(activeKnowledgeBase.id);
+        await refreshImportState(activeKnowledgeBaseId);
       }
     } catch (error) {
       setImportError(error instanceof Error ? error.message : "文件导入失败");
@@ -684,7 +933,7 @@ function App(): React.JSX.Element {
   };
 
   const importWebSource = async (): Promise<void> => {
-    if (!activeKnowledgeBase) {
+    if (!activeKnowledgeBaseId) {
       setImportError("请先选择知识库");
       return;
     }
@@ -692,13 +941,13 @@ function App(): React.JSX.Element {
     setImportError("");
     try {
       await getDesktopApi().sources.importWeb({
-        knowledgeBaseId: activeKnowledgeBase.id,
+        knowledgeBaseId: activeKnowledgeBaseId,
         url: webImportForm.url,
         displayName: webImportForm.displayName || null,
       });
       setWebImportOpen(false);
       setWebImportForm({ url: "", displayName: "" });
-      await refreshImportState(activeKnowledgeBase.id);
+      await refreshImportState(activeKnowledgeBaseId);
     } catch (error) {
       setImportError(error instanceof Error ? error.message : "网页导入失败");
     } finally {
@@ -707,22 +956,126 @@ function App(): React.JSX.Element {
   };
 
   const buildIndex = async (): Promise<void> => {
-    if (!activeKnowledgeBase) {
+    if (!activeKnowledgeBaseId) {
       setIndexError("请先选择知识库");
       return;
     }
     setIndexBusy(true);
     setIndexError("");
     try {
-      const result = await getDesktopApi().indexes.build(
-        activeKnowledgeBase.id,
-      );
+      const result = await getDesktopApi().indexes.build(activeKnowledgeBaseId);
       setIndexStatus(result);
-      await refreshImportState(activeKnowledgeBase.id);
+      await refreshImportState(activeKnowledgeBaseId);
     } catch (error) {
       setIndexError(error instanceof Error ? error.message : "索引构建失败");
     } finally {
       setIndexBusy(false);
+    }
+  };
+
+  const deleteSource = async (source: KnowledgeBaseSource): Promise<void> => {
+    setSourceDeleteBusyId(source.id);
+    setConfirmError("");
+    setImportError("");
+    try {
+      await getDesktopApi().sources.delete(source.id);
+      setSelectedSourceIds((items) =>
+        items.filter((sourceId) => sourceId !== source.id),
+      );
+      setSearchResults((items) =>
+        items.filter((result) => result.source.id !== source.id),
+      );
+      setMessages((items) =>
+        items.map((message) => ({
+          ...message,
+          citations: message.citations.filter(
+            (citation) => citation.source.id !== source.id,
+          ),
+        })),
+      );
+      setAnswerResponses({});
+      if (evidenceSourceId(selectedEvidence) === source.id) {
+        setSelectedEvidence(null);
+        setSourceJumpNotice("");
+      }
+      if (activeKnowledgeBaseId) {
+        await refreshImportState(activeKnowledgeBaseId);
+      }
+      setConfirmAction(null);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "来源删除失败";
+      setConfirmError(message);
+      setImportError(message);
+    } finally {
+      setSourceDeleteBusyId("");
+    }
+  };
+
+  const deleteIndex = async (): Promise<void> => {
+    if (!activeKnowledgeBaseId) {
+      setConfirmError("请先选择知识库");
+      return;
+    }
+    setIndexBusy(true);
+    setIndexError("");
+    setConfirmError("");
+    try {
+      setIndexStatus(
+        await getDesktopApi().indexes.delete(activeKnowledgeBaseId),
+      );
+      setSearchResults([]);
+      setLastSearchQuery("");
+      setSelectedEvidence(null);
+      setSourceJumpNotice("");
+      await refreshImportState(activeKnowledgeBaseId);
+      setConfirmAction(null);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "索引删除失败";
+      setConfirmError(message);
+      setIndexError(message);
+    } finally {
+      setIndexBusy(false);
+    }
+  };
+
+  const rebuildIndex = async (): Promise<void> => {
+    if (!activeKnowledgeBaseId) {
+      setConfirmError("请先选择知识库");
+      return;
+    }
+    setIndexBusy(true);
+    setIndexError("");
+    setConfirmError("");
+    try {
+      setIndexStatus(
+        await getDesktopApi().indexes.rebuild(activeKnowledgeBaseId),
+      );
+      setSearchResults([]);
+      setLastSearchQuery("");
+      setSelectedEvidence(null);
+      setSourceJumpNotice("");
+      await refreshImportState(activeKnowledgeBaseId);
+      setConfirmAction(null);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "索引重构失败";
+      setConfirmError(message);
+      setIndexError(message);
+    } finally {
+      setIndexBusy(false);
+    }
+  };
+
+  const submitConfirmAction = async (): Promise<void> => {
+    if (confirmAction?.kind === "delete-source") {
+      await deleteSource(confirmAction.source);
+      return;
+    }
+    if (confirmAction?.kind === "delete-index") {
+      await deleteIndex();
+      return;
+    }
+    if (confirmAction?.kind === "rebuild-index") {
+      await rebuildIndex();
     }
   };
 
@@ -844,8 +1197,19 @@ function App(): React.JSX.Element {
         </div>
         <label className="global-search">
           <Icon name="search" size={17} />
-          <input aria-label="搜索知识库" placeholder="搜索知识库中的资料" />
-          <kbd>⌘ K</kbd>
+          <input
+            aria-label="搜索知识库"
+            placeholder="关键词或自然语言搜索资料"
+            value={searchQuery}
+            onChange={(event) => setSearchQuery(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") {
+                event.preventDefault();
+                void runSearch();
+              }
+            }}
+          />
+          <kbd>{searchBusy ? "..." : "↵"}</kbd>
         </label>
         <div className="top-actions">
           <button
@@ -858,7 +1222,12 @@ function App(): React.JSX.Element {
           >
             <Icon name="settings" size={17} /> 设置
           </button>
-          <button className="button primary" type="button">
+          <button
+            className="button primary"
+            disabled={chatBusy}
+            type="button"
+            onClick={startNewConversation}
+          >
             <Icon name="add" size={17} /> 新建对话
           </button>
           <button className="avatar" aria-label="账户" type="button">
@@ -915,27 +1284,45 @@ function App(): React.JSX.Element {
           <div className="source-list">
             {sources.length > 0 ? (
               sources.map((source) => (
-                <button
+                <article
                   className={`source-item ${
                     selectedSourceIds.includes(source.id) ? "selected" : ""
-                  }`}
+                  } ${focusedSourceId === source.id ? "focused" : ""}`}
+                  id={`source-${source.id}`}
                   key={source.id}
-                  type="button"
-                  onClick={() => toggleSource(source.id)}
                 >
-                  <span className={`source-icon ${sourceTone(source)}`}>
-                    <Icon name="document" size={17} />
-                  </span>
-                  <span className="source-copy">
-                    <strong>{source.displayName}</strong>
-                    <small>{sourceMeta(source)}</small>
-                  </span>
-                  <span className="source-check">
-                    {selectedSourceIds.includes(source.id) && (
-                      <Icon name="check" size={14} />
-                    )}
-                  </span>
-                </button>
+                  <button
+                    className="source-main"
+                    type="button"
+                    onClick={() => toggleSource(source.id)}
+                  >
+                    <span className={`source-icon ${sourceTone(source)}`}>
+                      <Icon name="document" size={17} />
+                    </span>
+                    <span className="source-copy">
+                      <strong>{source.displayName}</strong>
+                      <small>{sourceMeta(source)}</small>
+                    </span>
+                    <span className="source-check">
+                      {selectedSourceIds.includes(source.id) && (
+                        <Icon name="check" size={14} />
+                      )}
+                    </span>
+                  </button>
+                  <button
+                    aria-label={`删除来源 ${source.displayName}`}
+                    className="source-delete"
+                    disabled={Boolean(sourceDeleteBusyId)}
+                    title="删除来源"
+                    type="button"
+                    onClick={() => {
+                      setConfirmError("");
+                      setConfirmAction({ kind: "delete-source", source });
+                    }}
+                  >
+                    <Icon name="trash" size={15} />
+                  </button>
+                </article>
               ))
             ) : (
               <div className="empty-source-state">
@@ -949,28 +1336,68 @@ function App(): React.JSX.Element {
             {sourceStatusLine(sourceSummary.sourcesByStatus)}
             <Icon name="chevron" size={15} />
           </button>
-          <ParseCheckPanel
-            busy={importBusy}
-            error={importError}
-            indexBusy={indexBusy}
-            indexError={indexError}
-            indexStatus={indexStatus}
-            items={parseChecks}
-            summary={parseSummary}
-            onBuildIndex={() => void buildIndex()}
-            onRefresh={() => void loadParseChecks(activeKnowledgeBaseId)}
-          />
-          <JobProgressPanel
-            busyJobId={jobBusyId}
-            error={jobError}
-            jobs={jobs}
-            onCancel={(jobId) => void handleJobAction(jobId, "cancel")}
-            onPause={(jobId) => void handleJobAction(jobId, "pause")}
-            onRecover={() => void handleJobAction("", "recover")}
-            onRefresh={() => void loadJobs()}
-            onResume={(jobId) => void handleJobAction(jobId, "resume")}
-            onRetry={(jobId) => void handleJobAction(jobId, "retry")}
-          />
+          {parsePanelOpen && (
+            <ParseCheckPanel
+              busy={importBusy}
+              error={importError}
+              indexBusy={indexBusy}
+              indexError={indexError}
+              indexStatus={indexStatus}
+              items={parseChecks}
+              summary={parseSummary}
+              onBuildIndex={() => void buildIndex()}
+              onCollapse={() => setParsePanelOpen(false)}
+              onDeleteIndex={() => {
+                setConfirmError("");
+                setConfirmAction({ kind: "delete-index" });
+              }}
+              onRefresh={() => void loadParseChecks(activeKnowledgeBaseId)}
+              onRebuildIndex={() => {
+                setConfirmError("");
+                setConfirmAction({ kind: "rebuild-index" });
+              }}
+            />
+          )}
+          {jobsPanelOpen && (
+            <JobProgressPanel
+              busyJobId={jobBusyId}
+              error={jobError}
+              jobs={jobs}
+              onCancel={(jobId) => void handleJobAction(jobId, "cancel")}
+              onCollapse={() => setJobsPanelOpen(false)}
+              onPause={(jobId) => void handleJobAction(jobId, "pause")}
+              onRecover={() => void handleJobAction("", "recover")}
+              onRefresh={() => void loadJobs()}
+              onResume={(jobId) => void handleJobAction(jobId, "resume")}
+              onRetry={(jobId) => void handleJobAction(jobId, "retry")}
+            />
+          )}
+          {(!parsePanelOpen || !jobsPanelOpen) && (
+            <div className="collapsed-source-panels">
+              {!parsePanelOpen && (
+                <button type="button" onClick={() => setParsePanelOpen(true)}>
+                  <Icon name="check" size={15} />
+                  <span>
+                    <strong>导入检查</strong>
+                    <small>
+                      成功 {parseSummary.success} · 失败 {parseSummary.failed}
+                    </small>
+                  </span>
+                  <Icon name="chevron" size={14} />
+                </button>
+              )}
+              {!jobsPanelOpen && (
+                <button type="button" onClick={() => setJobsPanelOpen(true)}>
+                  <Icon name="panel" size={15} />
+                  <span>
+                    <strong>后台任务</strong>
+                    <small>{jobs.length} 个未完成</small>
+                  </span>
+                  <Icon name="chevron" size={14} />
+                </button>
+              )}
+            </div>
+          )}
         </aside>
 
         <section className="panel chat-panel">
@@ -979,71 +1406,120 @@ function App(): React.JSX.Element {
             title="对话"
             subtitle={`${selectedCount} 个来源参与检索`}
           />
-          <div className="chat-scroll">
-            <div className="welcome-block">
-              <span className="welcome-icon">
-                <Icon name="sparkle" size={25} />
-              </span>
-              <p className="eyebrow">{activeKnowledgeBase?.name ?? "知识库"}</p>
-              <h1>从当前知识库获得可验证的答案</h1>
-              <p className="welcome-summary">
-                文档、索引和对话都绑定到当前知识库。切换知识库后，来源列表、引用证据和后续检索上下文会随之隔离。
-              </p>
-              <div className="overview-metrics">
-                <span>
-                  <strong>{sourceSummary.sourceCount}</strong> 个来源
+          <div
+            className={`chat-scroll ${
+              hasStartedConversation ? "conversation-active" : ""
+            }`}
+          >
+            {!hasStartedConversation && (
+              <div className="welcome-block">
+                <span className="welcome-icon">
+                  <Icon name="sparkle" size={25} />
                 </span>
-                <span>
-                  <strong>{selectedCount}</strong> 个已选择
-                </span>
-                <span>
-                  <strong>{sourceSummary.readyIndexCount}</strong> 个可用索引
-                </span>
-                <span>
-                  <strong>{sourceSummary.conversationCount}</strong> 个对话
-                </span>
+                <p className="eyebrow">
+                  {activeKnowledgeBase?.name ?? "知识库"}
+                </p>
+                <h1>从当前知识库获得可验证的答案</h1>
+                <p className="welcome-summary">
+                  文档、索引和对话都绑定到当前知识库。切换知识库后，来源列表、引用证据和后续检索上下文会随之隔离。
+                </p>
+                <div className="overview-metrics">
+                  <span>
+                    <strong>{sourceSummary.sourceCount}</strong> 个来源
+                  </span>
+                  <span>
+                    <strong>{selectedCount}</strong> 个已选择
+                  </span>
+                  <span>
+                    <strong>{sourceSummary.readyIndexCount}</strong> 个可用索引
+                  </span>
+                  <span>
+                    <strong>{sourceSummary.conversationCount}</strong> 个对话
+                  </span>
+                </div>
               </div>
-            </div>
+            )}
 
-            {sentQuestion && (
+            {!hasStartedConversation && conversations.length > 0 && (
+              <ConversationStrip
+                activeConversationId={conversationId}
+                busy={chatBusy}
+                conversations={conversations}
+                onOpen={(id) => void openConversation(id)}
+              />
+            )}
+
+            {!hasStartedConversation &&
+              (searchBusy || searchError || searchResults.length > 0) && (
+                <SearchResultsPanel
+                  busy={searchBusy}
+                  error={searchError}
+                  query={lastSearchQuery || searchQuery}
+                  results={searchResults}
+                  selectedChunkId={selectedEvidenceChunkId(selectedEvidence)}
+                  onSelect={selectSearchResult}
+                />
+              )}
+
+            {chatError && (
               <div className="message-flow">
-                <p className="user-message">{sentQuestion}</p>
-                <article className="assistant-message">
+                <div className="inline-error">{chatError}</div>
+              </div>
+            )}
+
+            {messages.length > 0 && (
+              <div className="message-flow">
+                {messages.map((message) =>
+                  message.role === "user" ? (
+                    <p className="user-message" key={message.id}>
+                      {message.content}
+                    </p>
+                  ) : message.role === "assistant" ? (
+                    <AssistantAnswerMessage
+                      key={message.id}
+                      message={message}
+                      response={answerResponses[message.id]}
+                      selectedChunkId={selectedEvidenceChunkId(
+                        selectedEvidence,
+                      )}
+                      onSelectCitation={selectCitation}
+                    />
+                  ) : null,
+                )}
+              </div>
+            )}
+
+            {chatBusy && (
+              <div className="message-flow">
+                <article className="assistant-message loading-message">
                   <div className="assistant-heading">
                     <span className="mini-mark">
                       <Icon name="sparkle" size={15} />
                     </span>
                     <strong>citeMind</strong>
                   </div>
-                  <p>
-                    这是布局演示状态。问答管线接入后，这里将展示基于知识库检索结果生成的回答，并关联可定位的证据片段。
-                  </p>
-                  <button
-                    className="citation-chip"
-                    type="button"
-                    onClick={() => setEvidenceOpen(true)}
-                  >
-                    [1] RAG 产品与架构方案 · 证据优先
-                  </button>
+                  <p>正在检索当前知识库并校验引用...</p>
                 </article>
               </div>
             )}
 
-            <div className="suggestion-block">
-              <span className="section-label">建议提问</span>
-              <div className="suggestions">
-                {SUGGESTIONS.map((suggestion) => (
-                  <button
-                    key={suggestion}
-                    type="button"
-                    onClick={() => setQuery(suggestion)}
-                  >
-                    {suggestion}
-                    <Icon name="chevron" size={15} />
-                  </button>
-                ))}
+            {!hasStartedConversation && (
+              <div className="suggestion-block">
+                <span className="section-label">建议提问</span>
+                <div className="suggestions">
+                  {SUGGESTIONS.map((suggestion) => (
+                    <button
+                      key={suggestion}
+                      type="button"
+                      onClick={() => setQuery(suggestion)}
+                    >
+                      {suggestion}
+                      <Icon name="chevron" size={15} />
+                    </button>
+                  ))}
+                </div>
               </div>
-            </div>
+            )}
           </div>
           <div className="composer-wrap">
             <div className="composer">
@@ -1056,17 +1532,19 @@ function App(): React.JSX.Element {
                 onKeyDown={(event) => {
                   if (event.key === "Enter" && !event.shiftKey) {
                     event.preventDefault();
-                    submitQuestion();
+                    void submitQuestion();
                   }
                 }}
               />
-              <span className="composer-meta">{selectedCount} 个来源</span>
+              <span className="composer-meta">
+                {chatBusy ? "生成中" : `${selectedCount} 个来源`}
+              </span>
               <button
                 aria-label="发送问题"
                 className="send-button"
-                disabled={!query.trim()}
+                disabled={!query.trim() || chatBusy}
                 type="button"
-                onClick={submitQuestion}
+                onClick={() => void submitQuestion()}
               >
                 <Icon name="send" size={17} />
               </button>
@@ -1091,34 +1569,11 @@ function App(): React.JSX.Element {
             }
           />
           <div className="evidence-content">
-            <div className="evidence-empty">
-              <span className="evidence-illustration">
-                <Icon name="evidence" size={26} />
-              </span>
-              <h2>可信证据会显示在这里</h2>
-              <p>点击回答中的引用，即可查看原始片段、定位信息与检索相关度。</p>
-            </div>
-            <article className="evidence-card">
-              <div className="evidence-card-heading">
-                <span className="source-icon amber">
-                  <Icon name="document" size={16} />
-                </span>
-                <div>
-                  <strong>RAG 产品与架构方案</strong>
-                  <small>核心产品原则 · 证据优先</small>
-                </div>
-              </div>
-              <blockquote>
-                模型只能引用本次检索得到且经过后端校验的文本块。证据不足时，系统应明确说明知识库中没有足够信息。
-              </blockquote>
-              <div className="evidence-stats">
-                <span>证据强度：高</span>
-                <span>关键词命中：4</span>
-              </div>
-              <button className="button evidence-action" type="button">
-                打开原文位置 <Icon name="chevron" size={15} />
-              </button>
-            </article>
+            <EvidenceDetail
+              jumpNotice={sourceJumpNotice}
+              selection={selectedEvidence}
+              onFocusSource={focusEvidenceSource}
+            />
           </div>
         </aside>
 
@@ -1258,7 +1713,342 @@ function App(): React.JSX.Element {
           onSubmit={() => void submitKnowledgeBaseDialog()}
         />
       )}
+
+      {confirmAction && (
+        <ConfirmActionDialog
+          action={confirmAction}
+          busy={Boolean(sourceDeleteBusyId) || indexBusy}
+          error={confirmError}
+          onClose={() => {
+            if (!sourceDeleteBusyId && !indexBusy) {
+              setConfirmAction(null);
+            }
+          }}
+          onSubmit={() => void submitConfirmAction()}
+        />
+      )}
     </main>
+  );
+}
+
+function ConversationStrip({
+  activeConversationId,
+  busy,
+  conversations,
+  onOpen,
+}: {
+  activeConversationId: string | null;
+  busy: boolean;
+  conversations: ConversationRecord[];
+  onOpen: (conversationId: string) => void;
+}): React.JSX.Element {
+  return (
+    <section className="conversation-strip" aria-label="最近对话">
+      <div className="conversation-strip-heading">
+        <span className="section-label">对话工作区</span>
+        <small>{conversations.length} 个历史对话</small>
+      </div>
+      <div className="conversation-pills">
+        {conversations.slice(0, 5).map((conversation) => (
+          <button
+            className={conversation.id === activeConversationId ? "active" : ""}
+            disabled={busy}
+            key={conversation.id}
+            type="button"
+            onClick={() => onOpen(conversation.id)}
+          >
+            <strong>{conversation.title}</strong>
+            <small>{conversation.modelId ?? "未生成回答"}</small>
+          </button>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function SearchResultsPanel({
+  busy,
+  error,
+  query,
+  results,
+  selectedChunkId,
+  onSelect,
+}: {
+  busy: boolean;
+  error: string;
+  query: string;
+  results: HybridSearchResult[];
+  selectedChunkId?: string;
+  onSelect: (result: HybridSearchResult) => void;
+}): React.JSX.Element {
+  return (
+    <section className="search-results-panel" aria-label="资料搜索结果">
+      <div className="search-results-heading">
+        <div>
+          <span className="section-label">资料搜索</span>
+          <strong>{query ? `“${query}”` : "关键词 / 自然语言检索"}</strong>
+        </div>
+        <small>FTS5 + 向量混合召回</small>
+      </div>
+      {busy && <p className="search-status">正在检索当前知识库...</p>}
+      {error && <div className="inline-error">{error}</div>}
+      {results.length > 0 && (
+        <div className="search-result-list">
+          {results.map((result) => (
+            <button
+              className={`search-result-card ${
+                selectedChunkId === result.chunkId ? "selected" : ""
+              }`}
+              key={result.chunkId}
+              type="button"
+              onClick={() => onSelect(result)}
+            >
+              <span
+                className={`source-icon ${sourceToneFromType(result.source.type)}`}
+              >
+                <Icon name="document" size={16} />
+              </span>
+              <span className="search-result-copy">
+                <strong>{result.source.displayName}</strong>
+                <small>
+                  {sourceTypeLabel(result.source.type)} ·{" "}
+                  {formatLocation(result.source.type, result.location)}
+                </small>
+                <span>{result.text.preview}</span>
+              </span>
+              <span className="search-result-meta">
+                <small>#{result.ranks.fused}</small>
+                <small>{matchLabel(result)}</small>
+              </span>
+            </button>
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function AssistantAnswerMessage({
+  message,
+  response,
+  selectedChunkId,
+  onSelectCitation,
+}: {
+  message: ConversationMessageRecord;
+  response?: ConversationAnswerResponse;
+  selectedChunkId?: string;
+  onSelectCitation: (
+    citation: AnswerCitation,
+    response?: ConversationAnswerResponse,
+  ) => void;
+}): React.JSX.Element {
+  const citations = response?.citations ?? message.citations;
+  const paragraphs = response
+    ? response.answer.paragraphs
+    : message.content
+        .split(/\n{2,}/)
+        .filter(Boolean)
+        .map((text, index) => ({
+          index,
+          text,
+          evidenceChunkIds: citations
+            .filter((citation) => citation.paragraphIndex === index)
+            .map((citation) => citation.chunkId),
+        }));
+  const evidenceSufficient = response
+    ? response.answer.evidenceSufficient
+    : citations.length > 0;
+
+  return (
+    <article className="assistant-message">
+      <div className="assistant-heading">
+        <span className="mini-mark">
+          <Icon name="sparkle" size={15} />
+        </span>
+        <strong>citeMind</strong>
+      </div>
+      {!evidenceSufficient && (
+        <div className="evidence-warning">
+          证据不足：没有通过检索与引用校验的来源。
+        </div>
+      )}
+      <div className="answer-paragraphs">
+        {paragraphs.map((paragraph, paragraphIndex) => {
+          const paragraphCitations = citationsForParagraph(
+            citations,
+            paragraph.index,
+            paragraph.evidenceChunkIds,
+          );
+          return (
+            <section className="answer-paragraph" key={paragraph.index}>
+              <p>{paragraph.text}</p>
+              {paragraphCitations.length > 0 ? (
+                <div className="paragraph-evidence-list">
+                  {paragraphCitations.map((citation, citationIndex) => (
+                    <CitationEvidenceButton
+                      citation={citation}
+                      citationNumber={citationIndex + 1}
+                      key={`${paragraph.index}:${citation.chunkId}`}
+                      response={response}
+                      selected={selectedChunkId === citation.chunkId}
+                      onSelect={onSelectCitation}
+                    />
+                  ))}
+                </div>
+              ) : (
+                <span className="no-citation-note">
+                  {evidenceSufficient
+                    ? "此段没有可展示引用。"
+                    : "此段已按证据不足处理，不展示引用。"}
+                </span>
+              )}
+              <small className="paragraph-index">
+                段落 {paragraphIndex + 1}
+              </small>
+            </section>
+          );
+        })}
+      </div>
+      <div className="answer-meta">
+        <span>{message.modelId ?? response?.model.id ?? "历史回答"}</span>
+        <span>
+          {response
+            ? `检索候选 ${response.retrieval.retrieval.mergedCandidateCount}`
+            : `${citations.length} 条持久化引用`}
+        </span>
+        <span>
+          {!evidenceSufficient
+            ? "证据不足"
+            : response?.citationValidation.valid
+              ? "引用校验通过"
+              : "历史引用"}
+        </span>
+      </div>
+    </article>
+  );
+}
+
+function CitationEvidenceButton({
+  citation,
+  citationNumber,
+  response,
+  selected,
+  onSelect,
+}: {
+  citation: AnswerCitation;
+  citationNumber: number;
+  response?: ConversationAnswerResponse;
+  selected: boolean;
+  onSelect: (
+    citation: AnswerCitation,
+    response?: ConversationAnswerResponse,
+  ) => void;
+}): React.JSX.Element {
+  const retrievalResult = response
+    ? retrievalResultForCitation(response, citation)
+    : undefined;
+  return (
+    <button
+      className={`citation-evidence-card ${selected ? "selected" : ""}`}
+      type="button"
+      onClick={() => onSelect(citation, response)}
+    >
+      <span className="citation-evidence-heading">
+        <strong>
+          [{citationNumber}] {citation.source.displayName}
+        </strong>
+        <small>{formatLocation(citation.source.type, citation.location)}</small>
+      </span>
+      <span className="citation-quote">{citationQuote(citation)}</span>
+      <span className="citation-evidence-meta">
+        <small>证据强度：{evidenceStrength(retrievalResult)}</small>
+        <small>{retrievalLabel(retrievalResult)}</small>
+      </span>
+    </button>
+  );
+}
+
+function EvidenceDetail({
+  jumpNotice,
+  selection,
+  onFocusSource,
+}: {
+  jumpNotice: string;
+  selection: EvidenceSelection | null;
+  onFocusSource: (selection: EvidenceSelection) => void;
+}): React.JSX.Element {
+  if (!selection) {
+    return (
+      <div className="evidence-empty">
+        <span className="evidence-illustration">
+          <Icon name="evidence" size={26} />
+        </span>
+        <h2>可信证据会显示在这里</h2>
+        <p>点击回答中的引用，即可查看原始片段、定位信息与检索相关度。</p>
+      </div>
+    );
+  }
+
+  const source =
+    selection.kind === "citation"
+      ? selection.citation.source
+      : selection.result.source;
+  const location =
+    selection.kind === "citation"
+      ? selection.citation.location
+      : selection.result.location;
+  const retrievalResult =
+    selection.kind === "citation"
+      ? selection.retrievalResult
+      : selection.result;
+  const quote =
+    selection.kind === "citation"
+      ? citationQuote(selection.citation)
+      : resultQuote(selection.result);
+
+  return (
+    <>
+      <article className="evidence-card">
+        <div className="evidence-card-heading">
+          <span className={`source-icon ${sourceToneFromType(source.type)}`}>
+            <Icon name="document" size={16} />
+          </span>
+          <div>
+            <strong>{source.displayName}</strong>
+            <small>
+              {selection.kind === "citation" ? "回答引用" : "资料搜索结果"} ·{" "}
+              {sourceTypeLabel(source.type)}
+            </small>
+          </div>
+        </div>
+        <blockquote>{quote}</blockquote>
+        <div className="evidence-stats">
+          <span>证据强度：{evidenceStrength(retrievalResult)}</span>
+          <span>{retrievalLabel(retrievalResult)}</span>
+          <span>{matchLabel(retrievalResult)}</span>
+        </div>
+        <dl className="evidence-location-list">
+          {locationRows(source.type, location).map((row) => (
+            <div key={row.label}>
+              <dt>{row.label}</dt>
+              <dd>{row.value}</dd>
+            </div>
+          ))}
+        </dl>
+        <p className="evidence-explain">
+          {retrievalResult?.explanation.summary ??
+            "这是历史持久化引用，原回答检索解释未随消息列表加载。"}
+        </p>
+        {jumpNotice && <p className="source-jump-notice">{jumpNotice}</p>}
+        <button
+          className="button evidence-action"
+          type="button"
+          onClick={() => onFocusSource(selection)}
+        >
+          定位来源位置 <Icon name="chevron" size={15} />
+        </button>
+      </article>
+    </>
   );
 }
 
@@ -1267,6 +2057,7 @@ function JobProgressPanel({
   error,
   jobs,
   onCancel,
+  onCollapse,
   onPause,
   onRecover,
   onRefresh,
@@ -1277,6 +2068,7 @@ function JobProgressPanel({
   error: string;
   jobs: BackgroundJobRecord[];
   onCancel: (jobId: string) => void;
+  onCollapse: () => void;
   onPause: (jobId: string) => void;
   onRecover: () => void;
   onRefresh: () => void;
@@ -1301,6 +2093,14 @@ function JobProgressPanel({
           </button>
           <button className="icon-button" type="button" onClick={onRefresh}>
             <Icon name="refresh" size={15} />
+          </button>
+          <button
+            aria-label="收起后台任务"
+            className="icon-button"
+            type="button"
+            onClick={onCollapse}
+          >
+            <Icon name="chevron" size={15} />
           </button>
         </div>
       </div>
@@ -1399,7 +2199,10 @@ function ParseCheckPanel({
   items,
   summary,
   onBuildIndex,
+  onCollapse,
+  onDeleteIndex,
   onRefresh,
+  onRebuildIndex,
 }: {
   busy: boolean;
   error: string;
@@ -1409,7 +2212,10 @@ function ParseCheckPanel({
   items: ParseCheckItem[];
   summary: ParseCheckSummary;
   onBuildIndex: () => void;
+  onCollapse: () => void;
+  onDeleteIndex: () => void;
   onRefresh: () => void;
+  onRebuildIndex: () => void;
 }): React.JSX.Element {
   const indexableCount = items.filter((item) =>
     ["success", "processing"].includes(item.status),
@@ -1422,14 +2228,24 @@ function ParseCheckPanel({
           <strong>导入检查</strong>
           <span>{summary.total} 个来源</span>
         </div>
-        <button
-          className="icon-button"
-          disabled={busy}
-          type="button"
-          onClick={onRefresh}
-        >
-          <Icon name="refresh" size={15} />
-        </button>
+        <div className="job-heading-actions">
+          <button
+            className="icon-button"
+            disabled={busy}
+            type="button"
+            onClick={onRefresh}
+          >
+            <Icon name="refresh" size={15} />
+          </button>
+          <button
+            aria-label="收起导入检查"
+            className="icon-button"
+            type="button"
+            onClick={onCollapse}
+          >
+            <Icon name="chevron" size={15} />
+          </button>
+        </div>
       </div>
       <div className="parse-summary-grid">
         <span className="success">成功 {summary.success}</span>
@@ -1471,24 +2287,132 @@ function ParseCheckPanel({
       </div>
       {indexStatus?.indexVersion && (
         <div className="index-status-card">
-          <strong>
-            {indexStatus.ready ? "当前索引可检索" : "当前索引未就绪"}
-          </strong>
-          <span>
-            {indexStatus.indexVersion.chunkCount} chunks ·{" "}
-            {indexStatus.indexVersion.chunkingVersion}
-          </span>
+          <div>
+            <strong>
+              {indexStatus.ready ? "当前索引可检索" : "当前索引未就绪"}
+            </strong>
+            <span>
+              {indexStatus.indexVersion.chunkCount} chunks ·{" "}
+              {indexStatus.indexVersion.chunkingVersion}
+            </span>
+          </div>
+          <div className="index-card-actions">
+            <button
+              className="text-button danger-text"
+              disabled={indexBusy}
+              type="button"
+              onClick={onDeleteIndex}
+            >
+              删除索引
+            </button>
+            <button
+              className="text-button"
+              disabled={indexBusy || indexableCount === 0}
+              type="button"
+              onClick={onRebuildIndex}
+            >
+              {indexBusy ? "重构中..." : "重构索引"}
+            </button>
+          </div>
         </div>
       )}
-      <button
-        className="button primary parse-index-action"
-        disabled={indexBusy || indexableCount === 0}
-        type="button"
-        onClick={onBuildIndex}
-      >
-        {indexBusy ? "建立索引中..." : "开始建立索引"}
-      </button>
+      {!indexStatus?.indexVersion && (
+        <button
+          className="button primary parse-index-action"
+          disabled={indexBusy || indexableCount === 0}
+          type="button"
+          onClick={onBuildIndex}
+        >
+          {indexBusy ? "建立索引中..." : "开始建立索引"}
+        </button>
+      )}
     </section>
+  );
+}
+
+function ConfirmActionDialog({
+  action,
+  busy,
+  error,
+  onClose,
+  onSubmit,
+}: {
+  action: ConfirmAction;
+  busy: boolean;
+  error: string;
+  onClose: () => void;
+  onSubmit: () => void;
+}): React.JSX.Element {
+  const content =
+    action.kind === "delete-source"
+      ? {
+          eyebrow: "Source",
+          title: "删除已导入来源",
+          description: `将删除“${action.source.displayName}”的文件副本、解析产物、文本块、向量和历史引用。此操作无法撤销。`,
+          submitLabel: "删除来源",
+          busyLabel: "删除中...",
+          danger: true,
+        }
+      : action.kind === "delete-index"
+        ? {
+            eyebrow: "Index",
+            title: "删除当前知识库索引",
+            description:
+              "将删除关键词索引、向量索引和文本块，但保留已导入来源与解析产物，之后可直接重新构建。",
+            submitLabel: "删除索引",
+            busyLabel: "删除中...",
+            danger: true,
+          }
+        : {
+            eyebrow: "Index",
+            title: "重构当前知识库索引",
+            description:
+              "将使用当前解析结果和 Ark Embedding 模型构建新版本；成功前，现有索引仍可继续检索。",
+            submitLabel: "开始重构",
+            busyLabel: "重构中...",
+            danger: false,
+          };
+
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <section className="kb-dialog" role="dialog" aria-modal="true">
+        <header className="settings-heading">
+          <div>
+            <p className="eyebrow">{content.eyebrow}</p>
+            <h2>{content.title}</h2>
+            <span>{content.description}</span>
+          </div>
+          <button
+            aria-label="关闭确认弹窗"
+            className="icon-button"
+            disabled={busy}
+            type="button"
+            onClick={onClose}
+          >
+            <Icon name="close" size={17} />
+          </button>
+        </header>
+        {error && <div className="settings-error">{error}</div>}
+        <div className="settings-actions confirm-actions">
+          <button
+            className="button ghost"
+            disabled={busy}
+            type="button"
+            onClick={onClose}
+          >
+            取消
+          </button>
+          <button
+            className={`button ${content.danger ? "danger" : "primary"}`}
+            disabled={busy}
+            type="button"
+            onClick={onSubmit}
+          >
+            {busy ? content.busyLabel : content.submitLabel}
+          </button>
+        </div>
+      </section>
+    </div>
   );
 }
 
@@ -1923,6 +2847,212 @@ function StatusRow({
       <strong className={online ? "online" : "offline"}>{value}</strong>
     </div>
   );
+}
+
+function upsertConversation(
+  conversations: ConversationRecord[],
+  conversation: ConversationRecord,
+): ConversationRecord[] {
+  return [
+    conversation,
+    ...conversations.filter((item) => item.id !== conversation.id),
+  ];
+}
+
+function uniqueMessages(
+  messages: ConversationMessageRecord[],
+): ConversationMessageRecord[] {
+  const seen = new Set<string>();
+  return messages.filter((message) => {
+    if (seen.has(message.id)) {
+      return false;
+    }
+    seen.add(message.id);
+    return true;
+  });
+}
+
+function citationsForParagraph(
+  citations: AnswerCitation[],
+  paragraphIndex: number,
+  evidenceChunkIds: string[],
+): AnswerCitation[] {
+  const evidenceIds = new Set(evidenceChunkIds);
+  return citations.filter(
+    (citation) =>
+      citation.paragraphIndex === paragraphIndex ||
+      evidenceIds.has(citation.chunkId),
+  );
+}
+
+function retrievalResultForCitation(
+  response: ConversationAnswerResponse,
+  citation: AnswerCitation,
+): HybridSearchResult | undefined {
+  return response.retrieval.results.find(
+    (result) => result.chunkId === citation.chunkId,
+  );
+}
+
+function selectedEvidenceChunkId(
+  selection: EvidenceSelection | null,
+): string | undefined {
+  if (!selection) {
+    return undefined;
+  }
+  return selection.kind === "citation"
+    ? selection.citation.chunkId
+    : selection.result.chunkId;
+}
+
+function evidenceSourceId(selection: EvidenceSelection | null): string | null {
+  if (!selection) {
+    return null;
+  }
+  return selection.kind === "citation"
+    ? selection.citation.source.id
+    : selection.result.source.id;
+}
+
+function evidenceDisplayName(selection: EvidenceSelection): string {
+  return selection.kind === "citation"
+    ? selection.citation.source.displayName
+    : selection.result.source.displayName;
+}
+
+function evidenceLocationLabel(selection: EvidenceSelection): string {
+  return selection.kind === "citation"
+    ? formatLocation(
+        selection.citation.source.type,
+        selection.citation.location,
+      )
+    : formatLocation(selection.result.source.type, selection.result.location);
+}
+
+function sourceToneFromType(
+  type: KnowledgeBaseSource["sourceType"],
+): SourceTone {
+  const tones: Record<KnowledgeBaseSource["sourceType"], SourceTone> = {
+    pdf: "amber",
+    docx: "blue",
+    image: "green",
+    web: "violet",
+  };
+  return tones[type];
+}
+
+function citationQuote(citation: AnswerCitation): string {
+  return (
+    citation.text.original ??
+    citation.text.normalized ??
+    citation.text.preview ??
+    "引用原文为空"
+  );
+}
+
+function resultQuote(result: HybridSearchResult): string {
+  return result.text.original || result.text.normalized || result.text.preview;
+}
+
+function evidenceStrength(result?: HybridSearchResult): string {
+  if (!result) {
+    return "已校验";
+  }
+  if (result.ranks.fused <= 3 && result.match.matchedBy.length >= 2) {
+    return "高";
+  }
+  if (result.ranks.fused <= 8) {
+    return "中";
+  }
+  return "低";
+}
+
+function retrievalLabel(result?: HybridSearchResult): string {
+  if (!result) {
+    return "检索信息未加载";
+  }
+  return `融合排名 #${result.ranks.fused}`;
+}
+
+function matchLabel(result?: HybridSearchResult): string {
+  if (!result) {
+    return "历史引用";
+  }
+  const matchedBy = result.match.matchedBy
+    .map((item) => (item === "keyword" ? "关键词" : "语义"))
+    .join("+");
+  if (result.match.keywordHits.length > 0) {
+    return `${matchedBy} · ${result.match.keywordHits.slice(0, 2).join("/")}`;
+  }
+  return matchedBy || "召回";
+}
+
+function formatLocation(
+  sourceType: KnowledgeBaseSource["sourceType"],
+  location: HybridSearchResult["location"],
+): string {
+  if (sourceType === "pdf") {
+    const page =
+      location.pageNumber === null
+        ? "页码缺失"
+        : `第 ${location.pageNumber} 页`;
+    const box = location.boundingBox ? " · bbox" : "";
+    return `${page}${box}`;
+  }
+  if (sourceType === "docx") {
+    return location.headingPath.length > 0
+      ? location.headingPath.join(" / ")
+      : location.anchor
+        ? `段落 ${location.anchor}`
+        : "段落锚点缺失";
+  }
+  if (sourceType === "web") {
+    return location.headingPath.length > 0
+      ? location.headingPath.join(" / ")
+      : location.anchor
+        ? `快照块 ${location.anchor}`
+        : "快照文本块缺失";
+  }
+  return location.boundingBox
+    ? `OCR 区域 ${formatBoundingBox(location.boundingBox)}`
+    : location.anchor
+      ? `OCR ${location.anchor}`
+      : "OCR 区域缺失";
+}
+
+function locationRows(
+  sourceType: KnowledgeBaseSource["sourceType"],
+  location: HybridSearchResult["location"],
+): Array<{ label: string; value: string }> {
+  const rows: Array<{ label: string; value: string }> = [
+    { label: "定位方式", value: formatLocation(sourceType, location) },
+  ];
+  if (sourceType === "pdf" && location.pageNumber !== null) {
+    rows.push({ label: "页码", value: String(location.pageNumber) });
+  }
+  if (location.headingPath.length > 0) {
+    rows.push({ label: "标题路径", value: location.headingPath.join(" / ") });
+  }
+  if (location.anchor) {
+    rows.push({ label: "锚点", value: location.anchor });
+  }
+  if (location.boundingBox) {
+    rows.push({
+      label: "高亮区域",
+      value: formatBoundingBox(location.boundingBox),
+    });
+  }
+  return rows;
+}
+
+function formatBoundingBox(box: Record<string, unknown>): string {
+  const entries = ["x", "y", "width", "height"]
+    .map((key) => {
+      const value = box[key];
+      return typeof value === "number" ? `${key}:${value}` : "";
+    })
+    .filter(Boolean);
+  return entries.length > 0 ? entries.join(" ") : JSON.stringify(box);
 }
 
 function findCapability(

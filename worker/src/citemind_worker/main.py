@@ -4,6 +4,7 @@ import sys
 from pathlib import Path
 
 from citemind_worker.background_job_service import BackgroundJobService
+from citemind_worker.conversation_service import ConversationService
 from citemind_worker.indexing_service import IndexingService
 from citemind_worker.knowledge_base_service import KnowledgeBaseService
 from citemind_worker.logging_config import configure_logging
@@ -28,6 +29,7 @@ def create_server(
     source_import_service: SourceImportService | None = None,
     indexing_service: IndexingService | None = None,
     retrieval_service: HybridRetrievalService | None = None,
+    conversation_service: ConversationService | None = None,
 ) -> RpcServer:
     server = RpcServer()
     seed_models = model_service or (SeedModelService(storage) if storage is not None else None)
@@ -45,6 +47,9 @@ def create_server(
     )
     retrievals = retrieval_service or (
         HybridRetrievalService(storage) if storage is not None else None
+    )
+    conversations = conversation_service or (
+        ConversationService(storage, retrieval=retrievals) if storage is not None else None
     )
 
     def health(params: JsonValue) -> JsonValue:
@@ -366,6 +371,53 @@ def create_server(
         except ValueError as error:
             raise RpcError(-32602, str(error)) from error
 
+    def list_conversations(params: JsonValue) -> JsonValue:
+        values = require_object_params(params)
+        service = _require_conversation_service(conversations)
+        knowledge_base_id = _required_str(values, "knowledgeBaseId")
+        try:
+            return service.list_conversations(knowledge_base_id)  # type: ignore[return-value]
+        except ValueError as error:
+            raise RpcError(-32602, str(error)) from error
+
+    def conversation_messages(params: JsonValue) -> JsonValue:
+        values = require_object_params(params)
+        service = _require_conversation_service(conversations)
+        conversation_id = _required_str(values, "conversationId")
+        try:
+            return service.messages(conversation_id)  # type: ignore[return-value]
+        except ValueError as error:
+            raise RpcError(-32602, str(error)) from error
+
+    async def answer_conversation(params: JsonValue) -> JsonValue:
+        values = require_object_params(params)
+        service = _require_conversation_service(conversations)
+        knowledge_base_id = _required_str(values, "knowledgeBaseId")
+        query = _required_str(values, "query")
+        conversation_id = _optional_nullable_str(values, "conversationId")
+        api_key = _optional_nullable_str(values, "apiKey")
+        base_url = _optional_str(values, "baseUrl", DEFAULT_ARK_BASE_URL)
+        chat_model = _optional_str(values, "chatModel", DEFAULT_CHAT_MODEL)
+        embedding_model = _optional_str(values, "embeddingModel", DEFAULT_EMBEDDING_MODEL)
+        limit = _optional_int(values, "limit", 8)
+        candidate_limit = _optional_int(values, "candidateLimit", 24)
+        max_output_tokens = _optional_int(values, "maxOutputTokens", 1200)
+        try:
+            return await service.answer(
+                knowledge_base_id=knowledge_base_id,
+                query=query,
+                conversation_id=conversation_id,
+                api_key=api_key,
+                base_url=base_url,
+                chat_model=chat_model,
+                embedding_model=embedding_model,
+                limit=limit,
+                candidate_limit=candidate_limit,
+                max_output_tokens=max_output_tokens,
+            )  # type: ignore[return-value]
+        except ValueError as error:
+            raise RpcError(-32602, str(error)) from error
+
     server.register("system.health", health)
     server.register("system.storage_status", storage_status)
     server.register("system.shutdown", shutdown)
@@ -395,6 +447,9 @@ def create_server(
     server.register("indexes.rebuild", rebuild_index)
     server.register("indexes.status", index_status)
     server.register("retrieval.hybrid_search", hybrid_search)
+    server.register("conversations.list", list_conversations)
+    server.register("conversations.messages", conversation_messages)
+    server.register("conversations.answer", answer_conversation)
     return server
 
 
@@ -461,6 +516,14 @@ def _require_retrieval_service(
 ) -> HybridRetrievalService:
     if service is None:
         raise RpcError(-32015, "Retrieval service is not available")
+    return service
+
+
+def _require_conversation_service(
+    service: ConversationService | None,
+) -> ConversationService:
+    if service is None:
+        raise RpcError(-32016, "Conversation service is not available")
     return service
 
 

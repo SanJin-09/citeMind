@@ -75,11 +75,15 @@ class ArkModelGateway:
             messages = request.get("messages")
             if not isinstance(messages, list):
                 raise ValueError("messages must be a list")
-            stream = self.client.chat.completions.create(
-                model=model,
-                messages=messages,
-                stream=True,
-            )
+            max_tokens = _optional_int(request, "max_output_tokens", 0)
+            payload: dict[str, object] = {
+                "model": model,
+                "messages": messages,
+                "stream": True,
+            }
+            if max_tokens > 0:
+                payload["max_tokens"] = max_tokens
+            stream = self.client.chat.completions.create(**payload)
             for chunk in stream:
                 text = _extract_chat_delta(chunk)
                 if text:
@@ -93,6 +97,7 @@ class ArkModelGateway:
         model = _required_str(request, "model")
         prompt = _required_str(request, "prompt")
         max_tokens = _optional_int(request, "max_output_tokens", 512)
+        native_error: Exception | None = None
         try:
             response = self.client.responses.create(
                 model=model,
@@ -107,7 +112,11 @@ class ArkModelGateway:
                     }
                 },
             )
-        except Exception:
+            return _parse_structured_json(response)
+        except Exception as error:
+            native_error = error
+
+        try:
             response = self.client.responses.create(
                 model=model,
                 input=(
@@ -117,8 +126,13 @@ class ArkModelGateway:
                 ),
                 max_output_tokens=max_tokens,
             )
-        text = _extract_text(response)
-        return json.loads(text)
+            return _parse_structured_json(response)
+        except Exception as error:
+            if native_error is not None and isinstance(error, ValueError):
+                raise ValueError(
+                    "Ark 结构化输出无法解析，JSON Schema 与 JSON Prompt 均失败"
+                ) from error
+            raise
 
     async def embed(self, texts: Sequence[str]) -> list[list[float]]:
         result: list[list[float]] = []
@@ -273,22 +287,72 @@ def _extract_text(response: Any) -> str:
     if isinstance(direct, str) and direct:
         return direct
 
+    output_attr = getattr(response, "output", None)
+    output_text = _extract_output_text(output_attr)
+    if output_text:
+        return output_text
+
+    choices_attr = getattr(response, "choices", None)
+    choices_text = _extract_output_text(choices_attr)
+    if choices_text:
+        return choices_text
+
     plain = _to_plain(response)
     if isinstance(plain, dict):
         direct_value = plain.get("output_text")
         if isinstance(direct_value, str) and direct_value:
             return direct_value
+        output_text = _extract_output_text(plain.get("output"))
+        if output_text:
+            return output_text
         choices = plain.get("choices")
-        if isinstance(choices, list) and choices:
-            first = choices[0]
-            if isinstance(first, dict):
-                message = first.get("message")
-                if isinstance(message, dict) and isinstance(message.get("content"), str):
-                    return message["content"]
+        choices_text = _extract_output_text(choices)
+        if choices_text:
+            return choices_text
         found = _find_text_value(plain)
         if found:
             return found
     return str(response)
+
+
+def _extract_output_text(value: object) -> str | None:
+    plain = _to_plain(value)
+    if isinstance(plain, str):
+        return plain if plain.strip() else None
+    if isinstance(plain, list):
+        parts = [
+            text
+            for item in plain
+            if (text := _extract_output_text(item)) is not None and text.strip()
+        ]
+        return "\n".join(parts) if parts else None
+    if not isinstance(plain, dict):
+        return None
+
+    for key in ("output", "choices", "message", "delta", "content"):
+        text = _extract_output_text(plain.get(key))
+        if text:
+            return text
+
+    text = _text_field_value(plain.get("text"))
+    if text:
+        return text
+    value_text = _text_field_value(plain.get("value"))
+    if value_text:
+        return value_text
+    return None
+
+
+def _text_field_value(value: object) -> str | None:
+    plain = _to_plain(value)
+    if isinstance(plain, str):
+        return plain if plain.strip() else None
+    if isinstance(plain, dict):
+        for key in ("value", "text", "content"):
+            item = plain.get(key)
+            if isinstance(item, str) and item.strip():
+                return item
+    return None
 
 
 def _find_text_value(value: object) -> str | None:
@@ -310,11 +374,50 @@ def _find_text_value(value: object) -> str | None:
 
 
 def _extract_json_object(text: str) -> str:
-    start = text.find("{")
-    end = text.rfind("}")
-    if start == -1 or end == -1 or end < start:
+    last_match: str | None = None
+    start: int | None = None
+    depth = 0
+    in_string = False
+    escaped = False
+    for offset, current in enumerate(text):
+        if in_string:
+            if escaped:
+                escaped = False
+            elif current == "\\":
+                escaped = True
+            elif current == '"':
+                in_string = False
+            continue
+        if current == '"':
+            in_string = True
+        elif current == "{":
+            if depth == 0:
+                start = offset
+            depth += 1
+        elif current == "}" and depth > 0:
+            depth -= 1
+            if depth == 0 and start is not None:
+                last_match = text[start : offset + 1]
+                start = None
+    if last_match is None:
         raise ValueError("No JSON object found in model output")
-    return text[start : end + 1]
+    return last_match
+
+
+def _parse_structured_json(response: Any) -> dict[str, object]:
+    text = _extract_text(response).strip()
+    if not text:
+        raise ValueError("Ark 结构化输出为空")
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        try:
+            parsed = json.loads(_extract_json_object(text))
+        except (ValueError, json.JSONDecodeError) as error:
+            raise ValueError("Ark 结构化输出不是有效 JSON，且未找到可解析的 JSON 对象") from error
+    if not isinstance(parsed, dict):
+        raise ValueError("Ark 结构化输出必须是 JSON object")
+    return parsed
 
 
 def _extract_embedding(response: Any) -> list[float]:

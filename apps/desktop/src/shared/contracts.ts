@@ -221,6 +221,14 @@ export interface ImportWebRequest {
   displayName?: string | null;
 }
 
+export interface DeleteSourceResponse {
+  knowledgeBaseId: string;
+  sourceId: string;
+  displayName: string;
+  deleted: boolean;
+  deletedChunkCount: number;
+}
+
 export interface IndexVersionRecord {
   id: string;
   embeddingProvider: string;
@@ -238,6 +246,8 @@ export interface BuildIndexResponse {
   knowledgeBaseId: string;
   ready: boolean;
   indexVersion?: IndexVersionRecord;
+  deletedIndexCount?: number;
+  deletedChunkCount?: number;
 }
 
 export interface HybridSearchRequest {
@@ -329,6 +339,91 @@ export interface HybridSearchResponse {
   };
 }
 
+export interface ConversationRecord {
+  id: string;
+  knowledgeBaseId: string;
+  title: string;
+  modelId: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AnswerCitation {
+  paragraphIndex: number;
+  chunkId: string;
+  source: HybridSearchResult["source"];
+  location: HybridSearchResult["location"];
+  text: {
+    preview: string;
+    normalized?: string;
+    original?: string;
+  };
+}
+
+export interface ConversationMessageRecord {
+  id: string;
+  conversationId: string;
+  role: "system" | "user" | "assistant";
+  content: string;
+  modelId: string | null;
+  modelParams: Record<string, unknown>;
+  indexVersionId: string | null;
+  createdAt: string;
+  citations: AnswerCitation[];
+}
+
+export interface ConversationListResponse {
+  knowledgeBaseId: string;
+  conversations: ConversationRecord[];
+}
+
+export interface ConversationMessagesResponse {
+  conversation: ConversationRecord;
+  messages: ConversationMessageRecord[];
+}
+
+export interface ConversationAnswerRequest {
+  knowledgeBaseId: string;
+  query: string;
+  conversationId?: string | null;
+  chatModel?: string;
+  limit?: number;
+  candidateLimit?: number;
+  maxOutputTokens?: number;
+}
+
+export interface ConversationAnswerResponse {
+  conversation: ConversationRecord;
+  userMessage: ConversationMessageRecord;
+  assistantMessage: ConversationMessageRecord;
+  content: string;
+  answer: {
+    paragraphs: Array<{
+      index: number;
+      text: string;
+      evidenceChunkIds: string[];
+    }>;
+    evidenceSufficient: boolean;
+    refusalReason: string | null;
+  };
+  citations: AnswerCitation[];
+  citationValidation: {
+    valid: boolean;
+    paragraphs: Array<Record<string, unknown>>;
+    validCitations: AnswerCitation[];
+    invalidCitations: Array<Record<string, unknown>>;
+    candidateChunkIds: string[];
+  };
+  retrieval: HybridSearchResponse;
+  model: {
+    id: string;
+    maxOutputTokens?: number;
+    generationTimeMs: number;
+    retryCount: number;
+  };
+  events: Array<Record<string, unknown>>;
+}
+
 export interface DesktopApi {
   system: {
     checkWorkerHealth: () => Promise<WorkerHealth>;
@@ -377,15 +472,25 @@ export interface DesktopApi {
     importFiles: (knowledgeBaseId: string) => Promise<ImportFilesResponse>;
     importWeb: (request: ImportWebRequest) => Promise<ImportSourceResult>;
     parseChecks: (knowledgeBaseId: string) => Promise<ParseChecksResponse>;
+    delete: (sourceId: string) => Promise<DeleteSourceResponse>;
   };
   indexes: {
     build: (knowledgeBaseId: string) => Promise<BuildIndexResponse>;
+    delete: (knowledgeBaseId: string) => Promise<BuildIndexResponse>;
+    rebuild: (knowledgeBaseId: string) => Promise<BuildIndexResponse>;
     status: (knowledgeBaseId: string) => Promise<BuildIndexResponse>;
   };
   retrieval: {
     hybridSearch: (
       request: HybridSearchRequest,
     ) => Promise<HybridSearchResponse>;
+  };
+  conversations: {
+    list: (knowledgeBaseId: string) => Promise<ConversationListResponse>;
+    messages: (conversationId: string) => Promise<ConversationMessagesResponse>;
+    answer: (
+      request: ConversationAnswerRequest,
+    ) => Promise<ConversationAnswerResponse>;
   };
 }
 
@@ -413,9 +518,15 @@ export const IPC_CHANNELS = {
   importSourceFiles: "citemind:sources:import-files",
   importWebSource: "citemind:sources:import-web",
   listParseChecks: "citemind:sources:parse-checks",
+  deleteSource: "citemind:sources:delete",
   buildIndex: "citemind:indexes:build",
+  deleteIndex: "citemind:indexes:delete",
+  rebuildIndex: "citemind:indexes:rebuild",
   getIndexStatus: "citemind:indexes:status",
   hybridSearch: "citemind:retrieval:hybrid-search",
+  listConversations: "citemind:conversations:list",
+  conversationMessages: "citemind:conversations:messages",
+  answerConversation: "citemind:conversations:answer",
 } as const;
 
 export const SEED_DEFAULTS = {

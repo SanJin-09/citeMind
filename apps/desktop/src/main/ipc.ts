@@ -4,7 +4,12 @@ import {
   type BackgroundJobRecord,
   type BackgroundJobStatus,
   type BuildIndexResponse,
+  type ConversationAnswerRequest,
+  type ConversationAnswerResponse,
+  type ConversationListResponse,
+  type ConversationMessagesResponse,
   type CreateBackgroundJobRequest,
+  type DeleteSourceResponse,
   type HybridSearchRequest,
   type HybridSearchResponse,
   type ImportFilesResponse,
@@ -229,11 +234,39 @@ export function registerIpcHandlers(workerManager: PythonWorkerManager): void {
       30_000,
     ),
   );
+  ipcMain.handle(IPC_CHANNELS.deleteSource, (_event, sourceId) =>
+    workerManager.call<DeleteSourceResponse>(
+      "sources.delete",
+      { sourceId: normalizeNonEmptyString(sourceId, "来源 ID") },
+      60_000,
+    ),
+  );
   ipcMain.handle(IPC_CHANNELS.buildIndex, async (_event, knowledgeBaseId) => {
     const summary = await seedStore.summary();
     const apiKey = await seedStore.readApiKey();
     return workerManager.call<BuildIndexResponse>(
       "indexes.build",
+      {
+        knowledgeBaseId: normalizeKnowledgeBaseId(knowledgeBaseId),
+        apiKey,
+        baseUrl: summary.baseUrl,
+        embeddingModel: summary.defaultEmbeddingModel,
+      },
+      300_000,
+    );
+  });
+  ipcMain.handle(IPC_CHANNELS.deleteIndex, (_event, knowledgeBaseId) =>
+    workerManager.call<BuildIndexResponse>(
+      "indexes.delete",
+      { knowledgeBaseId: normalizeKnowledgeBaseId(knowledgeBaseId) },
+      120_000,
+    ),
+  );
+  ipcMain.handle(IPC_CHANNELS.rebuildIndex, async (_event, knowledgeBaseId) => {
+    const summary = await seedStore.summary();
+    const apiKey = await seedStore.readApiKey();
+    return workerManager.call<BuildIndexResponse>(
+      "indexes.rebuild",
       {
         knowledgeBaseId: normalizeKnowledgeBaseId(knowledgeBaseId),
         apiKey,
@@ -267,6 +300,41 @@ export function registerIpcHandlers(workerManager: PythonWorkerManager): void {
         embeddingModel: summary.defaultEmbeddingModel,
       },
       120_000,
+    );
+  });
+  ipcMain.handle(IPC_CHANNELS.listConversations, (_event, knowledgeBaseId) =>
+    workerManager.call<ConversationListResponse>(
+      "conversations.list",
+      { knowledgeBaseId: normalizeKnowledgeBaseId(knowledgeBaseId) },
+      30_000,
+    ),
+  );
+  ipcMain.handle(IPC_CHANNELS.conversationMessages, (_event, conversationId) =>
+    workerManager.call<ConversationMessagesResponse>(
+      "conversations.messages",
+      { conversationId: normalizeNonEmptyString(conversationId, "对话 ID") },
+      30_000,
+    ),
+  );
+  ipcMain.handle(IPC_CHANNELS.answerConversation, async (_event, payload) => {
+    const request = normalizeConversationAnswerRequest(payload);
+    const summary = await seedStore.summary();
+    const apiKey = await seedStore.readApiKey();
+    return workerManager.call<ConversationAnswerResponse>(
+      "conversations.answer",
+      {
+        knowledgeBaseId: request.knowledgeBaseId,
+        query: request.query,
+        conversationId: request.conversationId,
+        chatModel: request.chatModel ?? summary.defaultChatModel,
+        limit: request.limit,
+        candidateLimit: request.candidateLimit,
+        maxOutputTokens: request.maxOutputTokens,
+        apiKey,
+        baseUrl: summary.baseUrl,
+        embeddingModel: summary.defaultEmbeddingModel,
+      },
+      180_000,
     );
   });
 }
@@ -439,6 +507,47 @@ function normalizeHybridSearchRequest(payload: unknown): HybridSearchRequest {
   };
 }
 
+function normalizeConversationAnswerRequest(
+  payload: unknown,
+): ConversationAnswerRequest {
+  if (!isRecord(payload)) {
+    throw new Error("对话请求参数无效");
+  }
+  const knowledgeBaseId = normalizeKnowledgeBaseId(payload.knowledgeBaseId);
+  const query = normalizeNonEmptyString(payload.query, "问题");
+  const conversationId = payload.conversationId;
+  const chatModel = payload.chatModel;
+  if (
+    conversationId !== undefined &&
+    conversationId !== null &&
+    typeof conversationId !== "string"
+  ) {
+    throw new Error("对话 ID 必须是字符串");
+  }
+  if (
+    chatModel !== undefined &&
+    chatModel !== null &&
+    typeof chatModel !== "string"
+  ) {
+    throw new Error("对话模型必须是字符串");
+  }
+  return {
+    knowledgeBaseId,
+    query,
+    conversationId,
+    chatModel: chatModel ?? undefined,
+    limit: normalizeOptionalInteger(payload.limit, "检索结果数量限制"),
+    candidateLimit: normalizeOptionalInteger(
+      payload.candidateLimit,
+      "检索候选数量限制",
+    ),
+    maxOutputTokens: normalizeOptionalInteger(
+      payload.maxOutputTokens,
+      "最大输出 Token 数",
+    ),
+  };
+}
+
 const JOB_STATUSES = new Set<BackgroundJobStatus>([
   "pending",
   "running",
@@ -493,6 +602,13 @@ function normalizeOptionalInteger(
   }
   if (typeof value !== "number" || !Number.isInteger(value)) {
     throw new Error(`${label}必须是整数`);
+  }
+  return value;
+}
+
+function normalizeNonEmptyString(value: unknown, label: string): string {
+  if (typeof value !== "string" || !value.trim()) {
+    throw new Error(`${label}不能为空`);
   }
   return value;
 }
