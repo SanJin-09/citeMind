@@ -1,11 +1,6 @@
-# citeMind
+<h1 align="center">CiteMind</h1>
 
 <p align="center">
-  <strong>本地优先的可信个人知识库助手</strong>
-</p>
-
-<p align="center">
-  <a href="https://github.com/SanJin-09/citeMind"><img alt="repo" src="https://img.shields.io/badge/repo-SanJin--09%2FciteMind-24292f?style=flat-square"></a>
   <img alt="platform" src="https://img.shields.io/badge/platform-macOS%20Apple%20Silicon-black?style=flat-square">
   <img alt="desktop" src="https://img.shields.io/badge/desktop-Electron%20%2B%20React-47848f?style=flat-square">
   <img alt="worker" src="https://img.shields.io/badge/worker-Python%203.12-3776ab?style=flat-square">
@@ -14,12 +9,7 @@
 
 > citeMind 是一个桌面端个人知识库助手。首版面向 macOS Apple Silicon，用户使用自己的火山方舟 Ark API Key，将 PDF、DOCX、图片和网页导入为可检索、可追踪来源的本地知识库。
 
-<details>
-<summary><strong>当前阶段一句话说明</strong></summary>
-
-已完成工程底座、Ark/Seed API 配置、知识库管理、后台任务、四类来源导入解析、结构化分块、FTS5 与 LanceDB 索引写入。可信检索、带引用问答和 Markdown 导出仍在后续 TODO 阶段。
-
-</details>
+![MainScreen](images/main_screen.png)
 
 ## 功能状态
 
@@ -63,31 +53,9 @@
 | - SQLite + FTS5 + LanceDB                                                 |
 +--------------------------------------------------------------------------+
 ```
-
-## 首批平台与模型
-
-首批只正式支持：
-
-- macOS Apple Silicon
-- Electron 原生二进制 `darwin-arm64`
-- Python `>=3.12,<3.13`
-- pnpm `10.3.0`
-
-内置 Seed 模型目录：
-
-| 角色 | 模型 ID | 用途 |
-|---|---|---|
-| 默认对话 | `doubao-seed-2-0-lite-260428` | 常规问答和轻量生成 |
-| 高质量对话 | `doubao-seed-2-0-pro-260215` | 高质量回答与复杂生成 |
-| Embedding | `doubao-embedding-vision-251215` | 文本与视觉向量化，当前按 2048 维处理 |
-
-<blockquote>
-Ark API Key 只在 Electron Main 中通过 <code>safeStorage</code> 加密保存。React Renderer 只接收掩码、配置状态和模型验证结果，不暴露明文 Key。
-</blockquote>
-
 ## 本地数据
 
-应用默认使用系统应用数据目录，不写死绝对路径：
+应用默认使用系统应用数据目录
 
 ```text
 app.getPath("userData")
@@ -118,8 +86,6 @@ app.getPath("userData")
 pnpm setup
 ```
 
-如果 Electron 下载失败，可以手动下载 `electron-v42.3.3-darwin-arm64.zip`，解压到当前 pnpm 安装的 Electron 包目录，并写入 `path.txt`。此前遇到 macOS 隔离属性时，需要移除下载文件或解压后 App 的 `com.apple.quarantine` 属性。
-
 ### 3. 启动开发版
 
 ```bash
@@ -138,18 +104,14 @@ pnpm dev
 
 ### 5. 导入并索引资料
 
-```text
-来源资料 -> 添加文件 / 添加网页 -> 查看解析检查 -> 开始建立索引
-```
-
-当前支持：
+对于不同格式的文件，当前支持：
 
 - PDF：页码 + bounding box 高亮信息
 - DOCX：标题路径 + 段落锚点
 - 网页：标题路径 + 快照文本块
 - 图片：图片预览 + OCR 区域高亮信息
 
-## 常用命令
+## 你可能会用到的命令
 
 | 命令 | 作用 |
 |---|---|
@@ -179,15 +141,6 @@ pnpm dev
 +-- TODO.md                      # 阶段任务清单
 +-- rag-personal-knowledge-base-product-and-architecture.md
 ```
-
-## 导入与索引策略
-
-- 解析失败必须可见，不允许静默跳过。
-- PDF、DOCX、图片以 Docling 为主。
-- 网页优先正文提取，动态网页失败时使用 Playwright 兜底。
-- 文档完整索引前保持“处理中”，不会进入正式检索结果。
-- Chunk 会保存来源、来源版本、页码、bounding box、标题路径、锚点、原文、标准化正文和内容 Hash。
-- 索引完成后才原子更新文档版本为可检索。
 
 ## 安全边界
 
@@ -235,20 +188,3 @@ pnpm check
 - [ ] P1 模型切换与索引版本生命周期
 - [ ] P1 Markdown 导出与 macOS arm64 交付
 - [ ] P2 网页维护、自动分类、关联与写作工作流
-
-## 项目边界
-
-暂不实现：
-
-- 多人协作与复杂权限
-- 本地大语言模型推理
-- 移动端应用
-- 插件市场
-- 完整笔记编辑器
-- 复杂知识图谱编辑器
-- 应用关闭后的常驻网页更新服务
-- 任意 OpenAI-compatible API
-
-## License
-
-当前仓库尚未声明开源许可证。正式公开分发前应补充 `LICENSE`。
