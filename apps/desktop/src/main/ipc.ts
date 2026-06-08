@@ -5,6 +5,8 @@ import {
   type BackgroundJobStatus,
   type BuildIndexResponse,
   type CreateBackgroundJobRequest,
+  type HybridSearchRequest,
+  type HybridSearchResponse,
   type ImportFilesResponse,
   type ImportSourceResult,
   type ImportWebRequest,
@@ -248,6 +250,25 @@ export function registerIpcHandlers(workerManager: PythonWorkerManager): void {
       30_000,
     ),
   );
+  ipcMain.handle(IPC_CHANNELS.hybridSearch, async (_event, payload) => {
+    const request = normalizeHybridSearchRequest(payload);
+    const summary = await seedStore.summary();
+    const apiKey = await seedStore.readApiKey();
+    return workerManager.call<HybridSearchResponse>(
+      "retrieval.hybrid_search",
+      {
+        knowledgeBaseId: request.knowledgeBaseId,
+        query: request.query,
+        limit: request.limit,
+        candidateLimit: request.candidateLimit,
+        rerankModelVersion: request.rerankModelVersion,
+        apiKey,
+        baseUrl: summary.baseUrl,
+        embeddingModel: summary.defaultEmbeddingModel,
+      },
+      120_000,
+    );
+  });
 }
 
 async function getWorkerSeedStatus(
@@ -389,6 +410,35 @@ function normalizeImportWebRequest(payload: unknown): ImportWebRequest {
   return { knowledgeBaseId, url, displayName };
 }
 
+function normalizeHybridSearchRequest(payload: unknown): HybridSearchRequest {
+  if (!isRecord(payload)) {
+    throw new Error("检索参数无效");
+  }
+  const knowledgeBaseId = normalizeKnowledgeBaseId(payload.knowledgeBaseId);
+  const query = payload.query;
+  const rerankModelVersion = payload.rerankModelVersion;
+  if (typeof query !== "string" || !query.trim()) {
+    throw new Error("检索查询不能为空");
+  }
+  if (
+    rerankModelVersion !== undefined &&
+    rerankModelVersion !== null &&
+    typeof rerankModelVersion !== "string"
+  ) {
+    throw new Error("重排序模型版本必须是字符串");
+  }
+  return {
+    knowledgeBaseId,
+    query,
+    limit: normalizeOptionalInteger(payload.limit, "检索结果数量限制"),
+    candidateLimit: normalizeOptionalInteger(
+      payload.candidateLimit,
+      "检索候选数量限制",
+    ),
+    rerankModelVersion,
+  };
+}
+
 const JOB_STATUSES = new Set<BackgroundJobStatus>([
   "pending",
   "running",
@@ -432,6 +482,19 @@ function normalizeListJobsOptions(payload: unknown): Record<string, unknown> {
     result.limit = payload.limit;
   }
   return result;
+}
+
+function normalizeOptionalInteger(
+  value: unknown,
+  label: string,
+): number | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (typeof value !== "number" || !Number.isInteger(value)) {
+    throw new Error(`${label}必须是整数`);
+  }
+  return value;
 }
 
 function normalizeCreateJobRequest(

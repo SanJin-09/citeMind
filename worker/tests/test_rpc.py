@@ -6,6 +6,7 @@ from pathlib import Path
 
 from citemind_worker.indexing_service import IndexingService
 from citemind_worker.main import create_server
+from citemind_worker.retrieval_service import HybridRetrievalService
 from citemind_worker.rpc import JsonValue
 from citemind_worker.storage import StorageRuntime
 
@@ -199,7 +200,9 @@ def test_index_build_rpc_marks_chunks_ready(tmp_path: Path) -> None:
     storage = StorageRuntime(tmp_path, vector_dimension=3)
     storage.initialize()
     server = create_server(
-        storage, indexing_service=IndexingService(storage, embedder=MiniEmbedder())
+        storage,
+        indexing_service=IndexingService(storage, embedder=MiniEmbedder()),
+        retrieval_service=HybridRetrievalService(storage, embedder=MiniEmbedder()),
     )
     output = StringIO()
     asyncio.run(
@@ -240,3 +243,20 @@ def test_index_build_rpc_marks_chunks_ready(tmp_path: Path) -> None:
 
     assert built["ready"] is True
     assert built["indexVersion"]["chunkCount"] == 1
+
+    output = StringIO()
+    asyncio.run(
+        server.serve(
+            StringIO(
+                '{"jsonrpc":"2.0","id":"4","method":"retrieval.hybrid_search",'
+                f'"params":{{"knowledgeBaseId":"{knowledge_base_id}","query":"alpha",'
+                '"limit":1,"candidateLimit":4}}\n'
+            ),
+            output,
+        )
+    )
+    retrieved = json.loads(output.getvalue())["result"]
+
+    assert retrieved["indexVersion"]["id"] == built["indexVersion"]["id"]
+    assert retrieved["results"][0]["text"]["normalized"] == "PDF alpha searchable text"
+    assert retrieved["results"][0]["ranks"]["keyword"] == 1

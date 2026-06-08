@@ -54,6 +54,10 @@ const api: DesktopApi = {
     status: (knowledgeBaseId) =>
       ipcRenderer.invoke(IPC_CHANNELS.getIndexStatus, knowledgeBaseId),
   },
+  retrieval: {
+    hybridSearch: (request) =>
+      ipcRenderer.invoke(IPC_CHANNELS.hybridSearch, request),
+  },
 };
 
 contextBridge.exposeInMainWorld("citeMind", api);

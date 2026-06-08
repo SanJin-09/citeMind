@@ -14,6 +14,7 @@ from citemind_worker.model_catalog import (
     DEFAULT_EMBEDDING_MODEL,
 )
 from citemind_worker.model_service import SeedModelService
+from citemind_worker.retrieval_service import HybridRetrievalService
 from citemind_worker.rpc import JsonValue, RpcError, RpcServer, require_object_params
 from citemind_worker.source_import_service import SourceImportService
 from citemind_worker.storage import StorageRuntime
@@ -26,6 +27,7 @@ def create_server(
     background_job_service: BackgroundJobService | None = None,
     source_import_service: SourceImportService | None = None,
     indexing_service: IndexingService | None = None,
+    retrieval_service: HybridRetrievalService | None = None,
 ) -> RpcServer:
     server = RpcServer()
     seed_models = model_service or (SeedModelService(storage) if storage is not None else None)
@@ -40,6 +42,9 @@ def create_server(
     )
     indexes = indexing_service or (
         IndexingService(storage, jobs=background_jobs) if storage is not None else None
+    )
+    retrievals = retrieval_service or (
+        HybridRetrievalService(storage) if storage is not None else None
     )
 
     def health(params: JsonValue) -> JsonValue:
@@ -301,6 +306,31 @@ def create_server(
         except ValueError as error:
             raise RpcError(-32602, str(error)) from error
 
+    async def hybrid_search(params: JsonValue) -> JsonValue:
+        values = require_object_params(params)
+        service = _require_retrieval_service(retrievals)
+        knowledge_base_id = _required_str(values, "knowledgeBaseId")
+        query = _required_str(values, "query")
+        api_key = _optional_nullable_str(values, "apiKey")
+        base_url = _optional_str(values, "baseUrl", DEFAULT_ARK_BASE_URL)
+        embedding_model = _optional_str(values, "embeddingModel", DEFAULT_EMBEDDING_MODEL)
+        limit = _optional_int(values, "limit", 8)
+        candidate_limit = _optional_int(values, "candidateLimit", 24)
+        rerank_model_version = _optional_nullable_str(values, "rerankModelVersion")
+        try:
+            return await service.retrieve(
+                knowledge_base_id,
+                query,
+                api_key=api_key,
+                base_url=base_url,
+                embedding_model=embedding_model,
+                limit=limit,
+                candidate_limit=candidate_limit,
+                rerank_model_version=rerank_model_version,
+            )  # type: ignore[return-value]
+        except ValueError as error:
+            raise RpcError(-32602, str(error)) from error
+
     server.register("system.health", health)
     server.register("system.storage_status", storage_status)
     server.register("system.shutdown", shutdown)
@@ -326,6 +356,7 @@ def create_server(
     server.register("sources.parse_checks", parse_checks)
     server.register("indexes.build", build_index)
     server.register("indexes.status", index_status)
+    server.register("retrieval.hybrid_search", hybrid_search)
     return server
 
 
@@ -384,6 +415,14 @@ def _require_source_import_service(
 def _require_indexing_service(service: IndexingService | None) -> IndexingService:
     if service is None:
         raise RpcError(-32014, "Indexing service is not available")
+    return service
+
+
+def _require_retrieval_service(
+    service: HybridRetrievalService | None,
+) -> HybridRetrievalService:
+    if service is None:
+        raise RpcError(-32015, "Retrieval service is not available")
     return service
 
 

@@ -240,6 +240,95 @@ export interface BuildIndexResponse {
   indexVersion?: IndexVersionRecord;
 }
 
+export interface HybridSearchRequest {
+  knowledgeBaseId: string;
+  query: string;
+  limit?: number;
+  candidateLimit?: number;
+  rerankModelVersion?: string | null;
+}
+
+export interface HybridSearchResult {
+  chunkId: string;
+  source: {
+    id: string;
+    versionId: string;
+    type: KnowledgeBaseSource["sourceType"];
+    displayName: string;
+    uri: string | null;
+  };
+  location: {
+    pageNumber: number | null;
+    boundingBox: Record<string, unknown> | null;
+    headingPath: string[];
+    anchor: string | null;
+  };
+  text: {
+    original: string;
+    normalized: string;
+    preview: string;
+    contentHash: string;
+  };
+  match: {
+    matchedBy: Array<"keyword" | "semantic">;
+    keywordHits: string[];
+    hasKeywordHit: boolean;
+    hasSemanticMatch: boolean;
+  };
+  scores: {
+    keywordBm25: number | null;
+    keywordScore: number | null;
+    semanticDistance: number | null;
+    semanticScore: number | null;
+    fusedScore: number;
+  };
+  ranks: {
+    keyword: number | null;
+    semantic: number | null;
+    fused: number;
+  };
+  explanation: {
+    summary: string;
+    fusion: string;
+    keyword: Record<string, unknown>;
+    semantic: Record<string, unknown>;
+  };
+}
+
+export interface HybridSearchResponse {
+  knowledgeBaseId: string;
+  query: string;
+  indexVersion: IndexVersionRecord;
+  limits: {
+    resultLimit: number;
+    candidateLimit: number;
+  };
+  retrieval: {
+    keywordCandidateCount: number;
+    semanticCandidateCount: number;
+    mergedCandidateCount: number;
+    fusion: "reciprocal_rank_fusion";
+    rrfK: number;
+  };
+  rerank: {
+    available: boolean;
+    applied: boolean;
+    modelVersion: string | null;
+  };
+  results: HybridSearchResult[];
+  context: {
+    chunkCount: number;
+    chunks: Array<{
+      chunkId: string;
+      label: string;
+      text: string;
+      source: HybridSearchResult["source"];
+      location: HybridSearchResult["location"];
+    }>;
+    text: string;
+  };
+}
+
 export interface DesktopApi {
   system: {
     checkWorkerHealth: () => Promise<WorkerHealth>;
@@ -293,6 +382,11 @@ export interface DesktopApi {
     build: (knowledgeBaseId: string) => Promise<BuildIndexResponse>;
     status: (knowledgeBaseId: string) => Promise<BuildIndexResponse>;
   };
+  retrieval: {
+    hybridSearch: (
+      request: HybridSearchRequest,
+    ) => Promise<HybridSearchResponse>;
+  };
 }
 
 export const IPC_CHANNELS = {
@@ -321,6 +415,7 @@ export const IPC_CHANNELS = {
   listParseChecks: "citemind:sources:parse-checks",
   buildIndex: "citemind:indexes:build",
   getIndexStatus: "citemind:indexes:status",
+  hybridSearch: "citemind:retrieval:hybrid-search",
 } as const;
 
 export const SEED_DEFAULTS = {
