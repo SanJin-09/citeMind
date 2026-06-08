@@ -4,6 +4,7 @@ import sys
 from pathlib import Path
 
 from citemind_worker.background_job_service import BackgroundJobService
+from citemind_worker.indexing_service import IndexingService
 from citemind_worker.knowledge_base_service import KnowledgeBaseService
 from citemind_worker.logging_config import configure_logging
 from citemind_worker.model_catalog import (
@@ -14,6 +15,7 @@ from citemind_worker.model_catalog import (
 )
 from citemind_worker.model_service import SeedModelService
 from citemind_worker.rpc import JsonValue, RpcError, RpcServer, require_object_params
+from citemind_worker.source_import_service import SourceImportService
 from citemind_worker.storage import StorageRuntime
 
 
@@ -22,6 +24,8 @@ def create_server(
     model_service: SeedModelService | None = None,
     knowledge_base_service: KnowledgeBaseService | None = None,
     background_job_service: BackgroundJobService | None = None,
+    source_import_service: SourceImportService | None = None,
+    indexing_service: IndexingService | None = None,
 ) -> RpcServer:
     server = RpcServer()
     seed_models = model_service or (SeedModelService(storage) if storage is not None else None)
@@ -30,6 +34,12 @@ def create_server(
     )
     background_jobs = background_job_service or (
         BackgroundJobService(storage) if storage is not None else None
+    )
+    source_imports = source_import_service or (
+        SourceImportService(storage, jobs=background_jobs) if storage is not None else None
+    )
+    indexes = indexing_service or (
+        IndexingService(storage, jobs=background_jobs) if storage is not None else None
     )
 
     def health(params: JsonValue) -> JsonValue:
@@ -222,6 +232,75 @@ def create_server(
         service = _require_background_job_service(background_jobs)
         return service.recover_unfinished()  # type: ignore[return-value]
 
+    def import_file(params: JsonValue) -> JsonValue:
+        values = require_object_params(params)
+        service = _require_source_import_service(source_imports)
+        knowledge_base_id = _required_str(values, "knowledgeBaseId")
+        file_path = _required_str(values, "filePath")
+        display_name = _optional_nullable_str(values, "displayName")
+        try:
+            return service.import_file(
+                knowledge_base_id,
+                file_path,
+                display_name=display_name,
+            )  # type: ignore[return-value]
+        except ValueError as error:
+            raise RpcError(-32602, str(error)) from error
+
+    def import_web(params: JsonValue) -> JsonValue:
+        values = require_object_params(params)
+        service = _require_source_import_service(source_imports)
+        knowledge_base_id = _required_str(values, "knowledgeBaseId")
+        url = _required_str(values, "url")
+        display_name = _optional_nullable_str(values, "displayName")
+        try:
+            return service.import_web(
+                knowledge_base_id,
+                url,
+                display_name=display_name,
+            )  # type: ignore[return-value]
+        except ValueError as error:
+            raise RpcError(-32602, str(error)) from error
+
+    def parse_checks(params: JsonValue) -> JsonValue:
+        values = require_object_params(params)
+        service = _require_source_import_service(source_imports)
+        knowledge_base_id = _required_str(values, "knowledgeBaseId")
+        try:
+            return service.parse_checks(knowledge_base_id)  # type: ignore[return-value]
+        except ValueError as error:
+            raise RpcError(-32602, str(error)) from error
+
+    async def build_index(params: JsonValue) -> JsonValue:
+        values = require_object_params(params)
+        service = _require_indexing_service(indexes)
+        knowledge_base_id = _required_str(values, "knowledgeBaseId")
+        api_key = _optional_nullable_str(values, "apiKey")
+        base_url = _optional_str(values, "baseUrl", DEFAULT_ARK_BASE_URL)
+        embedding_model = _optional_str(values, "embeddingModel", DEFAULT_EMBEDDING_MODEL)
+        try:
+            return await service.build_index(
+                knowledge_base_id,
+                api_key=api_key,
+                base_url=base_url,
+                embedding_model=embedding_model,
+            )  # type: ignore[return-value]
+        except ValueError as error:
+            raise RpcError(-32602, str(error)) from error
+
+    def index_status(params: JsonValue) -> JsonValue:
+        values = require_object_params(params)
+        service = _require_indexing_service(indexes)
+        knowledge_base_id = _required_str(values, "knowledgeBaseId")
+        index_version_id = _optional_nullable_str(values, "indexVersionId")
+        try:
+            return service.index_status(
+                knowledge_base_id,
+                index_version_id=index_version_id,
+            )  # type: ignore[return-value]
+        except ValueError as error:
+            raise RpcError(-32602, str(error)) from error
+
     server.register("system.health", health)
     server.register("system.storage_status", storage_status)
     server.register("system.shutdown", shutdown)
@@ -242,6 +321,11 @@ def create_server(
     server.register("jobs.cancel", cancel_job)
     server.register("jobs.retry", retry_job)
     server.register("jobs.recover", recover_jobs)
+    server.register("sources.import_file", import_file)
+    server.register("sources.import_web", import_web)
+    server.register("sources.parse_checks", parse_checks)
+    server.register("indexes.build", build_index)
+    server.register("indexes.status", index_status)
     return server
 
 
@@ -286,6 +370,20 @@ def _require_background_job_service(
 ) -> BackgroundJobService:
     if service is None:
         raise RpcError(-32012, "Background job service is not available")
+    return service
+
+
+def _require_source_import_service(
+    service: SourceImportService | None,
+) -> SourceImportService:
+    if service is None:
+        raise RpcError(-32013, "Source import service is not available")
+    return service
+
+
+def _require_indexing_service(service: IndexingService | None) -> IndexingService:
+    if service is None:
+        raise RpcError(-32014, "Indexing service is not available")
     return service
 
 

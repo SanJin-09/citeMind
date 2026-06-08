@@ -1,11 +1,18 @@
 import asyncio
 import json
+from collections.abc import Sequence
 from io import StringIO
 from pathlib import Path
 
+from citemind_worker.indexing_service import IndexingService
 from citemind_worker.main import create_server
 from citemind_worker.rpc import JsonValue
 from citemind_worker.storage import StorageRuntime
+
+
+class MiniEmbedder:
+    async def embed(self, texts: Sequence[str]) -> list[list[float]]:
+        return [[1.0, 0.0, 0.0] for _text in texts]
 
 
 def run_server(payload: str) -> list[dict[str, JsonValue]]:
@@ -139,3 +146,97 @@ def test_background_job_rpc_create_update_and_list(tmp_path: Path) -> None:
     assert updated["status"] == "running"
     assert updated["progress"] == 0.25
     assert [job["id"] for job in listed["jobs"]] == [created["id"]]
+
+
+def test_source_import_rpc_imports_file_and_lists_parse_checks(tmp_path: Path) -> None:
+    storage = StorageRuntime(tmp_path, vector_dimension=3)
+    storage.initialize()
+    server = create_server(storage)
+    output = StringIO()
+    asyncio.run(
+        server.serve(
+            StringIO(
+                '{"jsonrpc":"2.0","id":"1","method":"knowledge_bases.create",'
+                '"params":{"name":"导入 RPC"}}\n'
+            ),
+            output,
+        )
+    )
+    knowledge_base_id = json.loads(output.getvalue())["result"]["id"]
+    sample = tmp_path / "sample.pdf"
+    sample.write_text("PDF fallback text\n\nwith location placeholder", encoding="utf-8")
+
+    output = StringIO()
+    asyncio.run(
+        server.serve(
+            StringIO(
+                '{"jsonrpc":"2.0","id":"2","method":"sources.import_file",'
+                f'"params":{{"knowledgeBaseId":"{knowledge_base_id}","filePath":"{sample}"}}}}\n'
+            ),
+            output,
+        )
+    )
+    imported = json.loads(output.getvalue())["result"]
+
+    output = StringIO()
+    asyncio.run(
+        server.serve(
+            StringIO(
+                '{"jsonrpc":"2.0","id":"3","method":"sources.parse_checks",'
+                f'"params":{{"knowledgeBaseId":"{knowledge_base_id}"}}}}\n'
+            ),
+            output,
+        )
+    )
+    checks = json.loads(output.getvalue())["result"]
+
+    assert imported["parseCheck"]["status"] == "success"
+    assert checks["summary"]["success"] == 1
+    assert checks["items"][0]["preview"].startswith("PDF fallback text")
+
+
+def test_index_build_rpc_marks_chunks_ready(tmp_path: Path) -> None:
+    storage = StorageRuntime(tmp_path, vector_dimension=3)
+    storage.initialize()
+    server = create_server(
+        storage, indexing_service=IndexingService(storage, embedder=MiniEmbedder())
+    )
+    output = StringIO()
+    asyncio.run(
+        server.serve(
+            StringIO(
+                '{"jsonrpc":"2.0","id":"1","method":"knowledge_bases.create",'
+                '"params":{"name":"索引 RPC"}}\n'
+            ),
+            output,
+        )
+    )
+    knowledge_base_id = json.loads(output.getvalue())["result"]["id"]
+    sample = tmp_path / "sample.pdf"
+    sample.write_text("PDF alpha searchable text", encoding="utf-8")
+
+    output = StringIO()
+    asyncio.run(
+        server.serve(
+            StringIO(
+                '{"jsonrpc":"2.0","id":"2","method":"sources.import_file",'
+                f'"params":{{"knowledgeBaseId":"{knowledge_base_id}","filePath":"{sample}"}}}}\n'
+            ),
+            output,
+        )
+    )
+
+    output = StringIO()
+    asyncio.run(
+        server.serve(
+            StringIO(
+                '{"jsonrpc":"2.0","id":"3","method":"indexes.build",'
+                f'"params":{{"knowledgeBaseId":"{knowledge_base_id}"}}}}\n'
+            ),
+            output,
+        )
+    )
+    built = json.loads(output.getvalue())["result"]
+
+    assert built["ready"] is True
+    assert built["indexVersion"]["chunkCount"] == 1

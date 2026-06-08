@@ -40,6 +40,20 @@ const api: DesktopApi = {
     retry: (jobId) => ipcRenderer.invoke(IPC_CHANNELS.retryJob, jobId),
     recover: () => ipcRenderer.invoke(IPC_CHANNELS.recoverJobs),
   },
+  sources: {
+    importFiles: (knowledgeBaseId) =>
+      ipcRenderer.invoke(IPC_CHANNELS.importSourceFiles, knowledgeBaseId),
+    importWeb: (request) =>
+      ipcRenderer.invoke(IPC_CHANNELS.importWebSource, request),
+    parseChecks: (knowledgeBaseId) =>
+      ipcRenderer.invoke(IPC_CHANNELS.listParseChecks, knowledgeBaseId),
+  },
+  indexes: {
+    build: (knowledgeBaseId) =>
+      ipcRenderer.invoke(IPC_CHANNELS.buildIndex, knowledgeBaseId),
+    status: (knowledgeBaseId) =>
+      ipcRenderer.invoke(IPC_CHANNELS.getIndexStatus, knowledgeBaseId),
+  },
 };
 
 contextBridge.exposeInMainWorld("citeMind", api);

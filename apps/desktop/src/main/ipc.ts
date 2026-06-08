@@ -1,14 +1,19 @@
-import { ipcMain } from "electron";
+import { dialog, ipcMain } from "electron";
 import {
   type BackgroundJobListResponse,
   type BackgroundJobRecord,
   type BackgroundJobStatus,
+  type BuildIndexResponse,
   type CreateBackgroundJobRequest,
+  type ImportFilesResponse,
+  type ImportSourceResult,
+  type ImportWebRequest,
   IPC_CHANNELS,
   type KnowledgeBaseListResponse,
   type KnowledgeBaseRecord,
   type KnowledgeBaseSourcesResponse,
   type ModelCapabilityStatus,
+  type ParseChecksResponse,
   type RenameKnowledgeBaseRequest,
   type SaveSeedCredentialRequest,
   type SaveKnowledgeBaseRequest,
@@ -163,6 +168,86 @@ export function registerIpcHandlers(workerManager: PythonWorkerManager): void {
   ipcMain.handle(IPC_CHANNELS.recoverJobs, () =>
     workerManager.call<BackgroundJobListResponse>("jobs.recover"),
   );
+  ipcMain.handle(
+    IPC_CHANNELS.importSourceFiles,
+    async (_event, knowledgeBaseId) => {
+      const targetKnowledgeBaseId = normalizeKnowledgeBaseId(knowledgeBaseId);
+      const selection = await dialog.showOpenDialog({
+        title: "添加来源",
+        properties: ["openFile", "multiSelections"],
+        filters: [
+          {
+            name: "支持的来源",
+            extensions: [
+              "pdf",
+              "docx",
+              "png",
+              "jpg",
+              "jpeg",
+              "webp",
+              "bmp",
+              "tif",
+              "tiff",
+            ],
+          },
+        ],
+      });
+      if (selection.canceled || selection.filePaths.length === 0) {
+        return { cancelled: true, imported: [] } satisfies ImportFilesResponse;
+      }
+      const imported: ImportSourceResult[] = [];
+      for (const filePath of selection.filePaths) {
+        imported.push(
+          await workerManager.call<ImportSourceResult>(
+            "sources.import_file",
+            { knowledgeBaseId: targetKnowledgeBaseId, filePath },
+            180_000,
+          ),
+        );
+      }
+      return { cancelled: false, imported } satisfies ImportFilesResponse;
+    },
+  );
+  ipcMain.handle(IPC_CHANNELS.importWebSource, (_event, payload) => {
+    const request = normalizeImportWebRequest(payload);
+    return workerManager.call<ImportSourceResult>(
+      "sources.import_web",
+      {
+        knowledgeBaseId: request.knowledgeBaseId,
+        url: request.url,
+        displayName: request.displayName,
+      },
+      180_000,
+    );
+  });
+  ipcMain.handle(IPC_CHANNELS.listParseChecks, (_event, knowledgeBaseId) =>
+    workerManager.call<ParseChecksResponse>(
+      "sources.parse_checks",
+      { knowledgeBaseId: normalizeKnowledgeBaseId(knowledgeBaseId) },
+      30_000,
+    ),
+  );
+  ipcMain.handle(IPC_CHANNELS.buildIndex, async (_event, knowledgeBaseId) => {
+    const summary = await seedStore.summary();
+    const apiKey = await seedStore.readApiKey();
+    return workerManager.call<BuildIndexResponse>(
+      "indexes.build",
+      {
+        knowledgeBaseId: normalizeKnowledgeBaseId(knowledgeBaseId),
+        apiKey,
+        baseUrl: summary.baseUrl,
+        embeddingModel: summary.defaultEmbeddingModel,
+      },
+      300_000,
+    );
+  });
+  ipcMain.handle(IPC_CHANNELS.getIndexStatus, (_event, knowledgeBaseId) =>
+    workerManager.call<BuildIndexResponse>(
+      "indexes.status",
+      { knowledgeBaseId: normalizeKnowledgeBaseId(knowledgeBaseId) },
+      30_000,
+    ),
+  );
 }
 
 async function getWorkerSeedStatus(
@@ -272,6 +357,36 @@ function normalizeRenameKnowledgeBaseRequest(
     throw new Error("知识库 ID 无效");
   }
   return { ...request, knowledgeBaseId };
+}
+
+function normalizeKnowledgeBaseId(value: unknown): string {
+  if (typeof value !== "string" || !value.trim()) {
+    throw new Error("知识库 ID 无效");
+  }
+  return value;
+}
+
+function normalizeImportWebRequest(payload: unknown): ImportWebRequest {
+  if (!isRecord(payload)) {
+    throw new Error("网页导入参数无效");
+  }
+  const knowledgeBaseId = normalizeKnowledgeBaseId(payload.knowledgeBaseId);
+  const url = payload.url;
+  const displayName = payload.displayName;
+  if (typeof url !== "string" || !url.trim()) {
+    throw new Error("网页链接不能为空");
+  }
+  if (!url.startsWith("http://") && !url.startsWith("https://")) {
+    throw new Error("网页链接必须以 http:// 或 https:// 开头");
+  }
+  if (
+    displayName !== undefined &&
+    displayName !== null &&
+    typeof displayName !== "string"
+  ) {
+    throw new Error("网页名称必须是字符串");
+  }
+  return { knowledgeBaseId, url, displayName };
 }
 
 const JOB_STATUSES = new Set<BackgroundJobStatus>([

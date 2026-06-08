@@ -2,10 +2,13 @@ import { useCallback, useEffect, useState } from "react";
 import type {
   BackgroundJobRecord,
   BackgroundJobStatus,
+  BuildIndexResponse,
   KnowledgeBaseRecord,
   KnowledgeBaseSource,
   ModelCapabilityStatus,
   ModelValidationStatus,
+  ParseCheckItem,
+  ParseCheckSummary,
   SeedCredentialStatus,
   SeedModelDescriptor,
   WorkerHealth,
@@ -166,6 +169,53 @@ const FALLBACK_JOBS: BackgroundJobRecord[] = [
   },
 ];
 
+const FALLBACK_PARSE_CHECKS: ParseCheckItem[] = [
+  {
+    sourceId: "demo-source-1",
+    sourceVersionId: "demo-source-version-1",
+    sourceType: "pdf",
+    displayName: "RAG 产品与架构方案",
+    uri: null,
+    status: "success",
+    sourceStatus: "processing",
+    versionStatus: "parsed",
+    jobStatus: "completed",
+    errorMessage: null,
+    duplicateOfSourceId: null,
+    originalHash: "demo",
+    contentHash: "demo-content",
+    originalPath: null,
+    snapshotPath: null,
+    parseArtifactPath: null,
+    preview: "模型只能引用本次检索得到且经过后端校验的文本块。",
+    chunkCount: 3,
+    createdAt: "",
+    updatedAt: "",
+  },
+  {
+    sourceId: "demo-source-4",
+    sourceVersionId: "demo-source-version-4",
+    sourceType: "docx",
+    displayName: "混合检索实验记录",
+    uri: null,
+    status: "processing",
+    sourceStatus: "processing",
+    versionStatus: "processing",
+    jobStatus: "running",
+    errorMessage: null,
+    duplicateOfSourceId: null,
+    originalHash: "demo-2",
+    contentHash: null,
+    originalPath: null,
+    snapshotPath: null,
+    parseArtifactPath: null,
+    preview: "正在解析文档结构，索引完成前不会进入检索结果。",
+    chunkCount: 0,
+    createdAt: "",
+    updatedAt: "",
+  },
+];
+
 function getDesktopApi(): Window["citeMind"] {
   if (!window.citeMind) {
     throw new Error("Preload IPC 未加载，请检查桌面端启动日志");
@@ -248,6 +298,24 @@ function App(): React.JSX.Element {
   const [jobs, setJobs] = useState<BackgroundJobRecord[]>(FALLBACK_JOBS);
   const [jobBusyId, setJobBusyId] = useState("");
   const [jobError, setJobError] = useState("");
+  const [parseChecks, setParseChecks] = useState<ParseCheckItem[]>(
+    FALLBACK_PARSE_CHECKS,
+  );
+  const [parseSummary, setParseSummary] = useState<ParseCheckSummary>(
+    summarizeParseChecks(FALLBACK_PARSE_CHECKS),
+  );
+  const [indexStatus, setIndexStatus] = useState<BuildIndexResponse | null>(
+    null,
+  );
+  const [indexBusy, setIndexBusy] = useState(false);
+  const [indexError, setIndexError] = useState("");
+  const [importBusy, setImportBusy] = useState(false);
+  const [importError, setImportError] = useState("");
+  const [webImportOpen, setWebImportOpen] = useState(false);
+  const [webImportForm, setWebImportForm] = useState({
+    url: "",
+    displayName: "",
+  });
   const [query, setQuery] = useState("");
   const [evidenceOpen, setEvidenceOpen] = useState(true);
   const [systemOpen, setSystemOpen] = useState(false);
@@ -379,16 +447,57 @@ function App(): React.JSX.Element {
     }
   }, []);
 
+  const loadParseChecks = useCallback(async (knowledgeBaseId: string) => {
+    if (!knowledgeBaseId) {
+      setParseChecks([]);
+      setParseSummary(emptyParseSummary());
+      return;
+    }
+    try {
+      const result = await getDesktopApi().sources.parseChecks(knowledgeBaseId);
+      setParseChecks(result.items);
+      setParseSummary(result.summary);
+      setImportError("");
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "解析检查状态读取失败";
+      if (!message.includes("Preload IPC")) {
+        setImportError(message);
+      }
+    }
+  }, []);
+
+  const loadIndexStatus = useCallback(async (knowledgeBaseId: string) => {
+    if (!knowledgeBaseId) {
+      setIndexStatus(null);
+      return;
+    }
+    try {
+      setIndexStatus(await getDesktopApi().indexes.status(knowledgeBaseId));
+      setIndexError("");
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "索引状态读取失败";
+      if (!message.includes("Preload IPC")) {
+        setIndexError(message);
+      }
+    }
+  }, []);
+
   useEffect(() => {
     void checkHealth();
     void loadSeedStatus();
     void loadKnowledgeBases(activeKnowledgeBaseId);
     void loadJobs();
+    void loadParseChecks(activeKnowledgeBaseId);
+    void loadIndexStatus(activeKnowledgeBaseId);
   }, [
     activeKnowledgeBaseId,
     checkHealth,
+    loadIndexStatus,
     loadJobs,
     loadKnowledgeBases,
+    loadParseChecks,
     loadSeedStatus,
   ]);
 
@@ -400,9 +509,17 @@ function App(): React.JSX.Element {
     }
     const timer = window.setInterval(() => {
       void loadJobs();
+      void loadParseChecks(activeKnowledgeBaseId);
+      void loadIndexStatus(activeKnowledgeBaseId);
     }, 1800);
     return () => window.clearInterval(timer);
-  }, [loadJobs, online]);
+  }, [
+    activeKnowledgeBaseId,
+    loadIndexStatus,
+    loadJobs,
+    loadParseChecks,
+    online,
+  ]);
 
   const activeKnowledgeBase =
     knowledgeBases.find((item) => item.id === activeKnowledgeBaseId) ??
@@ -533,6 +650,79 @@ function App(): React.JSX.Element {
       setJobError(error instanceof Error ? error.message : "任务操作失败");
     } finally {
       setJobBusyId("");
+    }
+  };
+
+  const refreshImportState = async (knowledgeBaseId: string): Promise<void> => {
+    await Promise.all([
+      loadSources(knowledgeBaseId),
+      loadJobs(),
+      loadParseChecks(knowledgeBaseId),
+      loadIndexStatus(knowledgeBaseId),
+    ]);
+  };
+
+  const importFiles = async (): Promise<void> => {
+    if (!activeKnowledgeBase) {
+      setImportError("请先选择知识库");
+      return;
+    }
+    setImportBusy(true);
+    setImportError("");
+    try {
+      const result = await getDesktopApi().sources.importFiles(
+        activeKnowledgeBase.id,
+      );
+      if (!result.cancelled) {
+        await refreshImportState(activeKnowledgeBase.id);
+      }
+    } catch (error) {
+      setImportError(error instanceof Error ? error.message : "文件导入失败");
+    } finally {
+      setImportBusy(false);
+    }
+  };
+
+  const importWebSource = async (): Promise<void> => {
+    if (!activeKnowledgeBase) {
+      setImportError("请先选择知识库");
+      return;
+    }
+    setImportBusy(true);
+    setImportError("");
+    try {
+      await getDesktopApi().sources.importWeb({
+        knowledgeBaseId: activeKnowledgeBase.id,
+        url: webImportForm.url,
+        displayName: webImportForm.displayName || null,
+      });
+      setWebImportOpen(false);
+      setWebImportForm({ url: "", displayName: "" });
+      await refreshImportState(activeKnowledgeBase.id);
+    } catch (error) {
+      setImportError(error instanceof Error ? error.message : "网页导入失败");
+    } finally {
+      setImportBusy(false);
+    }
+  };
+
+  const buildIndex = async (): Promise<void> => {
+    if (!activeKnowledgeBase) {
+      setIndexError("请先选择知识库");
+      return;
+    }
+    setIndexBusy(true);
+    setIndexError("");
+    try {
+      const result = await getDesktopApi().indexes.build(
+        activeKnowledgeBase.id,
+      );
+      setIndexStatus(result);
+      await refreshImportState(activeKnowledgeBase.id);
+    } catch (error) {
+      setIndexError(error instanceof Error ? error.message : "索引构建失败");
+    } finally {
+      setIndexBusy(false);
     }
   };
 
@@ -681,9 +871,27 @@ function App(): React.JSX.Element {
         <aside className="panel sources-panel">
           <PanelHeader icon="folder" title="来源资料" count={sources.length} />
           <div className="source-actions">
-            <button className="button add-source" type="button">
-              <Icon name="add" /> 添加来源
-            </button>
+            <div className="source-action-row">
+              <button
+                className="button add-source"
+                disabled={importBusy}
+                type="button"
+                onClick={() => void importFiles()}
+              >
+                <Icon name="add" /> 添加文件
+              </button>
+              <button
+                className="button ghost"
+                disabled={importBusy}
+                type="button"
+                onClick={() => {
+                  setImportError("");
+                  setWebImportOpen(true);
+                }}
+              >
+                网页链接
+              </button>
+            </div>
             <label className="panel-search">
               <Icon name="search" size={16} />
               <input aria-label="筛选来源" placeholder="筛选来源" />
@@ -741,6 +949,17 @@ function App(): React.JSX.Element {
             {sourceStatusLine(sourceSummary.sourcesByStatus)}
             <Icon name="chevron" size={15} />
           </button>
+          <ParseCheckPanel
+            busy={importBusy}
+            error={importError}
+            indexBusy={indexBusy}
+            indexError={indexError}
+            indexStatus={indexStatus}
+            items={parseChecks}
+            summary={parseSummary}
+            onBuildIndex={() => void buildIndex()}
+            onRefresh={() => void loadParseChecks(activeKnowledgeBaseId)}
+          />
           <JobProgressPanel
             busyJobId={jobBusyId}
             error={jobError}
@@ -1016,6 +1235,17 @@ function App(): React.JSX.Element {
         />
       )}
 
+      {webImportOpen && (
+        <WebImportDialog
+          busy={importBusy}
+          error={importError}
+          form={webImportForm}
+          onClose={() => setWebImportOpen(false)}
+          onFormChange={setWebImportForm}
+          onSubmit={() => void importWebSource()}
+        />
+      )}
+
       {knowledgeBaseDialog && (
         <KnowledgeBaseDialog
           activeKnowledgeBase={activeKnowledgeBase}
@@ -1157,6 +1387,189 @@ function JobProgressPanel({
         )}
       </div>
     </section>
+  );
+}
+
+function ParseCheckPanel({
+  busy,
+  error,
+  indexBusy,
+  indexError,
+  indexStatus,
+  items,
+  summary,
+  onBuildIndex,
+  onRefresh,
+}: {
+  busy: boolean;
+  error: string;
+  indexBusy: boolean;
+  indexError: string;
+  indexStatus: BuildIndexResponse | null;
+  items: ParseCheckItem[];
+  summary: ParseCheckSummary;
+  onBuildIndex: () => void;
+  onRefresh: () => void;
+}): React.JSX.Element {
+  const indexableCount = items.filter((item) =>
+    ["success", "processing"].includes(item.status),
+  ).length;
+
+  return (
+    <section className="parse-panel" aria-label="导入检查">
+      <div className="parse-panel-heading">
+        <div>
+          <strong>导入检查</strong>
+          <span>{summary.total} 个来源</span>
+        </div>
+        <button
+          className="icon-button"
+          disabled={busy}
+          type="button"
+          onClick={onRefresh}
+        >
+          <Icon name="refresh" size={15} />
+        </button>
+      </div>
+      <div className="parse-summary-grid">
+        <span className="success">成功 {summary.success}</span>
+        <span className="needs-ocr">需要 OCR {summary.needsOcr}</span>
+        <span className="failed">失败 {summary.failed}</span>
+        <span className="duplicate">重复 {summary.duplicate}</span>
+      </div>
+      {error && <div className="inline-error">{error}</div>}
+      {indexError && <div className="inline-error">{indexError}</div>}
+      <div className="parse-list">
+        {items.length > 0 ? (
+          items.slice(0, 4).map((item) => (
+            <article
+              className={`parse-card ${item.status}`}
+              key={item.sourceId}
+            >
+              <div className="parse-card-heading">
+                <strong>{item.displayName}</strong>
+                <span>{parseStatusLabel(item.status)}</span>
+              </div>
+              <small>
+                {sourceTypeLabel(item.sourceType)} · {item.chunkCount} 片段
+                {item.versionStatus
+                  ? ` · ${sourceStatusLabel(item.versionStatus)}`
+                  : ""}
+              </small>
+              {item.preview && <p>{item.preview}</p>}
+              {item.errorMessage && (
+                <p className="parse-error">{item.errorMessage}</p>
+              )}
+            </article>
+          ))
+        ) : (
+          <div className="empty-parse-state">
+            <strong>还没有解析结果</strong>
+            <span>添加 PDF、DOCX、图片或网页后会显示检查结果。</span>
+          </div>
+        )}
+      </div>
+      {indexStatus?.indexVersion && (
+        <div className="index-status-card">
+          <strong>
+            {indexStatus.ready ? "当前索引可检索" : "当前索引未就绪"}
+          </strong>
+          <span>
+            {indexStatus.indexVersion.chunkCount} chunks ·{" "}
+            {indexStatus.indexVersion.chunkingVersion}
+          </span>
+        </div>
+      )}
+      <button
+        className="button primary parse-index-action"
+        disabled={indexBusy || indexableCount === 0}
+        type="button"
+        onClick={onBuildIndex}
+      >
+        {indexBusy ? "建立索引中..." : "开始建立索引"}
+      </button>
+    </section>
+  );
+}
+
+function WebImportDialog({
+  busy,
+  error,
+  form,
+  onClose,
+  onFormChange,
+  onSubmit,
+}: {
+  busy: boolean;
+  error: string;
+  form: { url: string; displayName: string };
+  onClose: () => void;
+  onFormChange: (next: { url: string; displayName: string }) => void;
+  onSubmit: () => void;
+}): React.JSX.Element {
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <section className="kb-dialog" role="dialog" aria-modal="true">
+        <header className="settings-heading">
+          <div>
+            <p className="eyebrow">Web Source</p>
+            <h2>导入网页链接</h2>
+            <span>
+              优先使用正文提取器；静态正文不足时会尝试 Playwright 动态网页兜底。
+            </span>
+          </div>
+          <button
+            aria-label="关闭网页导入"
+            className="icon-button"
+            type="button"
+            onClick={onClose}
+          >
+            <Icon name="close" size={17} />
+          </button>
+        </header>
+        <div className="kb-dialog-body">
+          <label>
+            <span>网页 URL</span>
+            <input
+              placeholder="https://example.com/article"
+              value={form.url}
+              onChange={(event) =>
+                onFormChange({ ...form, url: event.target.value })
+              }
+            />
+          </label>
+          <label>
+            <span>显示名称</span>
+            <input
+              placeholder="可选"
+              value={form.displayName}
+              onChange={(event) =>
+                onFormChange({ ...form, displayName: event.target.value })
+              }
+            />
+          </label>
+          {error && <div className="settings-error">{error}</div>}
+        </div>
+        <div className="settings-actions">
+          <button
+            className="button ghost"
+            disabled={busy}
+            type="button"
+            onClick={onClose}
+          >
+            取消
+          </button>
+          <button
+            className="button primary"
+            disabled={busy || !form.url.trim()}
+            type="button"
+            onClick={onSubmit}
+          >
+            {busy ? "导入中..." : "导入网页"}
+          </button>
+        </div>
+      </section>
+    </div>
   );
 }
 
@@ -1607,6 +2020,9 @@ function sourceStatusLabel(status: string): string {
   const labels: Record<string, string> = {
     pending: "待处理",
     processing: "处理中",
+    parsed: "已解析",
+    needs_ocr: "需要 OCR",
+    duplicate: "重复",
     ready: "可用",
     failed: "失败",
     paused: "已暂停",
@@ -1614,6 +2030,17 @@ function sourceStatusLabel(status: string): string {
     completed: "已完成",
   };
   return labels[status] ?? status;
+}
+
+function parseStatusLabel(status: ParseCheckItem["status"]): string {
+  const labels: Record<ParseCheckItem["status"], string> = {
+    success: "成功",
+    needs_ocr: "需要 OCR",
+    failed: "失败",
+    duplicate: "重复",
+    processing: "处理中",
+  };
+  return labels[status];
 }
 
 function sourceStatusLine(sourcesByStatus: Record<string, number>): string {
@@ -1624,6 +2051,29 @@ function sourceStatusLine(sourcesByStatus: Record<string, number>): string {
   return entries
     .map(([status, count]) => `${sourceStatusLabel(status)} ${count}`)
     .join(" · ");
+}
+
+function emptyParseSummary(): ParseCheckSummary {
+  return {
+    total: 0,
+    success: 0,
+    needsOcr: 0,
+    failed: 0,
+    duplicate: 0,
+    processing: 0,
+  };
+}
+
+function summarizeParseChecks(items: ParseCheckItem[]): ParseCheckSummary {
+  return items.reduce<ParseCheckSummary>((summary, item) => {
+    summary.total += 1;
+    if (item.status === "needs_ocr") {
+      summary.needsOcr += 1;
+    } else {
+      summary[item.status] += 1;
+    }
+    return summary;
+  }, emptyParseSummary());
 }
 
 function jobTypeLabel(type: string): string {

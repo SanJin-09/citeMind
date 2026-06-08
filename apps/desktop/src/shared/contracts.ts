@@ -160,6 +160,86 @@ export interface UpdateBackgroundJobRequest {
   errorMessage?: string | null;
 }
 
+export type ParseCheckStatus =
+  | "success"
+  | "needs_ocr"
+  | "failed"
+  | "duplicate"
+  | "processing";
+
+export interface ParseCheckSummary {
+  total: number;
+  success: number;
+  needsOcr: number;
+  failed: number;
+  duplicate: number;
+  processing: number;
+}
+
+export interface ParseCheckItem {
+  sourceId: string;
+  sourceVersionId: string | null;
+  sourceType: KnowledgeBaseSource["sourceType"];
+  displayName: string;
+  uri: string | null;
+  status: ParseCheckStatus;
+  sourceStatus: string;
+  versionStatus: string | null;
+  jobStatus: BackgroundJobStatus | null;
+  errorMessage: string | null;
+  duplicateOfSourceId: string | null;
+  originalHash: string | null;
+  contentHash: string | null;
+  originalPath: string | null;
+  snapshotPath: string | null;
+  parseArtifactPath: string | null;
+  preview: string;
+  chunkCount: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ParseChecksResponse {
+  knowledgeBaseId: string;
+  summary: ParseCheckSummary;
+  items: ParseCheckItem[];
+}
+
+export interface ImportSourceResult {
+  source: ParseCheckItem;
+  parseCheck: ParseCheckItem;
+}
+
+export interface ImportFilesResponse {
+  cancelled: boolean;
+  imported: ImportSourceResult[];
+}
+
+export interface ImportWebRequest {
+  knowledgeBaseId: string;
+  url: string;
+  displayName?: string | null;
+}
+
+export interface IndexVersionRecord {
+  id: string;
+  embeddingProvider: string;
+  embeddingModel: string;
+  embeddingDimension: number;
+  chunkingVersion: string;
+  parserVersion: string;
+  status: "building" | "ready" | "failed" | "retired";
+  isCurrent: boolean;
+  createdAt: string;
+  chunkCount: number;
+}
+
+export interface BuildIndexResponse {
+  knowledgeBaseId: string;
+  ready: boolean;
+  indexVersion?: IndexVersionRecord;
+}
+
 export interface DesktopApi {
   system: {
     checkWorkerHealth: () => Promise<WorkerHealth>;
@@ -204,6 +284,15 @@ export interface DesktopApi {
     retry: (jobId: string) => Promise<BackgroundJobRecord>;
     recover: () => Promise<BackgroundJobListResponse>;
   };
+  sources: {
+    importFiles: (knowledgeBaseId: string) => Promise<ImportFilesResponse>;
+    importWeb: (request: ImportWebRequest) => Promise<ImportSourceResult>;
+    parseChecks: (knowledgeBaseId: string) => Promise<ParseChecksResponse>;
+  };
+  indexes: {
+    build: (knowledgeBaseId: string) => Promise<BuildIndexResponse>;
+    status: (knowledgeBaseId: string) => Promise<BuildIndexResponse>;
+  };
 }
 
 export const IPC_CHANNELS = {
@@ -227,6 +316,11 @@ export const IPC_CHANNELS = {
   cancelJob: "citemind:jobs:cancel",
   retryJob: "citemind:jobs:retry",
   recoverJobs: "citemind:jobs:recover",
+  importSourceFiles: "citemind:sources:import-files",
+  importWebSource: "citemind:sources:import-web",
+  listParseChecks: "citemind:sources:parse-checks",
+  buildIndex: "citemind:indexes:build",
+  getIndexStatus: "citemind:indexes:status",
 } as const;
 
 export const SEED_DEFAULTS = {

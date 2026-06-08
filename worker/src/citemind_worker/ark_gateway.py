@@ -26,13 +26,14 @@ class ArkModelGateway:
         api_key: str,
         *,
         base_url: str = DEFAULT_ARK_BASE_URL,
+        embedding_model: str = DEFAULT_EMBEDDING_MODEL,
         timeout: int = 45,
         max_retries: int = 1,
         client: Any | None = None,
     ) -> None:
         if not api_key.strip():
             raise ValueError("Ark API Key is required")
-        self.embedding_model = DEFAULT_EMBEDDING_MODEL
+        self.embedding_model = embedding_model
         self.client = client or Ark(
             api_key=api_key,
             base_url=base_url,
