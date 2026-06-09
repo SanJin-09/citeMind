@@ -58,3 +58,10 @@ SEED_MODEL_CATALOG: tuple[SeedModel, ...] = (
 
 def seed_model_catalog_records() -> list[dict[str, object]]:
     return [model.as_record() for model in SEED_MODEL_CATALOG]
+
+
+def context_window_for(model_id: str) -> int:
+    for model in SEED_MODEL_CATALOG:
+        if model.id == model_id and model.context_window:
+            return model.context_window
+    return 32_000

@@ -12,6 +12,8 @@ import {
   type DeleteSourceResponse,
   type HybridSearchRequest,
   type HybridSearchResponse,
+  type IndexBuildEstimate,
+  type IndexVersionListResponse,
   type ImportFilesResponse,
   type ImportSourceResult,
   type ImportWebRequest,
@@ -28,6 +30,7 @@ import {
   SEED_DEFAULTS,
   type SeedCredentialStatus,
   type SeedModelDescriptor,
+  type UpdateSeedDefaultsRequest,
   type UpdateBackgroundJobRequest,
 } from "../shared/contracts";
 import type { PythonWorkerManager } from "./python-worker-manager";
@@ -83,6 +86,11 @@ export function registerIpcHandlers(workerManager: PythonWorkerManager): void {
       10_000,
     );
     return buildSeedStatus(summary, workerStatus);
+  });
+  ipcMain.handle(IPC_CHANNELS.updateSeedDefaults, async (_event, payload) => {
+    const request = normalizeUpdateSeedDefaultsRequest(payload);
+    const summary = await seedStore.updateDefaults(request);
+    return buildSeedStatus(summary, await getWorkerSeedStatus(workerManager));
   });
   ipcMain.handle(IPC_CHANNELS.listKnowledgeBases, () =>
     workerManager.call<KnowledgeBaseListResponse>("knowledge_bases.list"),
@@ -260,6 +268,7 @@ export function registerIpcHandlers(workerManager: PythonWorkerManager): void {
         apiKey,
         baseUrl: summary.baseUrl,
         embeddingModel: summary.defaultEmbeddingModel,
+        background: true,
       },
       300_000,
     );
@@ -281,6 +290,7 @@ export function registerIpcHandlers(workerManager: PythonWorkerManager): void {
         apiKey,
         baseUrl: summary.baseUrl,
         embeddingModel: summary.defaultEmbeddingModel,
+        background: true,
       },
       300_000,
     );
@@ -292,6 +302,42 @@ export function registerIpcHandlers(workerManager: PythonWorkerManager): void {
       30_000,
     ),
   );
+  ipcMain.handle(IPC_CHANNELS.listIndexVersions, (_event, knowledgeBaseId) =>
+    workerManager.call<IndexVersionListResponse>(
+      "indexes.list",
+      { knowledgeBaseId: normalizeKnowledgeBaseId(knowledgeBaseId) },
+      30_000,
+    ),
+  );
+  ipcMain.handle(IPC_CHANNELS.estimateIndex, async (_event, knowledgeBaseId) => {
+    const summary = await seedStore.summary();
+    return workerManager.call<IndexBuildEstimate>(
+      "indexes.estimate",
+      {
+        knowledgeBaseId: normalizeKnowledgeBaseId(knowledgeBaseId),
+        embeddingModel: summary.defaultEmbeddingModel,
+      },
+      30_000,
+    );
+  });
+  ipcMain.handle(IPC_CHANNELS.rollbackIndex, (_event, payload) => {
+    const request = normalizeIndexVersionRequest(payload);
+    return workerManager.call<BuildIndexResponse>(
+      "indexes.rollback",
+      request,
+      60_000,
+    );
+  });
+  ipcMain.handle(IPC_CHANNELS.retryIndex, async (_event, payload) => {
+    const request = normalizeIndexVersionRequest(payload);
+    const summary = await seedStore.summary();
+    const apiKey = await seedStore.readApiKey();
+    return workerManager.call<BuildIndexResponse>(
+      "indexes.retry",
+      { ...request, apiKey, baseUrl: summary.baseUrl, background: true },
+      300_000,
+    );
+  });
   ipcMain.handle(IPC_CHANNELS.hybridSearch, async (_event, payload) => {
     const request = normalizeHybridSearchRequest(payload);
     const summary = await seedStore.summary();
@@ -325,6 +371,14 @@ export function registerIpcHandlers(workerManager: PythonWorkerManager): void {
       30_000,
     ),
   );
+  ipcMain.handle(IPC_CHANNELS.setConversationModel, (_event, payload) => {
+    const request = normalizeConversationModelRequest(payload);
+    return workerManager.call<ConversationAnswerResponse["conversation"]>(
+      "conversations.set_model",
+      request,
+      30_000,
+    );
+  });
   ipcMain.handle(IPC_CHANNELS.answerConversation, async (_event, payload) => {
     const request = normalizeConversationAnswerRequest(payload);
     const summary = await seedStore.summary();
@@ -419,6 +473,24 @@ function normalizeSaveRequest(payload: unknown): SaveSeedCredentialRequest {
       typeof defaultEmbeddingModel === "string"
         ? defaultEmbeddingModel
         : undefined,
+  };
+}
+
+function normalizeUpdateSeedDefaultsRequest(
+  payload: unknown,
+): UpdateSeedDefaultsRequest {
+  if (!isRecord(payload)) {
+    throw new Error("默认模型参数无效");
+  }
+  return {
+    defaultChatModel: normalizeNonEmptyString(
+      payload.defaultChatModel,
+      "默认对话模型",
+    ),
+    defaultEmbeddingModel: normalizeNonEmptyString(
+      payload.defaultEmbeddingModel,
+      "默认 Embedding 模型",
+    ),
   };
 }
 
@@ -527,6 +599,32 @@ function normalizeHybridSearchRequest(payload: unknown): HybridSearchRequest {
       "检索候选数量限制",
     ),
     rerankModelVersion,
+  };
+}
+
+function normalizeIndexVersionRequest(payload: unknown): {
+  knowledgeBaseId: string;
+  indexVersionId: string;
+} {
+  if (!isRecord(payload)) {
+    throw new Error("索引版本参数无效");
+  }
+  return {
+    knowledgeBaseId: normalizeKnowledgeBaseId(payload.knowledgeBaseId),
+    indexVersionId: normalizeNonEmptyString(payload.indexVersionId, "索引版本 ID"),
+  };
+}
+
+function normalizeConversationModelRequest(payload: unknown): {
+  conversationId: string;
+  modelId: string;
+} {
+  if (!isRecord(payload)) {
+    throw new Error("对话模型参数无效");
+  }
+  return {
+    conversationId: normalizeNonEmptyString(payload.conversationId, "对话 ID"),
+    modelId: normalizeNonEmptyString(payload.modelId, "对话模型"),
   };
 }
 

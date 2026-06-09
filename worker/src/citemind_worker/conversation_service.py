@@ -12,12 +12,14 @@ from citemind_worker.model_catalog import (
     DEFAULT_ARK_BASE_URL,
     DEFAULT_CHAT_MODEL,
     DEFAULT_EMBEDDING_MODEL,
+    context_window_for,
 )
 from citemind_worker.retrieval_service import HybridRetrievalService
 from citemind_worker.storage import StorageRuntime
 
 DEFAULT_REFUSAL = "当前知识库中没有足够证据回答这个问题。"
 DEFAULT_MAX_OUTPUT_TOKENS = 2400
+HISTORY_SUMMARY_LINE_CHARS = 240
 PLAIN_CITATION_PATTERN = re.compile(r"\[([A-Za-z0-9_.:-]+)\]")
 
 ANSWER_SCHEMA: dict[str, object] = {
@@ -99,6 +101,14 @@ class ConversationService:
             "messages": self._message_records(conversation_id),
         }
 
+    def set_model(self, conversation_id: str, model_id: str) -> dict[str, object]:
+        clean_model_id = model_id.strip()
+        if not clean_model_id:
+            raise ValueError("modelId must be a non-empty string")
+        self._conversation_record(conversation_id)
+        self._touch_conversation(conversation_id, model_id=clean_model_id)
+        return self._conversation_record(conversation_id)
+
     async def answer(
         self,
         *,
@@ -107,7 +117,7 @@ class ConversationService:
         conversation_id: str | None = None,
         api_key: str | None = None,
         base_url: str = DEFAULT_ARK_BASE_URL,
-        chat_model: str = DEFAULT_CHAT_MODEL,
+        chat_model: str | None = None,
         embedding_model: str = DEFAULT_EMBEDDING_MODEL,
         limit: int = 8,
         candidate_limit: int = 24,
@@ -147,7 +157,7 @@ class ConversationService:
         conversation_id: str | None = None,
         api_key: str | None = None,
         base_url: str = DEFAULT_ARK_BASE_URL,
-        chat_model: str = DEFAULT_CHAT_MODEL,
+        chat_model: str | None = None,
         embedding_model: str = DEFAULT_EMBEDDING_MODEL,
         limit: int = 8,
         candidate_limit: int = 24,
@@ -159,7 +169,17 @@ class ConversationService:
             knowledge_base_id=knowledge_base_id,
             conversation_id=conversation_id,
             title=clean_query,
-            model_id=chat_model,
+            model_id=chat_model or DEFAULT_CHAT_MODEL,
+        )
+        effective_chat_model = (
+            chat_model
+            or (str(conversation["modelId"]) if conversation["modelId"] else None)
+            or DEFAULT_CHAT_MODEL
+        )
+        history_context = self._history_context(
+            str(conversation["id"]),
+            model_id=effective_chat_model,
+            max_output_tokens=max_output_tokens,
         )
         user_message = self._insert_message(
             conversation_id=str(conversation["id"]),
@@ -200,9 +220,10 @@ class ConversationService:
                 conversation=conversation,
                 user_message=user_message,
                 retrieval=retrieval,
-                chat_model=chat_model,
+                chat_model=effective_chat_model,
                 generation_time_ms=_elapsed_ms(started),
                 reason="no_retrieval_candidates",
+                history_context=history_context,
             )
             for event in _delta_events(str(response["content"])):
                 yield event
@@ -212,22 +233,28 @@ class ConversationService:
         if api_key is None or not api_key.strip():
             raise ValueError("尚未配置 Ark API Key，无法生成回答")
         gateway = self.gateway_factory(api_key, base_url, embedding_model)
-        prompt = _answer_prompt(query=clean_query, retrieval=retrieval, retry_feedback=None)
+        prompt = _answer_prompt(
+            query=clean_query,
+            retrieval=retrieval,
+            retry_feedback=None,
+            history_context=history_context,
+        )
         plain_prompt = _plain_answer_prompt(
             query=clean_query,
             retrieval=retrieval,
             retry_feedback=None,
+            history_context=history_context,
         )
         attempts: list[dict[str, object]] = []
         retry_count = 0
         final_answer: dict[str, object] | None = None
         final_validation: dict[str, object] | None = None
-        yield {"type": "generation.started", "modelId": chat_model}
+        yield {"type": "generation.started", "modelId": effective_chat_model}
 
         for attempt_index in range(2):
             raw_answer, generation_meta = await _generate_answer_candidate(
                 gateway,
-                model=chat_model,
+                model=effective_chat_model,
                 structured_prompt=prompt,
                 plain_prompt=plain_prompt,
                 candidate_chunk_ids=candidate_chunk_ids,
@@ -261,11 +288,13 @@ class ConversationService:
                 query=clean_query,
                 retrieval=retrieval,
                 retry_feedback=validation,
+                history_context=history_context,
             )
             plain_prompt = _plain_answer_prompt(
                 query=clean_query,
                 retrieval=retrieval,
                 retry_feedback=validation,
+                history_context=history_context,
             )
 
         assert final_answer is not None
@@ -276,11 +305,12 @@ class ConversationService:
             retrieval=retrieval,
             answer=final_answer,
             validation=final_validation,
-            chat_model=chat_model,
+            chat_model=effective_chat_model,
             max_output_tokens=max_output_tokens,
             generation_time_ms=_elapsed_ms(started),
             retry_count=retry_count,
             attempts=attempts,
+            history_context=history_context,
         )
         yield {"type": "citation.validated", "validation": response["citationValidation"]}
         for event in _delta_events(str(response["content"])):
@@ -300,6 +330,7 @@ class ConversationService:
         generation_time_ms: int,
         retry_count: int,
         attempts: Sequence[dict[str, object]],
+        history_context: dict[str, object],
     ) -> dict[str, object]:
         evidence_sufficient = answer["evidenceSufficient"] is True and validation["valid"] is True
         if evidence_sufficient:
@@ -339,6 +370,7 @@ class ConversationService:
                     "valid": validation["valid"],
                     "invalidCitations": validation["invalidCitations"],
                 },
+                "historyContext": history_context,
             },
             index_version_id=_index_version_id(retrieval),
         )
@@ -375,6 +407,7 @@ class ConversationService:
         chat_model: str,
         generation_time_ms: int,
         reason: str,
+        history_context: dict[str, object],
     ) -> dict[str, object]:
         assistant_message = self._insert_message(
             conversation_id=str(conversation["id"]),
@@ -388,6 +421,7 @@ class ConversationService:
                 "refusalReason": reason,
                 "candidateChunkIds": [],
                 "retrieval": retrieval.get("retrieval"),
+                "historyContext": history_context,
             },
             index_version_id=_index_version_id(retrieval),
         )
@@ -651,6 +685,18 @@ class ConversationService:
         if row is None:
             raise ValueError("Knowledge base not found")
 
+    def _history_context(
+        self,
+        conversation_id: str,
+        *,
+        model_id: str,
+        max_output_tokens: int,
+    ) -> dict[str, object]:
+        messages = self._message_records(conversation_id)
+        context_window = context_window_for(model_id)
+        budget_chars = max(2_000, (context_window - max_output_tokens - 4_000) * 3)
+        return _compact_history(messages, budget_chars=budget_chars)
+
 
 def _ark_gateway_factory(api_key: str, base_url: str, embedding_model: str) -> AnswerGateway:
     return ArkModelGateway(
@@ -665,6 +711,7 @@ def _answer_prompt(
     query: str,
     retrieval: dict[str, object],
     retry_feedback: dict[str, object] | None,
+    history_context: dict[str, object],
 ) -> str:
     retry_text = ""
     if retry_feedback is not None:
@@ -681,6 +728,7 @@ def _answer_prompt(
         "\n每个回答段落都必须给出 evidence_chunk_ids，且只能引用候选证据中的 chunk_id。"
         "\n输出必须符合 JSON Schema，不要输出 Markdown 或额外解释。"
         f"{retry_text}"
+        f"\n\n对话历史：\n{_history_prompt(history_context)}"
         f"\n\n用户问题：{query}"
         "\n\n候选证据："
         f"\n{_evidence_context(retrieval)}"
@@ -706,6 +754,53 @@ def _evidence_context(retrieval: dict[str, object]) -> str:
             }
         )
     return json.dumps(evidence, ensure_ascii=False)
+
+
+def _compact_history(
+    messages: Sequence[dict[str, object]],
+    *,
+    budget_chars: int,
+) -> dict[str, object]:
+    recent: list[dict[str, str]] = []
+    used = 0
+    split_at = len(messages)
+    for index in range(len(messages) - 1, -1, -1):
+        message = messages[index]
+        content = str(message.get("content", ""))
+        cost = len(content) + 32
+        if recent and used + cost > budget_chars:
+            split_at = index + 1
+            break
+        recent.append({"role": str(message.get("role", "")), "content": content})
+        used += cost
+        split_at = index
+    recent.reverse()
+    older = messages[:split_at]
+    summary_lines = [
+        (
+            f"{message.get('role', '')}: "
+            f"{_preview(str(message.get('content', '')))[:HISTORY_SUMMARY_LINE_CHARS]}"
+        )
+        for message in older
+    ]
+    return {
+        "strategy": "summary_and_recent" if older else "recent_only",
+        "originalMessageCount": len(messages),
+        "summarizedMessageCount": len(older),
+        "recentMessageCount": len(recent),
+        "summary": "\n".join(summary_lines),
+        "recentMessages": recent,
+    }
+
+
+def _history_prompt(history_context: dict[str, object]) -> str:
+    summary = history_context.get("summary")
+    recent = history_context.get("recentMessages")
+    payload = {
+        "summary": summary if isinstance(summary, str) else "",
+        "recent_messages": recent if isinstance(recent, list) else [],
+    }
+    return json.dumps(payload, ensure_ascii=False)
 
 
 async def _generate_answer_candidate(
@@ -837,6 +932,7 @@ def _plain_answer_prompt(
     query: str,
     retrieval: dict[str, object],
     retry_feedback: dict[str, object] | None,
+    history_context: dict[str, object],
 ) -> str:
     retry_text = ""
     if retry_feedback is not None:
@@ -854,6 +950,7 @@ def _plain_answer_prompt(
         "\n每个事实段落末尾必须使用方括号引用至少一个候选 chunk_id，例如 [chunk-xxx]。"
         "\n引用只能来自候选证据中的 chunk_id。"
         f"{retry_text}"
+        f"\n\n对话历史：\n{_history_prompt(history_context)}"
         f"\n\n用户问题：{query}"
         "\n\n候选证据："
         f"\n{_evidence_context(retrieval)}"

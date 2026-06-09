@@ -1,4 +1,5 @@
 import asyncio
+import time
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -112,6 +113,12 @@ class FakeEmbedder:
 class FailingEmbedder:
     async def embed(self, texts: Sequence[str]) -> list[list[float]]:
         raise RuntimeError("embedding failed")
+
+
+class SlowEmbedder(FakeEmbedder):
+    async def embed(self, texts: Sequence[str]) -> list[list[float]]:
+        await asyncio.sleep(0.2)
+        return await super().embed(texts)
 
 
 def test_build_index_for_pdf_docx_image_and_web(tmp_path: Path) -> None:
@@ -358,3 +365,101 @@ def test_failed_rebuild_keeps_previous_index_available(tmp_path: Path) -> None:
     status = IndexingService(storage, embedder=FakeEmbedder()).index_status(knowledge_base_id)
     assert status["ready"] is True
     assert status["indexVersion"]["id"] == built["indexVersion"]["id"]
+
+
+def test_index_versions_estimate_rollback_and_failed_retry(tmp_path: Path) -> None:
+    storage = StorageRuntime(tmp_path, vector_dimension=3)
+    storage.initialize()
+    knowledge_base_id = KnowledgeBaseService(storage).create("版本生命周期测试")["id"]
+    assert isinstance(knowledge_base_id, str)
+    source_file = tmp_path / "sample.pdf"
+    source_file.write_text("pdf raw", encoding="utf-8")
+    SourceImportService(storage, parser=FakeParser()).import_file(
+        knowledge_base_id,
+        str(source_file),
+    )
+    indexer = IndexingService(storage, embedder=FakeEmbedder())
+
+    estimate = indexer.estimate_build(knowledge_base_id, embedding_model="embedding-next")
+    first = asyncio.run(indexer.build_index(knowledge_base_id, embedding_model="embedding-v1"))
+    second = asyncio.run(indexer.build_index(knowledge_base_id, embedding_model="embedding-v2"))
+    versions = indexer.list_versions(knowledge_base_id)
+
+    assert estimate["documentCount"] == 1
+    assert estimate["chunkCount"] == 1
+    assert estimate["estimatedEmbeddingCalls"] == 1
+    assert versions["versions"][0]["id"] == second["indexVersion"]["id"]
+    assert versions["versions"][1]["status"] == "retired"
+    assert versions["versions"][1]["retainedUntil"] is not None
+
+    rolled_back = indexer.rollback(knowledge_base_id, str(first["indexVersion"]["id"]))
+    assert rolled_back["indexVersion"]["id"] == first["indexVersion"]["id"]
+
+    with pytest.raises(RuntimeError, match="embedding failed"):
+        asyncio.run(
+            IndexingService(storage, embedder=FailingEmbedder()).build_index(
+                knowledge_base_id,
+                embedding_model="embedding-failed",
+            )
+        )
+    failed = next(
+        version
+        for version in indexer.list_versions(knowledge_base_id)["versions"]
+        if version["status"] == "failed"
+    )
+    assert failed["failureReason"] == "embedding failed"
+    retried = asyncio.run(
+        indexer.retry_failed(knowledge_base_id, str(failed["id"]))
+    )
+    assert retried["ready"] is True
+    assert retried["indexVersion"]["embeddingModel"] == "embedding-failed"
+
+
+def test_background_index_build_can_pause_resume_and_cancel(tmp_path: Path) -> None:
+    storage = StorageRuntime(tmp_path, vector_dimension=3)
+    storage.initialize()
+    knowledge_base_id = KnowledgeBaseService(storage).create("后台索引测试")["id"]
+    assert isinstance(knowledge_base_id, str)
+    source_file = tmp_path / "sample.pdf"
+    source_file.write_text("pdf raw", encoding="utf-8")
+    SourceImportService(storage, parser=FakeParser()).import_file(
+        knowledge_base_id,
+        str(source_file),
+    )
+    indexer = IndexingService(storage, embedder=SlowEmbedder())
+
+    started = indexer.start_background_build(knowledge_base_id)
+    job_id = str(started["jobId"])
+    _wait_for_job_status(indexer, job_id, {"running"})
+    indexer.jobs.pause(job_id)
+    time.sleep(0.3)
+
+    assert indexer.jobs.get(job_id)["status"] == "paused"
+    assert indexer.index_status(knowledge_base_id)["ready"] is False
+
+    indexer.jobs.resume(job_id)
+    _wait_for_job_status(indexer, job_id, {"completed"})
+    assert indexer.index_status(knowledge_base_id)["ready"] is True
+
+    cancelled = indexer.start_background_build(knowledge_base_id)
+    cancelled_job_id = str(cancelled["jobId"])
+    _wait_for_job_status(indexer, cancelled_job_id, {"running"})
+    indexer.jobs.cancel(cancelled_job_id)
+    _wait_for_job_status(indexer, cancelled_job_id, {"cancelled"})
+    time.sleep(0.3)
+    assert indexer.jobs.get(cancelled_job_id)["status"] == "cancelled"
+
+
+def _wait_for_job_status(
+    indexer: IndexingService,
+    job_id: str,
+    statuses: set[str],
+    *,
+    timeout: float = 3,
+) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if str(indexer.jobs.get(job_id)["status"]) in statuses:
+            return
+        time.sleep(0.02)
+    raise AssertionError(f"job {job_id} did not reach {statuses}")

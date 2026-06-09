@@ -14,6 +14,8 @@ const api: DesktopApi = {
       ipcRenderer.invoke(IPC_CHANNELS.validateSeedCredential),
     deleteCredential: () =>
       ipcRenderer.invoke(IPC_CHANNELS.deleteSeedCredential),
+    updateDefaults: (request) =>
+      ipcRenderer.invoke(IPC_CHANNELS.updateSeedDefaults, request),
   },
   knowledgeBases: {
     list: () => ipcRenderer.invoke(IPC_CHANNELS.listKnowledgeBases),
@@ -61,6 +63,20 @@ const api: DesktopApi = {
       ipcRenderer.invoke(IPC_CHANNELS.rebuildIndex, knowledgeBaseId),
     status: (knowledgeBaseId) =>
       ipcRenderer.invoke(IPC_CHANNELS.getIndexStatus, knowledgeBaseId),
+    list: (knowledgeBaseId) =>
+      ipcRenderer.invoke(IPC_CHANNELS.listIndexVersions, knowledgeBaseId),
+    estimate: (knowledgeBaseId) =>
+      ipcRenderer.invoke(IPC_CHANNELS.estimateIndex, knowledgeBaseId),
+    rollback: (knowledgeBaseId, indexVersionId) =>
+      ipcRenderer.invoke(IPC_CHANNELS.rollbackIndex, {
+        knowledgeBaseId,
+        indexVersionId,
+      }),
+    retry: (knowledgeBaseId, indexVersionId) =>
+      ipcRenderer.invoke(IPC_CHANNELS.retryIndex, {
+        knowledgeBaseId,
+        indexVersionId,
+      }),
   },
   retrieval: {
     hybridSearch: (request) =>
@@ -71,6 +87,11 @@ const api: DesktopApi = {
       ipcRenderer.invoke(IPC_CHANNELS.listConversations, knowledgeBaseId),
     messages: (conversationId) =>
       ipcRenderer.invoke(IPC_CHANNELS.conversationMessages, conversationId),
+    setModel: (conversationId, modelId) =>
+      ipcRenderer.invoke(IPC_CHANNELS.setConversationModel, {
+        conversationId,
+        modelId,
+      }),
     answer: (request) =>
       ipcRenderer.invoke(IPC_CHANNELS.answerConversation, request),
   },

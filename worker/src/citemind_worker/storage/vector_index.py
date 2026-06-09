@@ -65,6 +65,13 @@ class VectorIndex:
         for index_version_id in dict.fromkeys(index_version_ids):
             self.table.delete(f"index_version_id = '{_escape_sql(index_version_id)}'")
 
+    def count_index_version(self, index_version_id: str) -> int:
+        return int(
+            self.table.count_rows(
+                f"index_version_id = '{_escape_sql(index_version_id)}'"
+            )
+        )
+
     def search(
         self,
         *,

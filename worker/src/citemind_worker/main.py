@@ -311,7 +311,15 @@ def create_server(
         api_key = _optional_nullable_str(values, "apiKey")
         base_url = _optional_str(values, "baseUrl", DEFAULT_ARK_BASE_URL)
         embedding_model = _optional_str(values, "embeddingModel", DEFAULT_EMBEDDING_MODEL)
+        background = _optional_bool(values, "background", False)
         try:
+            if background:
+                return service.start_background_build(
+                    knowledge_base_id,
+                    api_key=api_key,
+                    base_url=base_url,
+                    embedding_model=embedding_model,
+                )  # type: ignore[return-value]
             return await service.build_index(
                 knowledge_base_id,
                 api_key=api_key,
@@ -337,7 +345,16 @@ def create_server(
         api_key = _optional_nullable_str(values, "apiKey")
         base_url = _optional_str(values, "baseUrl", DEFAULT_ARK_BASE_URL)
         embedding_model = _optional_str(values, "embeddingModel", DEFAULT_EMBEDDING_MODEL)
+        background = _optional_bool(values, "background", False)
         try:
+            if background:
+                return service.start_background_build(
+                    knowledge_base_id,
+                    api_key=api_key,
+                    base_url=base_url,
+                    embedding_model=embedding_model,
+                    job_type="index.rebuild",
+                )  # type: ignore[return-value]
             return await service.rebuild_index(
                 knowledge_base_id,
                 api_key=api_key,
@@ -356,6 +373,63 @@ def create_server(
             return service.index_status(
                 knowledge_base_id,
                 index_version_id=index_version_id,
+            )  # type: ignore[return-value]
+        except ValueError as error:
+            raise RpcError(-32602, str(error)) from error
+
+    def list_index_versions(params: JsonValue) -> JsonValue:
+        values = require_object_params(params)
+        service = _require_indexing_service(indexes)
+        knowledge_base_id = _required_str(values, "knowledgeBaseId")
+        try:
+            return service.list_versions(knowledge_base_id)  # type: ignore[return-value]
+        except ValueError as error:
+            raise RpcError(-32602, str(error)) from error
+
+    def estimate_index(params: JsonValue) -> JsonValue:
+        values = require_object_params(params)
+        service = _require_indexing_service(indexes)
+        knowledge_base_id = _required_str(values, "knowledgeBaseId")
+        embedding_model = _optional_str(values, "embeddingModel", DEFAULT_EMBEDDING_MODEL)
+        try:
+            return service.estimate_build(
+                knowledge_base_id,
+                embedding_model=embedding_model,
+            )  # type: ignore[return-value]
+        except ValueError as error:
+            raise RpcError(-32602, str(error)) from error
+
+    def rollback_index(params: JsonValue) -> JsonValue:
+        values = require_object_params(params)
+        service = _require_indexing_service(indexes)
+        knowledge_base_id = _required_str(values, "knowledgeBaseId")
+        index_version_id = _required_str(values, "indexVersionId")
+        try:
+            return service.rollback(knowledge_base_id, index_version_id)  # type: ignore[return-value]
+        except ValueError as error:
+            raise RpcError(-32602, str(error)) from error
+
+    async def retry_index(params: JsonValue) -> JsonValue:
+        values = require_object_params(params)
+        service = _require_indexing_service(indexes)
+        knowledge_base_id = _required_str(values, "knowledgeBaseId")
+        index_version_id = _required_str(values, "indexVersionId")
+        api_key = _optional_nullable_str(values, "apiKey")
+        base_url = _optional_str(values, "baseUrl", DEFAULT_ARK_BASE_URL)
+        background = _optional_bool(values, "background", False)
+        try:
+            if background:
+                return service.start_background_retry(
+                    knowledge_base_id,
+                    index_version_id,
+                    api_key=api_key,
+                    base_url=base_url,
+                )  # type: ignore[return-value]
+            return await service.retry_failed(
+                knowledge_base_id,
+                index_version_id,
+                api_key=api_key,
+                base_url=base_url,
             )  # type: ignore[return-value]
         except ValueError as error:
             raise RpcError(-32602, str(error)) from error
@@ -403,6 +477,16 @@ def create_server(
         except ValueError as error:
             raise RpcError(-32602, str(error)) from error
 
+    def set_conversation_model(params: JsonValue) -> JsonValue:
+        values = require_object_params(params)
+        service = _require_conversation_service(conversations)
+        conversation_id = _required_str(values, "conversationId")
+        model_id = _required_str(values, "modelId")
+        try:
+            return service.set_model(conversation_id, model_id)  # type: ignore[return-value]
+        except ValueError as error:
+            raise RpcError(-32602, str(error)) from error
+
     async def answer_conversation(params: JsonValue) -> JsonValue:
         values = require_object_params(params)
         service = _require_conversation_service(conversations)
@@ -411,7 +495,7 @@ def create_server(
         conversation_id = _optional_nullable_str(values, "conversationId")
         api_key = _optional_nullable_str(values, "apiKey")
         base_url = _optional_str(values, "baseUrl", DEFAULT_ARK_BASE_URL)
-        chat_model = _optional_str(values, "chatModel", DEFAULT_CHAT_MODEL)
+        chat_model = _optional_nullable_str(values, "chatModel")
         embedding_model = _optional_str(values, "embeddingModel", DEFAULT_EMBEDDING_MODEL)
         limit = _optional_int(values, "limit", 8)
         candidate_limit = _optional_int(values, "candidateLimit", 24)
@@ -461,9 +545,14 @@ def create_server(
     server.register("indexes.delete", delete_indexes)
     server.register("indexes.rebuild", rebuild_index)
     server.register("indexes.status", index_status)
+    server.register("indexes.list", list_index_versions)
+    server.register("indexes.estimate", estimate_index)
+    server.register("indexes.rollback", rollback_index)
+    server.register("indexes.retry", retry_index)
     server.register("retrieval.hybrid_search", hybrid_search)
     server.register("conversations.list", list_conversations)
     server.register("conversations.messages", conversation_messages)
+    server.register("conversations.set_model", set_conversation_model)
     server.register("conversations.answer", answer_conversation)
     return server
 

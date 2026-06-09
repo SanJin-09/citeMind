@@ -9,6 +9,8 @@ import type {
   ConversationRecord,
   DuplicateAction,
   HybridSearchResult,
+  IndexBuildEstimate,
+  IndexVersionRecord,
   KnowledgeBaseRecord,
   KnowledgeBaseSource,
   ModelCapabilityStatus,
@@ -340,6 +342,10 @@ function App(): React.JSX.Element {
   );
   const [indexBusy, setIndexBusy] = useState(false);
   const [indexError, setIndexError] = useState("");
+  const [indexVersions, setIndexVersions] = useState<IndexVersionRecord[]>([]);
+  const [indexEstimate, setIndexEstimate] = useState<IndexBuildEstimate | null>(
+    null,
+  );
   const [sourceDeleteBusyId, setSourceDeleteBusyId] = useState("");
   const [duplicateBusyId, setDuplicateBusyId] = useState("");
   const [confirmAction, setConfirmAction] = useState<ConfirmAction | null>(
@@ -367,6 +373,9 @@ function App(): React.JSX.Element {
   >({});
   const [chatBusy, setChatBusy] = useState(false);
   const [chatError, setChatError] = useState("");
+  const [chatModel, setChatModel] = useState<string>(
+    SEED_DEFAULTS.defaultChatModel,
+  );
   const [selectedEvidence, setSelectedEvidence] =
     useState<EvidenceSelection | null>(null);
   const [sourceJumpNotice, setSourceJumpNotice] = useState("");
@@ -386,9 +395,16 @@ function App(): React.JSX.Element {
   const [seedStatus, setSeedStatus] = useState<SeedCredentialStatus | null>(
     null,
   );
-  const [seedForm, setSeedForm] = useState({
+  const [seedForm, setSeedForm] = useState<{
+    name: string;
+    apiKey: string;
+    defaultChatModel: string;
+    defaultEmbeddingModel: string;
+  }>({
     name: "我的 Seed API",
     apiKey: "",
+    defaultChatModel: SEED_DEFAULTS.defaultChatModel,
+    defaultEmbeddingModel: SEED_DEFAULTS.defaultEmbeddingModel,
   });
   const [seedBusy, setSeedBusy] = useState(false);
   const [seedError, setSeedError] = useState("");
@@ -430,6 +446,11 @@ function App(): React.JSX.Element {
       if (status.name) {
         setSeedForm((form) => ({ ...form, name: status.name ?? form.name }));
       }
+      setSeedForm((form) => ({
+        ...form,
+        defaultChatModel: status.defaultChatModel,
+        defaultEmbeddingModel: status.defaultEmbeddingModel,
+      }));
     } catch (error) {
       setSeedError(
         error instanceof Error ? error.message : "Seed API 状态读取失败",
@@ -537,6 +558,28 @@ function App(): React.JSX.Element {
     }
   }, []);
 
+  const loadIndexLifecycle = useCallback(async (knowledgeBaseId: string) => {
+    if (!knowledgeBaseId) {
+      setIndexVersions([]);
+      setIndexEstimate(null);
+      return;
+    }
+    try {
+      const [versions, estimate] = await Promise.all([
+        getDesktopApi().indexes.list(knowledgeBaseId),
+        getDesktopApi().indexes.estimate(knowledgeBaseId),
+      ]);
+      setIndexVersions(versions.versions);
+      setIndexEstimate(estimate);
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "索引版本状态读取失败";
+      if (!message.includes("Preload IPC")) {
+        setIndexError(message);
+      }
+    }
+  }, []);
+
   const loadConversations = useCallback(async (knowledgeBaseId: string) => {
     if (!knowledgeBaseId) {
       setConversations([]);
@@ -569,10 +612,12 @@ function App(): React.JSX.Element {
     void loadConversations(activeKnowledgeBaseId);
     void loadParseChecks(activeKnowledgeBaseId);
     void loadIndexStatus(activeKnowledgeBaseId);
+    void loadIndexLifecycle(activeKnowledgeBaseId);
   }, [
     activeKnowledgeBaseId,
     loadConversations,
     loadIndexStatus,
+    loadIndexLifecycle,
     loadParseChecks,
   ]);
 
@@ -628,6 +673,7 @@ function App(): React.JSX.Element {
   const startNewConversation = (): void => {
     resetConversationWorkspace();
     setQuery("");
+    setChatModel(seedStatus?.defaultChatModel ?? SEED_DEFAULTS.defaultChatModel);
   };
 
   const openConversation = async (
@@ -639,6 +685,11 @@ function App(): React.JSX.Element {
       const result =
         await getDesktopApi().conversations.messages(targetConversationId);
       setConversationId(result.conversation.id);
+      setChatModel(
+        result.conversation.modelId ??
+          seedStatus?.defaultChatModel ??
+          SEED_DEFAULTS.defaultChatModel,
+      );
       setMessages(result.messages);
       setAnswerResponses({});
       setSelectedEvidence(null);
@@ -747,6 +798,7 @@ function App(): React.JSX.Element {
         knowledgeBaseId: activeKnowledgeBaseId,
         query: value,
         conversationId,
+        chatModel,
         limit: 8,
         candidateLimit: 24,
       });
@@ -916,6 +968,7 @@ function App(): React.JSX.Element {
       loadJobs(),
       loadParseChecks(knowledgeBaseId),
       loadIndexStatus(knowledgeBaseId),
+      loadIndexLifecycle(knowledgeBaseId),
     ]);
   };
 
@@ -1094,6 +1147,64 @@ function App(): React.JSX.Element {
     }
   };
 
+  const rollbackIndex = async (indexVersionId: string): Promise<void> => {
+    if (!activeKnowledgeBaseId) {
+      return;
+    }
+    setIndexBusy(true);
+    setIndexError("");
+    try {
+      setIndexStatus(
+        await getDesktopApi().indexes.rollback(
+          activeKnowledgeBaseId,
+          indexVersionId,
+        ),
+      );
+      await refreshImportState(activeKnowledgeBaseId);
+    } catch (error) {
+      setIndexError(error instanceof Error ? error.message : "索引回滚失败");
+    } finally {
+      setIndexBusy(false);
+    }
+  };
+
+  const retryIndex = async (indexVersionId: string): Promise<void> => {
+    if (!activeKnowledgeBaseId) {
+      return;
+    }
+    setIndexBusy(true);
+    setIndexError("");
+    try {
+      setIndexStatus(
+        await getDesktopApi().indexes.retry(
+          activeKnowledgeBaseId,
+          indexVersionId,
+        ),
+      );
+      await refreshImportState(activeKnowledgeBaseId);
+    } catch (error) {
+      setIndexError(error instanceof Error ? error.message : "索引重试失败");
+    } finally {
+      setIndexBusy(false);
+    }
+  };
+
+  const changeChatModel = async (modelId: string): Promise<void> => {
+    setChatModel(modelId);
+    if (!conversationId) {
+      return;
+    }
+    try {
+      const conversation = await getDesktopApi().conversations.setModel(
+        conversationId,
+        modelId,
+      );
+      setConversations((items) => upsertConversation(items, conversation));
+    } catch (error) {
+      setChatError(error instanceof Error ? error.message : "对话模型切换失败");
+    }
+  };
+
   const submitConfirmAction = async (): Promise<void> => {
     if (confirmAction?.kind === "delete-source") {
       await deleteSource(confirmAction.source);
@@ -1138,12 +1249,39 @@ function App(): React.JSX.Element {
     }
   };
 
+  const updateSeedDefaults = async (): Promise<void> => {
+    setSeedBusy(true);
+    setSeedError("");
+    try {
+      const status = await getDesktopApi().seed.updateDefaults({
+        defaultChatModel: seedForm.defaultChatModel,
+        defaultEmbeddingModel: seedForm.defaultEmbeddingModel,
+      });
+      setSeedStatus(status);
+      if (!conversationId) {
+        setChatModel(status.defaultChatModel);
+      }
+      if (activeKnowledgeBaseId) {
+        await loadIndexLifecycle(activeKnowledgeBaseId);
+      }
+    } catch (error) {
+      setSeedError(error instanceof Error ? error.message : "默认模型保存失败");
+    } finally {
+      setSeedBusy(false);
+    }
+  };
+
   const deleteSeedCredential = async (): Promise<void> => {
     setSeedBusy(true);
     setSeedError("");
     try {
       setSeedStatus(await getDesktopApi().seed.deleteCredential());
-      setSeedForm({ name: "我的 Seed API", apiKey: "" });
+      setSeedForm({
+        name: "我的 Seed API",
+        apiKey: "",
+        defaultChatModel: SEED_DEFAULTS.defaultChatModel,
+        defaultEmbeddingModel: SEED_DEFAULTS.defaultEmbeddingModel,
+      });
     } catch (error) {
       setSeedError(
         error instanceof Error ? error.message : "Seed API 删除失败",
@@ -1371,7 +1509,9 @@ function App(): React.JSX.Element {
               error={importError}
               indexBusy={indexBusy}
               indexError={indexError}
+              indexEstimate={indexEstimate}
               indexStatus={indexStatus}
+              indexVersions={indexVersions}
               items={parseChecks}
               duplicateBusyId={duplicateBusyId}
               summary={parseSummary}
@@ -1382,6 +1522,10 @@ function App(): React.JSX.Element {
                 setConfirmAction({ kind: "delete-index" });
               }}
               onRefresh={() => void loadParseChecks(activeKnowledgeBaseId)}
+              onRetryIndex={(indexVersionId) => void retryIndex(indexVersionId)}
+              onRollbackIndex={(indexVersionId) =>
+                void rollbackIndex(indexVersionId)
+              }
               onResolveDuplicate={(sourceId, action) =>
                 void resolveDuplicate(sourceId, action)
               }
@@ -1572,6 +1716,22 @@ function App(): React.JSX.Element {
               <span className="composer-meta">
                 {chatBusy ? "生成中" : `${selectedCount} 个来源`}
               </span>
+              <select
+                aria-label="当前对话模型"
+                className="composer-model"
+                disabled={chatBusy}
+                title="从下一条消息开始使用"
+                value={chatModel}
+                onChange={(event) => void changeChatModel(event.target.value)}
+              >
+                {(seedStatus?.models ?? FALLBACK_SEED_MODELS)
+                  .filter((model) => model.role !== "embedding")
+                  .map((model) => (
+                    <option key={model.id} value={model.id}>
+                      {model.label}
+                    </option>
+                  ))}
+              </select>
               <button
                 aria-label="发送问题"
                 className="send-button"
@@ -1719,6 +1879,7 @@ function App(): React.JSX.Element {
           onFormChange={setSeedForm}
           onReload={() => void loadSeedStatus()}
           onSave={() => void saveSeedCredential()}
+          onSaveDefaults={() => void updateSeedDefaults()}
           onValidate={() => void validateSeedCredential()}
         />
       )}
@@ -2228,7 +2389,9 @@ function ParseCheckPanel({
   error,
   indexBusy,
   indexError,
+  indexEstimate,
   indexStatus,
+  indexVersions,
   items,
   duplicateBusyId,
   summary,
@@ -2236,6 +2399,8 @@ function ParseCheckPanel({
   onCollapse,
   onDeleteIndex,
   onRefresh,
+  onRetryIndex,
+  onRollbackIndex,
   onResolveDuplicate,
   onRebuildIndex,
 }: {
@@ -2243,7 +2408,9 @@ function ParseCheckPanel({
   error: string;
   indexBusy: boolean;
   indexError: string;
+  indexEstimate: IndexBuildEstimate | null;
   indexStatus: BuildIndexResponse | null;
+  indexVersions: IndexVersionRecord[];
   items: ParseCheckItem[];
   duplicateBusyId: string;
   summary: ParseCheckSummary;
@@ -2251,6 +2418,8 @@ function ParseCheckPanel({
   onCollapse: () => void;
   onDeleteIndex: () => void;
   onRefresh: () => void;
+  onRetryIndex: (indexVersionId: string) => void;
+  onRollbackIndex: (indexVersionId: string) => void;
   onResolveDuplicate: (sourceId: string, action: DuplicateAction) => void;
   onRebuildIndex: () => void;
 }): React.JSX.Element {
@@ -2292,6 +2461,16 @@ function ParseCheckPanel({
       </div>
       {error && <div className="inline-error">{error}</div>}
       {indexError && <div className="inline-error">{indexError}</div>}
+      {indexEstimate && (
+        <div className="index-estimate">
+          <strong>新索引预估</strong>
+          <span>
+            {indexEstimate.documentCount} 文档 · {indexEstimate.chunkCount} 文本块 ·{" "}
+            {indexEstimate.estimatedEmbeddingCalls} 次 Embedding 调用
+          </span>
+          <small>{indexEstimate.pricingNotice}</small>
+        </div>
+      )}
       <div className="parse-list">
         {items.length > 0 ? (
           items.slice(0, 4).map((item) => (
@@ -2394,6 +2573,41 @@ function ParseCheckPanel({
         >
           {indexBusy ? "建立索引中..." : "开始建立索引"}
         </button>
+      )}
+      {indexVersions.length > 0 && (
+        <div className="index-version-list">
+          {indexVersions.slice(0, 4).map((version) => (
+            <article key={version.id}>
+              <div>
+                <strong>
+                  {version.isCurrent ? "当前版本" : sourceStatusLabel(version.status)}
+                </strong>
+                <span>{version.embeddingModel}</span>
+                <small>
+                  {version.chunkCount} chunks · {version.id.slice(0, 12)}
+                </small>
+              </div>
+              {!version.isCurrent && version.status === "retired" && (
+                <button
+                  disabled={indexBusy}
+                  type="button"
+                  onClick={() => onRollbackIndex(version.id)}
+                >
+                  回滚
+                </button>
+              )}
+              {version.status === "failed" && (
+                <button
+                  disabled={indexBusy}
+                  type="button"
+                  onClick={() => onRetryIndex(version.id)}
+                >
+                  重试
+                </button>
+              )}
+            </article>
+          ))}
+        </div>
       )}
     </section>
   );
@@ -2695,17 +2909,29 @@ function SeedSettingsModal({
   onFormChange,
   onReload,
   onSave,
+  onSaveDefaults,
   onValidate,
 }: {
   busy: boolean;
   error: string;
-  form: { name: string; apiKey: string };
+  form: {
+    name: string;
+    apiKey: string;
+    defaultChatModel: string;
+    defaultEmbeddingModel: string;
+  };
   status: SeedCredentialStatus | null;
   onClose: () => void;
   onDelete: () => void;
-  onFormChange: (next: { name: string; apiKey: string }) => void;
+  onFormChange: (next: {
+    name: string;
+    apiKey: string;
+    defaultChatModel: string;
+    defaultEmbeddingModel: string;
+  }) => void;
   onReload: () => void;
   onSave: () => void;
+  onSaveDefaults: () => void;
   onValidate: () => void;
 }): React.JSX.Element {
   const configured = Boolean(status?.configured);
@@ -2757,6 +2983,46 @@ function SeedSettingsModal({
               }
             />
           </label>
+          <label>
+            <span>新对话默认模型</span>
+            <select
+              value={form.defaultChatModel}
+              onChange={(event) =>
+                onFormChange({
+                  ...form,
+                  defaultChatModel: event.target.value,
+                })
+              }
+            >
+              {models
+                .filter((model) => model.role !== "embedding")
+                .map((model) => (
+                  <option key={model.id} value={model.id}>
+                    {model.label} · {model.id}
+                  </option>
+                ))}
+            </select>
+          </label>
+          <label>
+            <span>默认 Embedding 模型</span>
+            <select
+              value={form.defaultEmbeddingModel}
+              onChange={(event) =>
+                onFormChange({
+                  ...form,
+                  defaultEmbeddingModel: event.target.value,
+                })
+              }
+            >
+              {models
+                .filter((model) => model.role === "embedding")
+                .map((model) => (
+                  <option key={model.id} value={model.id}>
+                    {model.label} · {model.id}
+                  </option>
+                ))}
+            </select>
+          </label>
           <div className="seed-status-line">
             <span>Base URL</span>
             <strong>
@@ -2793,6 +3059,14 @@ function SeedSettingsModal({
             onClick={onSave}
           >
             {busy ? "验证中..." : "保存并验证"}
+          </button>
+          <button
+            className="button ghost"
+            disabled={busy || !configured}
+            type="button"
+            onClick={onSaveDefaults}
+          >
+            保存默认模型
           </button>
           <button
             className="button ghost"
@@ -3289,6 +3563,7 @@ function jobTypeLabel(type: string): string {
     embedding: "Embedding",
     "index.build": "索引构建",
     "index.rebuild": "索引重建",
+    "index.retry": "索引重试",
     "web.refresh": "网页更新",
   };
   return labels[type] ?? type;

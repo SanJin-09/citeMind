@@ -42,7 +42,7 @@ def test_sqlite_migration_creates_required_tables_and_accepts_null_page_number(
 ) -> None:
     database = SqliteDatabase(AppDataPaths(tmp_path))
 
-    assert database.initialize() == 1
+    assert database.initialize() == 2
     status = database.status()
     assert status["fts5Enabled"] is True
     assert set(status["tables"]) >= REQUIRED_TABLES
@@ -152,7 +152,7 @@ def test_storage_runtime_initializes_all_backends(tmp_path: Path) -> None:
     summary = storage.health_summary()
     assert summary == {
         "ready": True,
-        "schemaVersion": 1,
+        "schemaVersion": 2,
         "fts5Enabled": True,
         "vectorDimension": 3,
     }

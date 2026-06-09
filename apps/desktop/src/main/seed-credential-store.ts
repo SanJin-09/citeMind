@@ -98,6 +98,24 @@ export class SeedCredentialStore {
     );
   }
 
+  async updateDefaults(input: {
+    defaultChatModel: string;
+    defaultEmbeddingModel: string;
+  }): Promise<SeedCredentialSummary> {
+    const record = await this.readRecord();
+    if (!record) {
+      throw new Error("尚未配置 Ark API Key");
+    }
+    record.defaultChatModel = input.defaultChatModel;
+    record.defaultEmbeddingModel = input.defaultEmbeddingModel;
+    record.updatedAt = new Date().toISOString();
+    await writeFile(this.filePath, JSON.stringify(record, null, 2), {
+      encoding: "utf8",
+      mode: 0o600,
+    });
+    return this.summary();
+  }
+
   async delete(): Promise<SeedCredentialSummary> {
     await rm(this.filePath, { force: true });
     return this.emptySummary();

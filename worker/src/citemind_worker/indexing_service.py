@@ -1,4 +1,7 @@
+import asyncio
 import json
+import math
+import threading
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -69,20 +72,23 @@ class IndexingService:
         api_key: str | None = None,
         base_url: str = DEFAULT_ARK_BASE_URL,
         embedding_model: str = DEFAULT_EMBEDDING_MODEL,
+        job_id: str | None = None,
     ) -> dict[str, object]:
         self._ensure_knowledge_base(knowledge_base_id)
         candidates = self._source_version_candidates(knowledge_base_id)
         if not candidates:
             raise ValueError("当前知识库没有可索引的解析结果")
 
-        job = self.jobs.create("index.build", knowledge_base_id)
-        job_id = str(job["id"])
+        if job_id is None:
+            job = self.jobs.create("index.build", knowledge_base_id)
+            job_id = str(job["id"])
         index_version_id = f"index-{uuid4().hex}"
         self._create_building_index(
             index_version_id=index_version_id,
             knowledge_base_id=knowledge_base_id,
             embedding_model=embedding_model,
         )
+        await self._wait_until_runnable(job_id)
         self.jobs.update_progress(
             job_id,
             status="running",
@@ -117,6 +123,8 @@ class IndexingService:
                 chunks=chunks,
                 vectors=vectors,
             )
+            await self._wait_until_runnable(job_id)
+            self._validate_index(index_version_id=index_version_id, expected_count=len(chunks))
             self._mark_ready(
                 knowledge_base_id=knowledge_base_id,
                 index_version_id=index_version_id,
@@ -128,11 +136,193 @@ class IndexingService:
                 checkpoint=_stage_checkpoint(parse=1, ocr=1, embedding=1, index=1),
             )
         except Exception as error:
-            self._mark_failed(index_version_id)
-            self.jobs.update_progress(job_id, status="failed", error_message=_public_error(error))
+            self._mark_failed(index_version_id, _public_error(error))
+            if self.jobs.get(job_id)["status"] != "cancelled":
+                self.jobs.update_progress(
+                    job_id,
+                    status="failed",
+                    error_message=_public_error(error),
+                )
             raise
 
-        return self.index_status(knowledge_base_id, index_version_id=index_version_id)
+        return {
+            **self.index_status(knowledge_base_id, index_version_id=index_version_id),
+            "jobId": job_id,
+        }
+
+    def start_background_build(
+        self,
+        knowledge_base_id: str,
+        *,
+        api_key: str | None = None,
+        base_url: str = DEFAULT_ARK_BASE_URL,
+        embedding_model: str = DEFAULT_EMBEDDING_MODEL,
+        job_type: str = "index.build",
+    ) -> dict[str, object]:
+        self._ensure_knowledge_base(knowledge_base_id)
+        job = self.jobs.create(job_type, knowledge_base_id)
+        job_id = str(job["id"])
+
+        def run() -> None:
+            try:
+                asyncio.run(
+                    self.build_index(
+                        knowledge_base_id,
+                        api_key=api_key,
+                        base_url=base_url,
+                        embedding_model=embedding_model,
+                        job_id=job_id,
+                    )
+                )
+            except Exception:
+                return
+
+        threading.Thread(
+            target=run,
+            name=f"citemind-{job_type}-{job_id}",
+            daemon=True,
+        ).start()
+        return {
+            **self.index_status(knowledge_base_id),
+            "jobId": job_id,
+            "building": True,
+        }
+
+    def estimate_build(
+        self,
+        knowledge_base_id: str,
+        *,
+        embedding_model: str = DEFAULT_EMBEDDING_MODEL,
+    ) -> dict[str, object]:
+        self._ensure_knowledge_base(knowledge_base_id)
+        candidates = self._source_version_candidates(knowledge_base_id)
+        chunks = self._load_chunks(candidates)
+        characters = sum(len(chunk.normalized_text) for chunk in chunks)
+        return {
+            "knowledgeBaseId": knowledge_base_id,
+            "embeddingModel": embedding_model,
+            "documentCount": len(candidates),
+            "chunkCount": len(chunks),
+            "estimatedEmbeddingCalls": math.ceil(len(chunks) / EMBEDDING_BATCH_SIZE),
+            "estimatedInputCharacters": characters,
+            "estimatedCost": None,
+            "pricingNotice": "实际费用以火山方舟当前计费规则和最终输入量为准",
+        }
+
+    def list_versions(self, knowledge_base_id: str) -> dict[str, object]:
+        self._ensure_knowledge_base(knowledge_base_id)
+        with self.storage.database.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT id, embedding_provider, embedding_model, embedding_dimension,
+                       chunking_version, parser_version, status, is_current,
+                       created_at, activated_at, retained_until, failure_reason,
+                       (SELECT COUNT(*) FROM chunks WHERE index_version_id = iv.id) AS chunk_count
+                FROM index_versions iv
+                WHERE knowledge_base_id = ?
+                ORDER BY is_current DESC, created_at DESC
+                """,
+                (knowledge_base_id,),
+            ).fetchall()
+        return {
+            "knowledgeBaseId": knowledge_base_id,
+            "versions": [_index_record(row) for row in rows],
+        }
+
+    def rollback(self, knowledge_base_id: str, index_version_id: str) -> dict[str, object]:
+        self._ensure_knowledge_base(knowledge_base_id)
+        self._validate_index(index_version_id=index_version_id)
+        with self.storage.database.connect() as connection:
+            target = connection.execute(
+                """
+                SELECT status
+                FROM index_versions
+                WHERE id = ? AND knowledge_base_id = ?
+                """,
+                (index_version_id, knowledge_base_id),
+            ).fetchone()
+            if target is None or str(target["status"]) not in {"ready", "retired"}:
+                raise ValueError("目标索引版本不可回滚")
+            connection.execute(
+                """
+                UPDATE index_versions
+                SET is_current = 0,
+                    status = CASE WHEN status = 'ready' THEN 'retired' ELSE status END,
+                    retained_until = COALESCE(
+                        retained_until,
+                        strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '+7 days')
+                    )
+                WHERE knowledge_base_id = ? AND is_current = 1
+                """,
+                (knowledge_base_id,),
+            )
+            connection.execute(
+                """
+                UPDATE index_versions
+                SET status = 'ready',
+                    is_current = 1,
+                    activated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+                    retained_until = NULL,
+                    failure_reason = NULL
+                WHERE id = ?
+                """,
+                (index_version_id,),
+            )
+            connection.commit()
+        return self.index_status(knowledge_base_id)
+
+    async def retry_failed(
+        self,
+        knowledge_base_id: str,
+        index_version_id: str,
+        *,
+        api_key: str | None = None,
+        base_url: str = DEFAULT_ARK_BASE_URL,
+    ) -> dict[str, object]:
+        with self.storage.database.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT embedding_model, status
+                FROM index_versions
+                WHERE id = ? AND knowledge_base_id = ?
+                """,
+                (index_version_id, knowledge_base_id),
+            ).fetchone()
+        if row is None or str(row["status"]) != "failed":
+            raise ValueError("只能重试失败的索引版本")
+        return await self.build_index(
+            knowledge_base_id,
+            api_key=api_key,
+            base_url=base_url,
+            embedding_model=str(row["embedding_model"]),
+        )
+
+    def start_background_retry(
+        self,
+        knowledge_base_id: str,
+        index_version_id: str,
+        *,
+        api_key: str | None = None,
+        base_url: str = DEFAULT_ARK_BASE_URL,
+    ) -> dict[str, object]:
+        with self.storage.database.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT embedding_model, status
+                FROM index_versions
+                WHERE id = ? AND knowledge_base_id = ?
+                """,
+                (index_version_id, knowledge_base_id),
+            ).fetchone()
+        if row is None or str(row["status"]) != "failed":
+            raise ValueError("只能重试失败的索引版本")
+        return self.start_background_build(
+            knowledge_base_id,
+            api_key=api_key,
+            base_url=base_url,
+            embedding_model=str(row["embedding_model"]),
+            job_type="index.retry",
+        )
 
     def delete_indexes(self, knowledge_base_id: str) -> dict[str, object]:
         self._ensure_knowledge_base(knowledge_base_id)
@@ -229,7 +419,8 @@ class IndexingService:
             row = connection.execute(
                 """
                 SELECT id, embedding_provider, embedding_model, embedding_dimension,
-                       chunking_version, parser_version, status, is_current, created_at
+                       chunking_version, parser_version, status, is_current, created_at,
+                       activated_at, retained_until, failure_reason
                 FROM index_versions
                 WHERE knowledge_base_id = ?
                   AND (? IS NULL OR id = ?)
@@ -252,18 +443,7 @@ class IndexingService:
         return {
             "knowledgeBaseId": knowledge_base_id,
             "ready": str(row["status"]) == "ready",
-            "indexVersion": {
-                "id": str(row["id"]),
-                "embeddingProvider": str(row["embedding_provider"]),
-                "embeddingModel": str(row["embedding_model"]),
-                "embeddingDimension": int(row["embedding_dimension"]),
-                "chunkingVersion": str(row["chunking_version"]),
-                "parserVersion": str(row["parser_version"]),
-                "status": str(row["status"]),
-                "isCurrent": bool(row["is_current"]),
-                "createdAt": str(row["created_at"]),
-                "chunkCount": chunk_count,
-            },
+            "indexVersion": _index_record(row, chunk_count=chunk_count),
         }
 
     def _source_version_candidates(self, knowledge_base_id: str) -> list[SourceVersionCandidate]:
@@ -340,6 +520,7 @@ class IndexingService:
         vectors: list[list[float]] = []
         total = len(chunks)
         for start in range(0, total, EMBEDDING_BATCH_SIZE):
+            await self._wait_until_runnable(job_id)
             batch = chunks[start : start + EMBEDDING_BATCH_SIZE]
             vectors.extend(await embedder.embed([chunk.normalized_text for chunk in batch]))
             embedding_progress = min(1.0, len(vectors) / total)
@@ -354,6 +535,21 @@ class IndexingService:
                 ),
             )
         return vectors
+
+    async def _wait_until_runnable(self, job_id: str) -> None:
+        while True:
+            status = str(self.jobs.get(job_id)["status"])
+            if status == "cancelled":
+                raise ValueError("索引构建已取消")
+            if status in {"pending", "retrying"}:
+                self.jobs.update_progress(job_id, status="running")
+                return
+            if status == "paused":
+                await asyncio.sleep(0.1)
+                continue
+            if status == "failed":
+                raise ValueError("索引构建任务已失败")
+            return
 
     def _write_chunk_metadata(
         self,
@@ -457,7 +653,12 @@ class IndexingService:
                 """
                 UPDATE index_versions
                 SET is_current = 0,
-                    status = CASE WHEN status = 'ready' THEN 'retired' ELSE status END
+                    status = CASE WHEN status = 'ready' THEN 'retired' ELSE status END,
+                    retained_until = CASE
+                        WHEN status = 'ready'
+                        THEN strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '+7 days')
+                        ELSE retained_until
+                    END
                 WHERE knowledge_base_id = ?
                   AND id != ?
                   AND is_current = 1
@@ -468,7 +669,10 @@ class IndexingService:
                 """
                 UPDATE index_versions
                 SET status = 'ready',
-                    is_current = 1
+                    is_current = 1,
+                    activated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+                    retained_until = NULL,
+                    failure_reason = NULL
                 WHERE id = ?
                 """,
                 (index_version_id,),
@@ -496,13 +700,41 @@ class IndexingService:
             )
             connection.commit()
 
-    def _mark_failed(self, index_version_id: str) -> None:
+    def _mark_failed(self, index_version_id: str, reason: str) -> None:
         with self.storage.database.connect() as connection:
             connection.execute(
-                "UPDATE index_versions SET status = 'failed', is_current = 0 WHERE id = ?",
-                (index_version_id,),
+                """
+                UPDATE index_versions
+                SET status = 'failed', is_current = 0, failure_reason = ?
+                WHERE id = ?
+                """,
+                (reason, index_version_id),
             )
             connection.commit()
+
+    def _validate_index(self, *, index_version_id: str, expected_count: int | None = None) -> None:
+        with self.storage.database.connect() as connection:
+            chunk_count = int(
+                connection.execute(
+                    "SELECT COUNT(*) FROM chunks WHERE index_version_id = ?",
+                    (index_version_id,),
+                ).fetchone()[0]
+            )
+            fts_count = int(
+                connection.execute(
+                    "SELECT COUNT(*) FROM chunks_fts WHERE index_version_id = ?",
+                    (index_version_id,),
+                ).fetchone()[0]
+            )
+        vector_count = self.storage.vector_index.count_index_version(index_version_id)
+        required = chunk_count if expected_count is None else expected_count
+        counts = (chunk_count, fts_count, vector_count)
+        if required <= 0 or any(count != required for count in counts):
+            raise ValueError(
+                "索引完整性校验失败："
+                f"chunks={chunk_count}, fts={fts_count}, vectors={vector_count}, "
+                f"expected={required}"
+            )
 
     def _ensure_knowledge_base(self, knowledge_base_id: str) -> None:
         with self.storage.database.connect() as connection:
@@ -655,3 +887,23 @@ def _stage_checkpoint(
 def _public_error(error: Exception) -> str:
     message = str(error).strip()
     return message or error.__class__.__name__
+
+
+def _index_record(row: object, *, chunk_count: int | None = None) -> dict[str, object]:
+    return {
+        "id": str(row["id"]),  # type: ignore[index]
+        "embeddingProvider": str(row["embedding_provider"]),  # type: ignore[index]
+        "embeddingModel": str(row["embedding_model"]),  # type: ignore[index]
+        "embeddingDimension": int(row["embedding_dimension"]),  # type: ignore[index]
+        "chunkingVersion": str(row["chunking_version"]),  # type: ignore[index]
+        "parserVersion": str(row["parser_version"]),  # type: ignore[index]
+        "status": str(row["status"]),  # type: ignore[index]
+        "isCurrent": bool(row["is_current"]),  # type: ignore[index]
+        "createdAt": str(row["created_at"]),  # type: ignore[index]
+        "activatedAt": row["activated_at"],  # type: ignore[index]
+        "retainedUntil": row["retained_until"],  # type: ignore[index]
+        "failureReason": row["failure_reason"],  # type: ignore[index]
+        "chunkCount": int(row["chunk_count"])  # type: ignore[index]
+        if chunk_count is None
+        else chunk_count,
+    }

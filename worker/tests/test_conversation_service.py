@@ -4,7 +4,11 @@ from collections.abc import AsyncIterator, Sequence
 from pathlib import Path
 
 from citemind_worker.citation_validator import CitationValidator
-from citemind_worker.conversation_service import DEFAULT_REFUSAL, ConversationService
+from citemind_worker.conversation_service import (
+    DEFAULT_REFUSAL,
+    ConversationService,
+    _compact_history,
+)
 from citemind_worker.knowledge_base_service import KnowledgeBaseService
 from citemind_worker.retrieval_service import HybridRetrievalService
 from citemind_worker.storage import StorageRuntime
@@ -202,6 +206,52 @@ def test_conversation_refuses_without_retrieval_candidates(tmp_path: Path) -> No
         )
     assert params["evidenceSufficient"] is False
     assert params["refusalReason"] == "no_retrieval_candidates"
+
+
+def test_conversation_model_switch_applies_to_next_message_and_history_is_compacted(
+    tmp_path: Path,
+) -> None:
+    storage = StorageRuntime(tmp_path, vector_dimension=3)
+    storage.initialize()
+    knowledge_base_id = _seed_answer_fixture(storage)
+    service = ConversationService(storage, retrieval=EmptyRetrieval())
+    first = asyncio.run(
+        service.answer(
+            knowledge_base_id=knowledge_base_id,
+            query="第一条问题",
+            chat_model="model-a",
+        )
+    )
+    conversation_id = str(first["conversation"]["id"])
+
+    switched = service.set_model(conversation_id, "model-b")
+    second = asyncio.run(
+        service.answer(
+            knowledge_base_id=knowledge_base_id,
+            conversation_id=conversation_id,
+            query="第二条问题",
+        )
+    )
+    messages = service.messages(conversation_id)["messages"]
+    compacted = _compact_history(
+        [
+            {"role": "user", "content": "a" * 5000},
+            {"role": "assistant", "content": "b" * 5000},
+            {"role": "user", "content": "recent"},
+        ],
+        budget_chars=100,
+    )
+
+    assert switched["modelId"] == "model-b"
+    assert second["assistantMessage"]["modelId"] == "model-b"
+    assert [message["modelId"] for message in messages if message["role"] == "assistant"] == [
+        "model-a",
+        "model-b",
+    ]
+    assert compacted["strategy"] == "summary_and_recent"
+    assert compacted["summarizedMessageCount"] == 2
+    assert compacted["recentMessageCount"] == 1
+    assert len(messages) == 4
 
 
 def test_conversation_retries_once_then_refuses_invalid_citations(tmp_path: Path) -> None:

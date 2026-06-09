@@ -60,6 +60,11 @@ export interface SaveSeedCredentialRequest {
   defaultEmbeddingModel?: string;
 }
 
+export interface UpdateSeedDefaultsRequest {
+  defaultChatModel: string;
+  defaultEmbeddingModel: string;
+}
+
 export interface KnowledgeBaseSummary {
   sourceCount: number;
   sourcesByStatus: Record<string, number>;
@@ -251,6 +256,9 @@ export interface IndexVersionRecord {
   status: "building" | "ready" | "failed" | "retired";
   isCurrent: boolean;
   createdAt: string;
+  activatedAt: string | null;
+  retainedUntil: string | null;
+  failureReason: string | null;
   chunkCount: number;
 }
 
@@ -260,6 +268,23 @@ export interface BuildIndexResponse {
   indexVersion?: IndexVersionRecord;
   deletedIndexCount?: number;
   deletedChunkCount?: number;
+  jobId?: string;
+}
+
+export interface IndexVersionListResponse {
+  knowledgeBaseId: string;
+  versions: IndexVersionRecord[];
+}
+
+export interface IndexBuildEstimate {
+  knowledgeBaseId: string;
+  embeddingModel: string;
+  documentCount: number;
+  chunkCount: number;
+  estimatedEmbeddingCalls: number;
+  estimatedInputCharacters: number;
+  estimatedCost: number | null;
+  pricingNotice: string;
 }
 
 export interface HybridSearchRequest {
@@ -448,6 +473,9 @@ export interface DesktopApi {
     ) => Promise<SeedCredentialStatus>;
     validateCredential: () => Promise<SeedCredentialStatus>;
     deleteCredential: () => Promise<SeedCredentialStatus>;
+    updateDefaults: (
+      request: UpdateSeedDefaultsRequest,
+    ) => Promise<SeedCredentialStatus>;
   };
   knowledgeBases: {
     list: () => Promise<KnowledgeBaseListResponse>;
@@ -494,6 +522,16 @@ export interface DesktopApi {
     delete: (knowledgeBaseId: string) => Promise<BuildIndexResponse>;
     rebuild: (knowledgeBaseId: string) => Promise<BuildIndexResponse>;
     status: (knowledgeBaseId: string) => Promise<BuildIndexResponse>;
+    list: (knowledgeBaseId: string) => Promise<IndexVersionListResponse>;
+    estimate: (knowledgeBaseId: string) => Promise<IndexBuildEstimate>;
+    rollback: (
+      knowledgeBaseId: string,
+      indexVersionId: string,
+    ) => Promise<BuildIndexResponse>;
+    retry: (
+      knowledgeBaseId: string,
+      indexVersionId: string,
+    ) => Promise<BuildIndexResponse>;
   };
   retrieval: {
     hybridSearch: (
@@ -503,6 +541,10 @@ export interface DesktopApi {
   conversations: {
     list: (knowledgeBaseId: string) => Promise<ConversationListResponse>;
     messages: (conversationId: string) => Promise<ConversationMessagesResponse>;
+    setModel: (
+      conversationId: string,
+      modelId: string,
+    ) => Promise<ConversationRecord>;
     answer: (
       request: ConversationAnswerRequest,
     ) => Promise<ConversationAnswerResponse>;
@@ -516,6 +558,7 @@ export const IPC_CHANNELS = {
   saveSeedCredential: "citemind:seed:save-credential",
   validateSeedCredential: "citemind:seed:validate-credential",
   deleteSeedCredential: "citemind:seed:delete-credential",
+  updateSeedDefaults: "citemind:seed:update-defaults",
   listKnowledgeBases: "citemind:knowledge-bases:list",
   createKnowledgeBase: "citemind:knowledge-bases:create",
   renameKnowledgeBase: "citemind:knowledge-bases:rename",
@@ -539,9 +582,14 @@ export const IPC_CHANNELS = {
   deleteIndex: "citemind:indexes:delete",
   rebuildIndex: "citemind:indexes:rebuild",
   getIndexStatus: "citemind:indexes:status",
+  listIndexVersions: "citemind:indexes:list",
+  estimateIndex: "citemind:indexes:estimate",
+  rollbackIndex: "citemind:indexes:rollback",
+  retryIndex: "citemind:indexes:retry",
   hybridSearch: "citemind:retrieval:hybrid-search",
   listConversations: "citemind:conversations:list",
   conversationMessages: "citemind:conversations:messages",
+  setConversationModel: "citemind:conversations:set-model",
   answerConversation: "citemind:conversations:answer",
 } as const;
 
