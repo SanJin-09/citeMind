@@ -165,7 +165,11 @@ export type ParseCheckStatus =
   | "needs_ocr"
   | "failed"
   | "duplicate"
+  | "skipped"
+  | "linked"
   | "processing";
+
+export type DuplicateAction = "skip" | "keep" | "link";
 
 export interface ParseCheckSummary {
   total: number;
@@ -188,6 +192,9 @@ export interface ParseCheckItem {
   jobStatus: BackgroundJobStatus | null;
   errorMessage: string | null;
   duplicateOfSourceId: string | null;
+  duplicateKind: "original" | "content" | null;
+  duplicateResolution: DuplicateAction | null;
+  duplicateActions: DuplicateAction[];
   originalHash: string | null;
   contentHash: string | null;
   originalPath: string | null;
@@ -219,6 +226,11 @@ export interface ImportWebRequest {
   knowledgeBaseId: string;
   url: string;
   displayName?: string | null;
+}
+
+export interface ResolveDuplicateRequest {
+  sourceId: string;
+  action: DuplicateAction;
 }
 
 export interface DeleteSourceResponse {
@@ -473,6 +485,9 @@ export interface DesktopApi {
     importWeb: (request: ImportWebRequest) => Promise<ImportSourceResult>;
     parseChecks: (knowledgeBaseId: string) => Promise<ParseChecksResponse>;
     delete: (sourceId: string) => Promise<DeleteSourceResponse>;
+    resolveDuplicate: (
+      request: ResolveDuplicateRequest,
+    ) => Promise<ImportSourceResult>;
   };
   indexes: {
     build: (knowledgeBaseId: string) => Promise<BuildIndexResponse>;
@@ -519,6 +534,7 @@ export const IPC_CHANNELS = {
   importWebSource: "citemind:sources:import-web",
   listParseChecks: "citemind:sources:parse-checks",
   deleteSource: "citemind:sources:delete",
+  resolveDuplicate: "citemind:sources:resolve-duplicate",
   buildIndex: "citemind:indexes:build",
   deleteIndex: "citemind:indexes:delete",
   rebuildIndex: "citemind:indexes:rebuild",

@@ -22,6 +22,7 @@ import {
   type ModelCapabilityStatus,
   type ParseChecksResponse,
   type RenameKnowledgeBaseRequest,
+  type ResolveDuplicateRequest,
   type SaveSeedCredentialRequest,
   type SaveKnowledgeBaseRequest,
   SEED_DEFAULTS,
@@ -241,6 +242,14 @@ export function registerIpcHandlers(workerManager: PythonWorkerManager): void {
       60_000,
     ),
   );
+  ipcMain.handle(IPC_CHANNELS.resolveDuplicate, (_event, payload) => {
+    const request = normalizeResolveDuplicateRequest(payload);
+    return workerManager.call<ImportSourceResult>(
+      "sources.resolve_duplicate",
+      { sourceId: request.sourceId, action: request.action },
+      60_000,
+    );
+  });
   ipcMain.handle(IPC_CHANNELS.buildIndex, async (_event, knowledgeBaseId) => {
     const summary = await seedStore.summary();
     const apiKey = await seedStore.readApiKey();
@@ -476,6 +485,20 @@ function normalizeImportWebRequest(payload: unknown): ImportWebRequest {
     throw new Error("网页名称必须是字符串");
   }
   return { knowledgeBaseId, url, displayName };
+}
+
+function normalizeResolveDuplicateRequest(
+  payload: unknown,
+): ResolveDuplicateRequest {
+  if (!isRecord(payload)) {
+    throw new Error("重复来源处理参数无效");
+  }
+  const sourceId = normalizeNonEmptyString(payload.sourceId, "来源 ID");
+  const action = payload.action;
+  if (action !== "skip" && action !== "keep" && action !== "link") {
+    throw new Error("重复来源处理方式无效");
+  }
+  return { sourceId, action };
 }
 
 function normalizeHybridSearchRequest(payload: unknown): HybridSearchRequest {

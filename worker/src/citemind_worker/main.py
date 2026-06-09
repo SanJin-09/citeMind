@@ -248,11 +248,13 @@ def create_server(
         knowledge_base_id = _required_str(values, "knowledgeBaseId")
         file_path = _required_str(values, "filePath")
         display_name = _optional_nullable_str(values, "displayName")
+        duplicate_action = _optional_str(values, "duplicateAction", "ask")
         try:
             return service.import_file(
                 knowledge_base_id,
                 file_path,
                 display_name=display_name,
+                duplicate_action=duplicate_action,
             )  # type: ignore[return-value]
         except ValueError as error:
             raise RpcError(-32602, str(error)) from error
@@ -263,11 +265,13 @@ def create_server(
         knowledge_base_id = _required_str(values, "knowledgeBaseId")
         url = _required_str(values, "url")
         display_name = _optional_nullable_str(values, "displayName")
+        duplicate_action = _optional_str(values, "duplicateAction", "ask")
         try:
             return service.import_web(
                 knowledge_base_id,
                 url,
                 display_name=display_name,
+                duplicate_action=duplicate_action,
             )  # type: ignore[return-value]
         except ValueError as error:
             raise RpcError(-32602, str(error)) from error
@@ -287,6 +291,16 @@ def create_server(
         source_id = _required_str(values, "sourceId")
         try:
             return service.delete_source(source_id)  # type: ignore[return-value]
+        except ValueError as error:
+            raise RpcError(-32602, str(error)) from error
+
+    def resolve_duplicate(params: JsonValue) -> JsonValue:
+        values = require_object_params(params)
+        service = _require_source_import_service(source_imports)
+        source_id = _required_str(values, "sourceId")
+        action = _required_str(values, "action")
+        try:
+            return service.resolve_duplicate(source_id, action)  # type: ignore[return-value]
         except ValueError as error:
             raise RpcError(-32602, str(error)) from error
 
@@ -442,6 +456,7 @@ def create_server(
     server.register("sources.import_web", import_web)
     server.register("sources.parse_checks", parse_checks)
     server.register("sources.delete", delete_source)
+    server.register("sources.resolve_duplicate", resolve_duplicate)
     server.register("indexes.build", build_index)
     server.register("indexes.delete", delete_indexes)
     server.register("indexes.rebuild", rebuild_index)

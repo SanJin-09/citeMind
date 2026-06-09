@@ -7,6 +7,7 @@ import type {
   ConversationAnswerResponse,
   ConversationMessageRecord,
   ConversationRecord,
+  DuplicateAction,
   HybridSearchResult,
   KnowledgeBaseRecord,
   KnowledgeBaseSource,
@@ -205,6 +206,9 @@ const FALLBACK_PARSE_CHECKS: ParseCheckItem[] = [
     jobStatus: "completed",
     errorMessage: null,
     duplicateOfSourceId: null,
+    duplicateKind: null,
+    duplicateResolution: null,
+    duplicateActions: [],
     originalHash: "demo",
     contentHash: "demo-content",
     originalPath: null,
@@ -227,6 +231,9 @@ const FALLBACK_PARSE_CHECKS: ParseCheckItem[] = [
     jobStatus: "running",
     errorMessage: null,
     duplicateOfSourceId: null,
+    duplicateKind: null,
+    duplicateResolution: null,
+    duplicateActions: [],
     originalHash: "demo-2",
     contentHash: null,
     originalPath: null,
@@ -334,6 +341,7 @@ function App(): React.JSX.Element {
   const [indexBusy, setIndexBusy] = useState(false);
   const [indexError, setIndexError] = useState("");
   const [sourceDeleteBusyId, setSourceDeleteBusyId] = useState("");
+  const [duplicateBusyId, setDuplicateBusyId] = useState("");
   const [confirmAction, setConfirmAction] = useState<ConfirmAction | null>(
     null,
   );
@@ -1011,6 +1019,27 @@ function App(): React.JSX.Element {
     }
   };
 
+  const resolveDuplicate = async (
+    sourceId: string,
+    action: DuplicateAction,
+  ): Promise<void> => {
+    if (!activeKnowledgeBaseId) {
+      return;
+    }
+    setDuplicateBusyId(sourceId);
+    setImportError("");
+    try {
+      await getDesktopApi().sources.resolveDuplicate({ sourceId, action });
+      await refreshImportState(activeKnowledgeBaseId);
+    } catch (error) {
+      setImportError(
+        error instanceof Error ? error.message : "重复来源处理失败",
+      );
+    } finally {
+      setDuplicateBusyId("");
+    }
+  };
+
   const deleteIndex = async (): Promise<void> => {
     if (!activeKnowledgeBaseId) {
       setConfirmError("请先选择知识库");
@@ -1344,6 +1373,7 @@ function App(): React.JSX.Element {
               indexError={indexError}
               indexStatus={indexStatus}
               items={parseChecks}
+              duplicateBusyId={duplicateBusyId}
               summary={parseSummary}
               onBuildIndex={() => void buildIndex()}
               onCollapse={() => setParsePanelOpen(false)}
@@ -1352,6 +1382,9 @@ function App(): React.JSX.Element {
                 setConfirmAction({ kind: "delete-index" });
               }}
               onRefresh={() => void loadParseChecks(activeKnowledgeBaseId)}
+              onResolveDuplicate={(sourceId, action) =>
+                void resolveDuplicate(sourceId, action)
+              }
               onRebuildIndex={() => {
                 setConfirmError("");
                 setConfirmAction({ kind: "rebuild-index" });
@@ -2197,11 +2230,13 @@ function ParseCheckPanel({
   indexError,
   indexStatus,
   items,
+  duplicateBusyId,
   summary,
   onBuildIndex,
   onCollapse,
   onDeleteIndex,
   onRefresh,
+  onResolveDuplicate,
   onRebuildIndex,
 }: {
   busy: boolean;
@@ -2210,11 +2245,13 @@ function ParseCheckPanel({
   indexError: string;
   indexStatus: BuildIndexResponse | null;
   items: ParseCheckItem[];
+  duplicateBusyId: string;
   summary: ParseCheckSummary;
   onBuildIndex: () => void;
   onCollapse: () => void;
   onDeleteIndex: () => void;
   onRefresh: () => void;
+  onResolveDuplicate: (sourceId: string, action: DuplicateAction) => void;
   onRebuildIndex: () => void;
 }): React.JSX.Element {
   const indexableCount = items.filter((item) =>
@@ -2275,6 +2312,38 @@ function ParseCheckPanel({
               {item.preview && <p>{item.preview}</p>}
               {item.errorMessage && (
                 <p className="parse-error">{item.errorMessage}</p>
+              )}
+              {item.status === "duplicate" && (
+                <div className="duplicate-actions">
+                  <span>
+                    {item.duplicateKind === "original"
+                      ? "文件完全重复"
+                      : "正文内容重复"}
+                  </span>
+                  <div>
+                    <button
+                      disabled={duplicateBusyId === item.sourceId}
+                      type="button"
+                      onClick={() => onResolveDuplicate(item.sourceId, "skip")}
+                    >
+                      跳过
+                    </button>
+                    <button
+                      disabled={duplicateBusyId === item.sourceId}
+                      type="button"
+                      onClick={() => onResolveDuplicate(item.sourceId, "keep")}
+                    >
+                      保留副本
+                    </button>
+                    <button
+                      disabled={duplicateBusyId === item.sourceId}
+                      type="button"
+                      onClick={() => onResolveDuplicate(item.sourceId, "link")}
+                    >
+                      关联已有
+                    </button>
+                  </div>
+                </div>
               )}
             </article>
           ))
@@ -3153,6 +3222,8 @@ function sourceStatusLabel(status: string): string {
     parsed: "已解析",
     needs_ocr: "需要 OCR",
     duplicate: "重复",
+    skipped: "已跳过",
+    linked: "已关联",
     ready: "可用",
     failed: "失败",
     paused: "已暂停",
@@ -3168,6 +3239,8 @@ function parseStatusLabel(status: ParseCheckItem["status"]): string {
     needs_ocr: "需要 OCR",
     failed: "失败",
     duplicate: "重复",
+    skipped: "已跳过",
+    linked: "已关联",
     processing: "处理中",
   };
   return labels[status];
@@ -3199,6 +3272,8 @@ function summarizeParseChecks(items: ParseCheckItem[]): ParseCheckSummary {
     summary.total += 1;
     if (item.status === "needs_ocr") {
       summary.needsOcr += 1;
+    } else if (item.status === "skipped" || item.status === "linked") {
+      summary.success += 1;
     } else {
       summary[item.status] += 1;
     }

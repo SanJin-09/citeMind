@@ -49,6 +49,8 @@ const api: DesktopApi = {
       ipcRenderer.invoke(IPC_CHANNELS.listParseChecks, knowledgeBaseId),
     delete: (sourceId) =>
       ipcRenderer.invoke(IPC_CHANNELS.deleteSource, sourceId),
+    resolveDuplicate: (request) =>
+      ipcRenderer.invoke(IPC_CHANNELS.resolveDuplicate, request),
   },
   indexes: {
     build: (knowledgeBaseId) =>

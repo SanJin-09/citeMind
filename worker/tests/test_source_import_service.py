@@ -163,7 +163,57 @@ def test_import_marks_duplicate_content_without_indexing(tmp_path: Path) -> None
     assert checks["summary"]["duplicate"] == 1
     duplicate = next(item for item in checks["items"] if item["status"] == "duplicate")
     assert duplicate["duplicateOfSourceId"] is not None
+    assert duplicate["duplicateKind"] == "content"
+    assert duplicate["duplicateActions"] == ["skip", "keep", "link"]
+    assert duplicate["chunkCount"] == 1
     assert duplicate["sourceStatus"] == "duplicate"
+
+
+def test_duplicate_resolution_preserves_files_and_controls_index_eligibility(
+    tmp_path: Path,
+) -> None:
+    storage = StorageRuntime(tmp_path, vector_dimension=3)
+    storage.initialize()
+    knowledge_base_id = KnowledgeBaseService(storage).create("重复决策测试")["id"]
+    assert isinstance(knowledge_base_id, str)
+    service = SourceImportService(storage, parser=FakeParser(normalized_text="same content"))
+    source_file = tmp_path / "same.pdf"
+    source_file.write_text("identical bytes", encoding="utf-8")
+    service.import_file(knowledge_base_id, str(source_file))
+
+    decisions: dict[str, str] = {}
+    for action in ("skip", "keep", "link"):
+        imported = service.import_file(knowledge_base_id, str(source_file))
+        duplicate = imported["parseCheck"]
+        assert duplicate["duplicateKind"] == "original"
+        original_copy = Path(str(duplicate["originalPath"]))
+        artifact = Path(str(duplicate["parseArtifactPath"]))
+
+        resolved = service.resolve_duplicate(str(duplicate["sourceId"]), action)
+
+        decisions[action] = str(resolved["parseCheck"]["sourceStatus"])
+        assert resolved["parseCheck"]["duplicateResolution"] == action
+        assert original_copy.exists()
+        assert artifact.exists()
+
+    assert decisions == {
+        "skip": "skipped",
+        "keep": "processing",
+        "link": "linked",
+    }
+    with storage.database.connect() as connection:
+        eligible = connection.execute(
+            """
+            SELECT COUNT(*)
+            FROM sources s
+            JOIN source_versions sv ON sv.source_id = s.id
+            WHERE s.knowledge_base_id = ?
+              AND s.status IN ('processing', 'ready')
+              AND sv.status IN ('parsed', 'ready')
+            """,
+            (knowledge_base_id,),
+        ).fetchone()[0]
+    assert eligible == 2
 
 
 def test_import_failure_is_visible_in_parse_checks(tmp_path: Path) -> None:

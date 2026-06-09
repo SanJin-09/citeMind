@@ -814,6 +814,33 @@ kbd {
   background: #fff3f1;
 }
 
+.duplicate-actions {
+  display: grid;
+  gap: 6px;
+  color: #71518b;
+  font-size: 10px;
+}
+
+.duplicate-actions div {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 5px;
+}
+
+.duplicate-actions button {
+  min-width: 0;
+  padding: 5px 4px;
+  border: 1px solid #d8c9e9;
+  border-radius: 6px;
+  color: #634478;
+  background: #f8f3fc;
+  font-size: 9px;
+}
+
+.duplicate-actions button:disabled {
+  opacity: 0.55;
+}
+
 .empty-parse-state {
   display: grid;
   gap: 6px;

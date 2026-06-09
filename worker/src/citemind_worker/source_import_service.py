@@ -91,7 +91,9 @@ class SourceImportService:
         file_path: str,
         *,
         display_name: str | None = None,
+        duplicate_action: str = "ask",
     ) -> dict[str, object]:
+        duplicate_action = _duplicate_action(duplicate_action)
         path = Path(file_path).expanduser().resolve()
         if not path.is_file():
             raise ValueError("File does not exist")
@@ -117,7 +119,7 @@ class SourceImportService:
             display_name=display_name or path.name,
             uri=str(path),
             original_hash=file_hash,
-            status="duplicate" if duplicate_source_id else "processing",
+            status="processing",
         )
         shutil.copy2(path, object_path)
         self._insert_source_version(
@@ -126,24 +128,10 @@ class SourceImportService:
             original_path=object_path,
             snapshot_path=None,
             parse_artifact_path=artifact_path,
-            status="duplicate" if duplicate_source_id else "processing",
+            status="processing",
         )
         job = self.jobs.create("source.import", source_id)
         self.jobs.update_progress(str(job["id"]), status="running", progress=0.1)
-
-        if duplicate_source_id:
-            artifact = self._duplicate_artifact(
-                source_type=source_type,
-                duplicate_of_source_id=duplicate_source_id,
-                original_hash=file_hash,
-            )
-            _write_json(artifact_path, artifact)
-            self.jobs.update_progress(
-                str(job["id"]),
-                status="completed",
-                checkpoint=_stage_checkpoint(parse=1, ocr=1, embedding=0, index=0),
-            )
-            return self._import_result(source_id)
 
         try:
             parsed = self.parser.parse_file(object_path, source_type)
@@ -156,6 +144,9 @@ class SourceImportService:
                 original_hash=file_hash,
                 parsed=parsed,
                 snapshot_path=None,
+                duplicate_source_id=duplicate_source_id,
+                duplicate_kind="original" if duplicate_source_id else None,
+                duplicate_action=duplicate_action,
             )
         except Exception as error:
             return self._fail_import(
@@ -173,7 +164,9 @@ class SourceImportService:
         url: str,
         *,
         display_name: str | None = None,
+        duplicate_action: str = "ask",
     ) -> dict[str, object]:
+        duplicate_action = _duplicate_action(duplicate_action)
         clean_url = _clean_url(url)
         source_id = f"source-{uuid4().hex}"
         source_version_id = f"source-version-{uuid4().hex}"
@@ -209,21 +202,6 @@ class SourceImportService:
             duplicate_source_id = self._find_duplicate_original(
                 knowledge_base_id, snapshot_hash, excluding_source_id=source_id
             )
-            if duplicate_source_id:
-                artifact = self._duplicate_artifact(
-                    source_type="web",
-                    duplicate_of_source_id=duplicate_source_id,
-                    original_hash=snapshot_hash,
-                )
-                _write_json(artifact_path, artifact)
-                self._mark_duplicate(source_id, source_version_id)
-                self.jobs.update_progress(
-                    str(job["id"]),
-                    status="completed",
-                    checkpoint=_stage_checkpoint(parse=1, ocr=1, embedding=0, index=0),
-                )
-                return self._import_result(source_id)
-
             return self._complete_parsed_import(
                 job_id=str(job["id"]),
                 knowledge_base_id=knowledge_base_id,
@@ -233,6 +211,9 @@ class SourceImportService:
                 original_hash=snapshot_hash,
                 parsed=parsed,
                 snapshot_path=snapshot_path,
+                duplicate_source_id=duplicate_source_id,
+                duplicate_kind="original" if duplicate_source_id else None,
+                duplicate_action=duplicate_action,
             )
         except Exception as error:
             return self._fail_import(
@@ -397,6 +378,46 @@ class SourceImportService:
             "deletedChunkCount": len(chunk_ids),
         }
 
+    def resolve_duplicate(self, source_id: str, action: str) -> dict[str, object]:
+        clean_action = _duplicate_resolution(action)
+        check = self._check_by_source(source_id)
+        if check["status"] != "duplicate":
+            raise ValueError("Source is not waiting for a duplicate decision")
+        artifact_path = check.get("parseArtifactPath")
+        if not isinstance(artifact_path, str) or not artifact_path:
+            raise ValueError("Duplicate parse artifact is missing")
+        artifact = _read_artifact(artifact_path)
+        if not artifact.get("duplicateOfSourceId"):
+            raise ValueError("Duplicate source reference is missing")
+
+        original_status = artifact.get("duplicateOriginalStatus")
+        version_status = original_status if original_status in {"parsed", "needs_ocr"} else "parsed"
+        source_status = "processing"
+        if clean_action == "skip":
+            version_status = source_status = "skipped"
+        elif clean_action == "link":
+            version_status = source_status = "linked"
+        artifact["duplicateResolution"] = clean_action
+        artifact["status"] = version_status
+        _write_json(Path(artifact_path), artifact)
+
+        with self.storage.database.connect() as connection:
+            connection.execute(
+                """
+                UPDATE sources
+                SET status = ?,
+                    updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                WHERE id = ?
+                """,
+                (source_status, source_id),
+            )
+            connection.execute(
+                "UPDATE source_versions SET status = ? WHERE source_id = ?",
+                (version_status, source_id),
+            )
+            connection.commit()
+        return self._import_result(source_id)
+
     def _complete_parsed_import(
         self,
         *,
@@ -408,30 +429,20 @@ class SourceImportService:
         original_hash: str,
         parsed: ParsedDocument,
         snapshot_path: Path | None,
+        duplicate_source_id: str | None,
+        duplicate_kind: str | None,
+        duplicate_action: str,
     ) -> dict[str, object]:
         if not parsed.normalized_text:
             raise ParseFailure("解析结果为空")
         content_hash = _text_hash(parsed.normalized_text)
-        duplicate_source_id = self._find_duplicate_content(
-            knowledge_base_id,
-            content_hash,
-            excluding_source_id=source_id,
-        )
-        if duplicate_source_id:
-            artifact = self._duplicate_artifact(
-                source_type=parsed.source_type,
-                duplicate_of_source_id=duplicate_source_id,
-                original_hash=original_hash,
-                content_hash=content_hash,
+        if duplicate_source_id is None:
+            duplicate_source_id = self._find_duplicate_content(
+                knowledge_base_id,
+                content_hash,
+                excluding_source_id=source_id,
             )
-            _write_json(artifact_path, artifact)
-            self._mark_duplicate(source_id, source_version_id, content_hash=content_hash)
-            self.jobs.update_progress(
-                job_id,
-                status="completed",
-                checkpoint=_stage_checkpoint(parse=1, ocr=1, embedding=0, index=0),
-            )
-            return self._import_result(source_id)
+            duplicate_kind = "content" if duplicate_source_id else None
 
         artifact = _artifact_from_parsed(
             source_id=source_id,
@@ -441,6 +452,17 @@ class SourceImportService:
             content_hash=content_hash,
             snapshot_path=snapshot_path,
         )
+        if duplicate_source_id:
+            original_status = artifact.get("status")
+            artifact.update(
+                {
+                    "status": "duplicate",
+                    "duplicateOfSourceId": duplicate_source_id,
+                    "duplicateKind": duplicate_kind,
+                    "duplicateResolution": None,
+                    "duplicateOriginalStatus": original_status,
+                }
+            )
         _write_json(artifact_path, artifact)
         version_status = "needs_ocr" if parsed.needs_ocr else "parsed"
         with self.storage.database.connect() as connection:
@@ -473,6 +495,10 @@ class SourceImportService:
                 index=0,
             ),
         )
+        if duplicate_source_id:
+            self._mark_duplicate(source_id, source_version_id, content_hash=content_hash)
+            if duplicate_action != "ask":
+                return self.resolve_duplicate(source_id, duplicate_action)
         return self._import_result(source_id)
 
     def _fail_import(
@@ -759,6 +785,11 @@ class SourceImportService:
             "jobStatus": row["job_status"],  # type: ignore[index]
             "errorMessage": raw_pdf_error or artifact.get("errorMessage") or row["job_error"],  # type: ignore[index]
             "duplicateOfSourceId": artifact.get("duplicateOfSourceId"),
+            "duplicateKind": artifact.get("duplicateKind"),
+            "duplicateResolution": artifact.get("duplicateResolution"),
+            "duplicateActions": ["skip", "keep", "link"]
+            if status == "duplicate"
+            else [],
             "originalHash": row["original_hash"],  # type: ignore[index]
             "contentHash": row["content_hash"],  # type: ignore[index]
             "originalPath": row["original_path"],  # type: ignore[index]
@@ -1315,6 +1346,8 @@ def _check_status(
     artifact_status = artifact.get("status")
     if artifact_status == "duplicate" or source_status == "duplicate":
         return "duplicate"
+    if source_status in {"skipped", "linked"}:
+        return source_status
     if artifact_status == "failed" or source_status == "failed" or version_status == "failed":
         return "failed"
     if artifact_status == "needs_ocr" or version_status == "needs_ocr":
@@ -1409,6 +1442,18 @@ def _stage_checkpoint(
 def _public_error(error: Exception) -> str:
     message = str(error).strip()
     return message or error.__class__.__name__
+
+
+def _duplicate_action(value: str) -> str:
+    if value not in {"ask", "skip", "keep", "link"}:
+        raise ValueError("duplicateAction must be ask, skip, keep, or link")
+    return value
+
+
+def _duplicate_resolution(value: str) -> str:
+    if value not in {"skip", "keep", "link"}:
+        raise ValueError("Duplicate resolution must be skip, keep, or link")
+    return value
 
 
 def supported_file_extensions() -> Iterable[str]:
