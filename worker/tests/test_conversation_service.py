@@ -223,6 +223,50 @@ def test_conversation_exports_markdown_with_citations_and_usage(tmp_path: Path) 
     assert usage["byModel"] == {"doubao-test-chat": 1}
 
 
+def test_conversation_delete_cascades_messages_and_citations(tmp_path: Path) -> None:
+    storage = StorageRuntime(tmp_path, vector_dimension=3)
+    storage.initialize()
+    knowledge_base_id = _seed_answer_fixture(storage)
+    gateway = FakeAnswerGateway(
+        [
+            {
+                "evidence_sufficient": True,
+                "refusal_reason": None,
+                "paragraphs": [
+                    {
+                        "text": "Alpha 结论来自当前 PDF 证据。",
+                        "evidence_chunk_ids": ["chunk-pdf-valid"],
+                    }
+                ],
+            }
+        ]
+    )
+    service = ConversationService(
+        storage,
+        retrieval=HybridRetrievalService(storage, embedder=QueryEmbedder()),
+        gateway_factory=lambda _key, _base, _embedding: gateway,
+    )
+    response = asyncio.run(
+        service.answer(
+            knowledge_base_id=knowledge_base_id,
+            query="Alpha 怎么解释？",
+            api_key="ark-test",
+            chat_model="doubao-test-chat",
+        )
+    )
+
+    result = service.delete(str(response["conversation"]["id"]))
+
+    assert result == {
+        "knowledgeBaseId": knowledge_base_id,
+        "conversations": [],
+    }
+    with storage.database.connect() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM conversations").fetchone()[0] == 0
+        assert connection.execute("SELECT COUNT(*) FROM messages").fetchone()[0] == 0
+        assert connection.execute("SELECT COUNT(*) FROM answer_citations").fetchone()[0] == 0
+
+
 def test_conversation_refuses_without_retrieval_candidates(tmp_path: Path) -> None:
     storage = StorageRuntime(tmp_path, vector_dimension=3)
     storage.initialize()

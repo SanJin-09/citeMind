@@ -399,6 +399,13 @@ export function registerIpcHandlers(workerManager: PythonWorkerManager): void {
       30_000,
     ),
   );
+  ipcMain.handle(IPC_CHANNELS.deleteConversation, (_event, conversationId) =>
+    workerManager.call<ConversationListResponse>(
+      "conversations.delete",
+      { conversationId: normalizeNonEmptyString(conversationId, "对话 ID") },
+      30_000,
+    ),
+  );
   ipcMain.handle(IPC_CHANNELS.setConversationModel, (_event, payload) => {
     const request = normalizeConversationModelRequest(payload);
     return workerManager.call<ConversationAnswerResponse["conversation"]>(

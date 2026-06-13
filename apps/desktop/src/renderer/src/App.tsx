@@ -56,6 +56,7 @@ type KnowledgeBaseDialogMode = "create" | "rename" | "delete";
 
 type ConfirmAction =
   | { kind: "delete-source"; source: KnowledgeBaseSource }
+  | { kind: "delete-conversation"; conversation: ConversationRecord }
   | { kind: "delete-index" }
   | { kind: "rebuild-index" };
 
@@ -371,6 +372,8 @@ function App(): React.JSX.Element {
   const [searchError, setSearchError] = useState("");
   const [conversationId, setConversationId] = useState<string | null>(null);
   const [conversations, setConversations] = useState<ConversationRecord[]>([]);
+  const [conversationMenuOpen, setConversationMenuOpen] = useState(false);
+  const [conversationDeleteBusyId, setConversationDeleteBusyId] = useState("");
   const [messages, setMessages] = useState<ConversationMessageRecord[]>([]);
   const [answerResponses, setAnswerResponses] = useState<
     Record<string, ConversationAnswerResponse>
@@ -754,6 +757,7 @@ function App(): React.JSX.Element {
   };
 
   const startNewConversation = (): void => {
+    setConversationMenuOpen(false);
     resetConversationWorkspace();
     setQuery("");
     setChatModel(
@@ -764,6 +768,7 @@ function App(): React.JSX.Element {
   const openConversation = async (
     targetConversationId: string,
   ): Promise<void> => {
+    setConversationMenuOpen(false);
     setChatBusy(true);
     setChatError("");
     try {
@@ -783,6 +788,47 @@ function App(): React.JSX.Element {
       setChatError(error instanceof Error ? error.message : "对话读取失败");
     } finally {
       setChatBusy(false);
+    }
+  };
+
+  const deleteConversation = async (
+    conversation: ConversationRecord,
+  ): Promise<void> => {
+    setConversationDeleteBusyId(conversation.id);
+    setConfirmError("");
+    try {
+      const result = await getDesktopApi().conversations.delete(
+        conversation.id,
+      );
+      setConversations(result.conversations);
+      setKnowledgeBases((items) =>
+        items.map((item) =>
+          item.id === result.knowledgeBaseId
+            ? {
+                ...item,
+                summary: {
+                  ...item.summary,
+                  conversationCount: result.conversations.length,
+                },
+              }
+            : item,
+        ),
+      );
+      if (conversationId === conversation.id) {
+        resetConversationWorkspace();
+        setQuery("");
+        setChatModel(
+          seedStatus?.defaultChatModel ?? SEED_DEFAULTS.defaultChatModel,
+        );
+      }
+      setConversationMenuOpen(false);
+      setConfirmAction(null);
+    } catch (error) {
+      setConfirmError(
+        error instanceof Error ? error.message : "历史对话删除失败",
+      );
+    } finally {
+      setConversationDeleteBusyId("");
     }
   };
 
@@ -921,6 +967,7 @@ function App(): React.JSX.Element {
   ): Promise<void> => {
     setActiveKnowledgeBaseId(knowledgeBaseId);
     setKnowledgeBaseMenuOpen(false);
+    setConversationMenuOpen(false);
     setKnowledgeBaseError("");
     resetConversationWorkspace();
     setSearchResults([]);
@@ -1295,6 +1342,10 @@ function App(): React.JSX.Element {
       await deleteSource(confirmAction.source);
       return;
     }
+    if (confirmAction?.kind === "delete-conversation") {
+      await deleteConversation(confirmAction.conversation);
+      return;
+    }
     if (confirmAction?.kind === "delete-index") {
       await deleteIndex();
       return;
@@ -1583,11 +1634,6 @@ function App(): React.JSX.Element {
               </div>
             )}
           </div>
-          <button className="source-footer" type="button">
-            <Icon name="book" size={17} />
-            {sourceStatusLine(sourceSummary.sourcesByStatus)}
-            <Icon name="chevron" size={15} />
-          </button>
           {parsePanelOpen && (
             <ParseCheckPanel
               busy={importBusy}
@@ -1668,16 +1714,33 @@ function App(): React.JSX.Element {
             title="对话"
             subtitle={`${selectedCount} 个来源参与检索`}
             action={
-              <button
-                aria-label="导出当前对话"
-                className="icon-button"
-                disabled={!conversationId || Boolean(exportBusyId)}
-                title="导出当前对话为 Markdown"
-                type="button"
-                onClick={() => void exportMarkdown()}
-              >
-                <Icon name="download" size={17} />
-              </button>
+              <div className="chat-header-actions">
+                <ConversationHistoryMenu
+                  activeConversationId={conversationId}
+                  busy={chatBusy || Boolean(conversationDeleteBusyId)}
+                  conversations={conversations}
+                  open={conversationMenuOpen}
+                  onDelete={(conversation) => {
+                    setConfirmError("");
+                    setConfirmAction({
+                      kind: "delete-conversation",
+                      conversation,
+                    });
+                  }}
+                  onOpen={(id) => void openConversation(id)}
+                  onToggle={() => setConversationMenuOpen((value) => !value)}
+                />
+                <button
+                  aria-label="导出当前对话"
+                  className="icon-button"
+                  disabled={!conversationId || Boolean(exportBusyId)}
+                  title="导出当前对话为 Markdown"
+                  type="button"
+                  onClick={() => void exportMarkdown()}
+                >
+                  <Icon name="download" size={17} />
+                </button>
+              </div>
             }
           />
           <div
@@ -1712,15 +1775,6 @@ function App(): React.JSX.Element {
                   </span>
                 </div>
               </div>
-            )}
-
-            {!hasStartedConversation && conversations.length > 0 && (
-              <ConversationStrip
-                activeConversationId={conversationId}
-                busy={chatBusy}
-                conversations={conversations}
-                onOpen={(id) => void openConversation(id)}
-              />
             )}
 
             {!hasStartedConversation &&
@@ -1820,22 +1874,24 @@ function App(): React.JSX.Element {
               <span className="composer-meta">
                 {chatBusy ? "生成中" : `${selectedCount} 个来源`}
               </span>
-              <select
-                aria-label="当前对话模型"
-                className="composer-model"
-                disabled={chatBusy}
-                title="从下一条消息开始使用"
-                value={chatModel}
-                onChange={(event) => void changeChatModel(event.target.value)}
-              >
-                {(seedStatus?.models ?? FALLBACK_SEED_MODELS)
-                  .filter((model) => model.role !== "embedding")
-                  .map((model) => (
-                    <option key={model.id} value={model.id}>
-                      {model.label}
-                    </option>
-                  ))}
-              </select>
+              <label className="composer-model">
+                <select
+                  aria-label="当前对话模型"
+                  disabled={chatBusy}
+                  title="从下一条消息开始使用"
+                  value={chatModel}
+                  onChange={(event) => void changeChatModel(event.target.value)}
+                >
+                  {(seedStatus?.models ?? FALLBACK_SEED_MODELS)
+                    .filter((model) => model.role !== "embedding")
+                    .map((model) => (
+                      <option key={model.id} value={model.id}>
+                        {model.label}
+                      </option>
+                    ))}
+                </select>
+                <Icon name="chevron" size={13} />
+              </label>
               <button
                 aria-label="发送问题"
                 className="send-button"
@@ -2020,10 +2076,18 @@ function App(): React.JSX.Element {
       {confirmAction && (
         <ConfirmActionDialog
           action={confirmAction}
-          busy={Boolean(sourceDeleteBusyId) || indexBusy}
+          busy={
+            Boolean(sourceDeleteBusyId) ||
+            Boolean(conversationDeleteBusyId) ||
+            indexBusy
+          }
           error={confirmError}
           onClose={() => {
-            if (!sourceDeleteBusyId && !indexBusy) {
+            if (
+              !sourceDeleteBusyId &&
+              !conversationDeleteBusyId &&
+              !indexBusy
+            ) {
               setConfirmAction(null);
             }
           }}
@@ -2034,38 +2098,80 @@ function App(): React.JSX.Element {
   );
 }
 
-function ConversationStrip({
+function ConversationHistoryMenu({
   activeConversationId,
   busy,
   conversations,
+  open,
+  onDelete,
   onOpen,
+  onToggle,
 }: {
   activeConversationId: string | null;
   busy: boolean;
   conversations: ConversationRecord[];
+  open: boolean;
+  onDelete: (conversation: ConversationRecord) => void;
   onOpen: (conversationId: string) => void;
+  onToggle: () => void;
 }): React.JSX.Element {
   return (
-    <section className="conversation-strip" aria-label="最近对话">
-      <div className="conversation-strip-heading">
-        <span className="section-label">对话工作区</span>
-        <small>{conversations.length} 个历史对话</small>
-      </div>
-      <div className="conversation-pills">
-        {conversations.slice(0, 5).map((conversation) => (
-          <button
-            className={conversation.id === activeConversationId ? "active" : ""}
-            disabled={busy}
-            key={conversation.id}
-            type="button"
-            onClick={() => onOpen(conversation.id)}
-          >
-            <strong>{conversation.title}</strong>
-            <small>{conversation.modelId ?? "未生成回答"}</small>
-          </button>
-        ))}
-      </div>
-    </section>
+    <div className="history-menu-wrap">
+      <button
+        aria-expanded={open}
+        aria-haspopup="menu"
+        className="history-menu-trigger"
+        type="button"
+        onClick={onToggle}
+      >
+        历史对话
+        <span>{conversations.length}</span>
+        <Icon name="chevron" size={13} />
+      </button>
+      {open && (
+        <div className="history-menu" role="menu">
+          <div className="history-menu-heading">
+            <strong>历史对话</strong>
+            <span>{conversations.length} 个</span>
+          </div>
+          {conversations.length > 0 ? (
+            <div className="history-menu-list">
+              {conversations.map((conversation) => (
+                <div
+                  className={`history-menu-item ${
+                    conversation.id === activeConversationId ? "active" : ""
+                  }`}
+                  key={conversation.id}
+                  role="menuitem"
+                >
+                  <button
+                    className="history-menu-open"
+                    disabled={busy}
+                    type="button"
+                    onClick={() => onOpen(conversation.id)}
+                  >
+                    <strong>{conversation.title}</strong>
+                    <small>{conversation.modelId ?? "未生成回答"}</small>
+                  </button>
+                  <button
+                    aria-label={`删除历史对话 ${conversation.title}`}
+                    className="history-menu-delete"
+                    disabled={busy}
+                    title="删除历史对话"
+                    type="button"
+                    onClick={() => onDelete(conversation)}
+                  >
+                    <Icon name="trash" size={14} />
+                  </button>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p className="history-menu-empty">还没有历史对话</p>
+          )}
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -2761,25 +2867,34 @@ function ConfirmActionDialog({
           busyLabel: "删除中...",
           danger: true,
         }
-      : action.kind === "delete-index"
+      : action.kind === "delete-conversation"
         ? {
-            eyebrow: "Index",
-            title: "删除当前知识库索引",
-            description:
-              "将删除关键词索引、向量索引和文本块，但保留已导入来源与解析产物，之后可直接重新构建。",
-            submitLabel: "删除索引",
+            eyebrow: "Conversation",
+            title: "删除历史对话",
+            description: `将删除“${action.conversation.title}”及其全部消息和引用记录。此操作无法撤销。`,
+            submitLabel: "删除对话",
             busyLabel: "删除中...",
             danger: true,
           }
-        : {
-            eyebrow: "Index",
-            title: "重构当前知识库索引",
-            description:
-              "将使用当前解析结果和 Ark Embedding 模型构建新版本；成功前，现有索引仍可继续检索。",
-            submitLabel: "开始重构",
-            busyLabel: "重构中...",
-            danger: false,
-          };
+        : action.kind === "delete-index"
+          ? {
+              eyebrow: "Index",
+              title: "删除当前知识库索引",
+              description:
+                "将删除关键词索引、向量索引和文本块，但保留已导入来源与解析产物，之后可直接重新构建。",
+              submitLabel: "删除索引",
+              busyLabel: "删除中...",
+              danger: true,
+            }
+          : {
+              eyebrow: "Index",
+              title: "重构当前知识库索引",
+              description:
+                "将使用当前解析结果和 Ark Embedding 模型构建新版本；成功前，现有索引仍可继续检索。",
+              submitLabel: "开始重构",
+              busyLabel: "重构中...",
+              danger: false,
+            };
 
   return (
     <div className="modal-backdrop" role="presentation">
@@ -3692,16 +3807,6 @@ function parseStatusLabel(status: ParseCheckItem["status"]): string {
     processing: "处理中",
   };
   return labels[status];
-}
-
-function sourceStatusLine(sourcesByStatus: Record<string, number>): string {
-  const entries = Object.entries(sourcesByStatus);
-  if (entries.length === 0) {
-    return "暂无来源状态";
-  }
-  return entries
-    .map(([status, count]) => `${sourceStatusLabel(status)} ${count}`)
-    .join(" · ");
 }
 
 function formatNumber(value: number): string {

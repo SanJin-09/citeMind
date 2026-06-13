@@ -578,6 +578,7 @@ export interface DesktopApi {
   conversations: {
     list: (knowledgeBaseId: string) => Promise<ConversationListResponse>;
     messages: (conversationId: string) => Promise<ConversationMessagesResponse>;
+    delete: (conversationId: string) => Promise<ConversationListResponse>;
     setModel: (
       conversationId: string,
       modelId: string,
@@ -633,6 +634,7 @@ export const IPC_CHANNELS = {
   hybridSearch: "citemind:retrieval:hybrid-search",
   listConversations: "citemind:conversations:list",
   conversationMessages: "citemind:conversations:messages",
+  deleteConversation: "citemind:conversations:delete",
   setConversationModel: "citemind:conversations:set-model",
   answerConversation: "citemind:conversations:answer",
   exportConversationMarkdown: "citemind:conversations:export-markdown",

@@ -89,6 +89,8 @@ const api: DesktopApi = {
       ipcRenderer.invoke(IPC_CHANNELS.listConversations, knowledgeBaseId),
     messages: (conversationId) =>
       ipcRenderer.invoke(IPC_CHANNELS.conversationMessages, conversationId),
+    delete: (conversationId) =>
+      ipcRenderer.invoke(IPC_CHANNELS.deleteConversation, conversationId),
     setModel: (conversationId, modelId) =>
       ipcRenderer.invoke(IPC_CHANNELS.setConversationModel, {
         conversationId,

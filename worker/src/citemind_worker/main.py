@@ -492,6 +492,15 @@ def create_server(
         except ValueError as error:
             raise RpcError(-32602, str(error)) from error
 
+    def delete_conversation(params: JsonValue) -> JsonValue:
+        values = require_object_params(params)
+        service = _require_conversation_service(conversations)
+        conversation_id = _required_str(values, "conversationId")
+        try:
+            return service.delete(conversation_id)  # type: ignore[return-value]
+        except ValueError as error:
+            raise RpcError(-32602, str(error)) from error
+
     def set_conversation_model(params: JsonValue) -> JsonValue:
         values = require_object_params(params)
         service = _require_conversation_service(conversations)
@@ -591,6 +600,7 @@ def create_server(
     server.register("retrieval.hybrid_search", hybrid_search)
     server.register("conversations.list", list_conversations)
     server.register("conversations.messages", conversation_messages)
+    server.register("conversations.delete", delete_conversation)
     server.register("conversations.set_model", set_conversation_model)
     server.register("conversations.export_markdown", export_conversation)
     server.register("conversations.usage_summary", usage_summary)

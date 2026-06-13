@@ -103,6 +103,17 @@ class ConversationService:
             "messages": self._message_records(conversation_id),
         }
 
+    def delete(self, conversation_id: str) -> dict[str, object]:
+        conversation = self._conversation_record(conversation_id)
+        knowledge_base_id = str(conversation["knowledgeBaseId"])
+        with self.storage.database.connect() as connection:
+            connection.execute(
+                "DELETE FROM conversations WHERE id = ?",
+                (conversation_id,),
+            )
+            connection.commit()
+        return self.list_conversations(knowledge_base_id)
+
     def export_markdown(
         self,
         conversation_id: str,
