@@ -1,4 +1,6 @@
 from collections import Counter
+from contextlib import suppress
+from pathlib import Path
 from uuid import uuid4
 
 from citemind_worker.storage import StorageRuntime
@@ -59,13 +61,65 @@ class KnowledgeBaseService:
 
     def delete(self, knowledge_base_id: str) -> dict[str, object]:
         with self.storage.database.connect() as connection:
+            source_rows = connection.execute(
+                "SELECT id FROM sources WHERE knowledge_base_id = ?",
+                (knowledge_base_id,),
+            ).fetchall()
+            source_ids = [str(row["id"]) for row in source_rows]
+            version_rows = connection.execute(
+                """
+                SELECT original_path, snapshot_path, parse_artifact_path
+                FROM source_versions
+                WHERE source_id IN (
+                    SELECT id FROM sources WHERE knowledge_base_id = ?
+                )
+                """,
+                (knowledge_base_id,),
+            ).fetchall()
+            index_rows = connection.execute(
+                "SELECT id FROM index_versions WHERE knowledge_base_id = ?",
+                (knowledge_base_id,),
+            ).fetchall()
+            index_ids = [str(row["id"]) for row in index_rows]
+            connection.execute(
+                "DELETE FROM chunks_fts WHERE knowledge_base_id = ?",
+                (knowledge_base_id,),
+            )
+            targets = [knowledge_base_id, *source_ids, *index_ids]
+            if targets:
+                placeholders = ",".join("?" for _ in targets)
+                connection.execute(
+                    f"DELETE FROM background_jobs WHERE target_id IN ({placeholders})",
+                    tuple(targets),
+                )
             cursor = connection.execute(
                 "DELETE FROM knowledge_bases WHERE id = ?",
                 (knowledge_base_id,),
             )
+            remaining_paths = {
+                Path(str(value)).resolve()
+                for row in connection.execute(
+                    "SELECT original_path, snapshot_path, parse_artifact_path FROM source_versions"
+                ).fetchall()
+                for value in row
+                if value
+            }
             connection.commit()
         if cursor.rowcount == 0:
             raise ValueError("Knowledge base not found")
+        self.storage.vector_index.delete_knowledge_base(knowledge_base_id)
+        for row in version_rows:
+            for key in ("original_path", "snapshot_path", "parse_artifact_path"):
+                value = row[key]
+                if value and Path(str(value)).resolve() not in remaining_paths:
+                    with suppress(OSError):
+                        Path(str(value)).unlink()
+        for root in (
+            self.storage.paths.objects,
+            self.storage.paths.web_snapshots,
+            self.storage.paths.artifacts,
+        ):
+            _remove_empty_directories(root)
         return self.list_knowledge_bases(ensure_default=False)
 
     def sources(self, knowledge_base_id: str) -> dict[str, object]:
@@ -225,3 +279,12 @@ def _clean_name(name: str) -> str:
     if not clean:
         raise ValueError("Knowledge base name is required")
     return clean
+
+
+def _remove_empty_directories(root: Path) -> None:
+    if not root.exists():
+        return
+    for path in sorted(root.rglob("*"), reverse=True):
+        if path.is_dir():
+            with suppress(OSError):
+                path.rmdir()

@@ -460,6 +460,15 @@ kbd {
   font-size: 11px;
 }
 
+.inline-notice {
+  padding: 9px 11px;
+  border: 1px solid #cfe4d5;
+  border-radius: 8px;
+  color: #276b47;
+  background: #f0f8f2;
+  font-size: 11px;
+}
+
 .source-list {
   padding: 0 7px 8px;
   overflow: auto;
@@ -1423,6 +1432,10 @@ kbd {
   font-size: 12px;
 }
 
+.assistant-heading .icon-button {
+  margin-left: auto;
+}
+
 .mini-mark {
   width: 23px;
   height: 23px;
@@ -1881,12 +1894,36 @@ blockquote {
   display: grid;
   width: min(720px, calc(100vw - 56px));
   max-height: calc(100vh - 56px);
-  grid-template-rows: auto auto auto auto minmax(0, 1fr);
+  grid-template-rows: auto auto auto auto auto minmax(0, 1fr);
   border: 1px solid #dfe5df;
   border-radius: 18px;
   background: #fff;
   box-shadow: 0 24px 80px rgb(19 34 25 / 22%);
   overflow: hidden;
+}
+
+.settings-modal > .settings-heading {
+  grid-row: 1;
+}
+
+.settings-modal > .settings-form {
+  grid-row: 2;
+}
+
+.settings-modal > .settings-error {
+  grid-row: 3;
+}
+
+.settings-modal > .settings-actions {
+  grid-row: 4;
+}
+
+.settings-modal > .operational-status {
+  grid-row: 5;
+}
+
+.settings-modal > .model-validation {
+  grid-row: 6;
 }
 
 .kb-dialog {
@@ -2029,6 +2066,47 @@ blockquote {
   padding: 0 22px 16px;
 }
 
+.operational-status {
+  padding: 16px 22px;
+  border-top: 1px solid #e8ece8;
+}
+
+.operational-metrics {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr)) auto;
+  align-items: stretch;
+  gap: 8px;
+}
+
+.operational-metrics > span {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+  padding: 9px 10px;
+  border: 1px solid #e4e8e4;
+  border-radius: 8px;
+  background: #fafbf9;
+}
+
+.operational-metrics small {
+  overflow: hidden;
+  color: #7b857f;
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.operational-metrics strong {
+  color: #2f4437;
+  font-size: 13px;
+}
+
+.maintenance-notice {
+  margin: 9px 0 0;
+  color: #63736a;
+  font-size: 11px;
+}
+
 .model-validation {
   min-height: 0;
   padding: 16px 22px 22px;
@@ -2164,7 +2242,8 @@ blockquote {
   }
 
   .settings-form,
-  .model-card {
+  .model-card,
+  .operational-metrics {
     grid-template-columns: 1fr;
   }
 

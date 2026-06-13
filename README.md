@@ -13,19 +13,19 @@
 
 ## 功能状态
 
-| 模块 | 当前状态 | 说明 |
-|---|---:|---|
-| 桌面端工程 | 已完成 | Electron、React、TypeScript、Vite、受限 Preload IPC |
-| Python Worker | 已完成 | JSON-RPC over stdio、健康检查、统一错误结构 |
-| 本地存储 | 已完成 | SQLite 迁移、FTS5、LanceDB、系统应用数据目录 |
-| Ark / Seed API | 已完成 | safeStorage 加密保存 Key，内置 3 个 Seed 模型并验证权限 |
-| 知识库管理 | 已完成 | 新建、重命名、切换、删除确认、来源状态汇总 |
-| 后台任务 | 已完成 | 任务状态机、进度、检查点、恢复、暂停、取消、重试入口 |
-| 导入解析 | 已完成 | PDF、DOCX、图片、网页，失败原因可见 |
-| 分块与索引 | 已完成 | 结构化 Chunk、SQLite 元数据、FTS5、Ark Embedding、LanceDB |
-| 混合检索 | 待实现 | 限定知识库和有效索引版本的关键词与向量检索 |
-| 可信问答 | 待实现 | 流式回答、引用校验、点击引用跳转原文 |
-| 导出 | 待实现 | Markdown 导出和后续 Word 导出 |
+| 模块           | 当前状态 | 说明                                                      |
+| -------------- | -------: | --------------------------------------------------------- |
+| 桌面端工程     |   已完成 | Electron、React、TypeScript、Vite、受限 Preload IPC       |
+| Python Worker  |   已完成 | JSON-RPC over stdio、健康检查、统一错误结构               |
+| 本地存储       |   已完成 | SQLite 迁移、FTS5、LanceDB、系统应用数据目录              |
+| Ark / Seed API |   已完成 | safeStorage 加密保存 Key，内置 3 个 Seed 模型并验证权限   |
+| 知识库管理     |   已完成 | 新建、重命名、切换、删除确认、来源状态汇总                |
+| 后台任务       |   已完成 | 任务状态机、进度、检查点、恢复、暂停、取消、重试入口      |
+| 导入解析       |   已完成 | PDF、DOCX、图片、网页，失败原因可见                       |
+| 分块与索引     |   已完成 | 结构化 Chunk、SQLite 元数据、FTS5、Ark Embedding、LanceDB |
+| 混合检索       |   已完成 | 限定知识库和有效索引版本的关键词与向量检索                |
+| 可信问答       |   已完成 | 流式回答、引用校验、点击引用跳转原文                      |
+| 导出与交付     |   已完成 | Markdown 导出、调用与存储统计、macOS arm64 DMG            |
 
 ## 技术架构
 
@@ -53,6 +53,7 @@
 | - SQLite + FTS5 + LanceDB                                                 |
 +--------------------------------------------------------------------------+
 ```
+
 ## 本地数据
 
 应用默认使用系统应用数据目录
@@ -113,17 +114,18 @@ pnpm dev
 
 ## 你可能会用到的命令
 
-| 命令 | 作用 |
-|---|---|
-| `pnpm setup` | 安装 JS 依赖、同步 Python Worker、安装 Electron |
-| `pnpm dev` | 启动 Electron 开发环境 |
-| `pnpm build` | 构建桌面端 |
-| `pnpm build:mac` | 生成 macOS arm64 安装包 |
-| `pnpm format` | 格式化 TypeScript 与 Python 代码 |
-| `pnpm lint` | 运行 ESLint 与 Ruff |
-| `pnpm typecheck` | 运行 TypeScript 与 mypy 类型检查 |
-| `pnpm test` | 运行 Vitest 与 pytest |
-| `pnpm check` | 运行格式检查、lint、类型检查、测试和构建 |
+| 命令                   | 作用                                            |
+| ---------------------- | ----------------------------------------------- |
+| `pnpm setup`           | 安装 JS 依赖、同步 Python Worker、安装 Electron |
+| `pnpm dev`             | 启动 Electron 开发环境                          |
+| `pnpm build`           | 构建桌面端                                      |
+| `pnpm build:mac`       | 生成 macOS arm64 安装包                         |
+| `pnpm verify:delivery` | 验证安装、异常退出、升级、卸载和数据保留        |
+| `pnpm format`          | 格式化 TypeScript 与 Python 代码                |
+| `pnpm lint`            | 运行 ESLint 与 Ruff                             |
+| `pnpm typecheck`       | 运行 TypeScript 与 mypy 类型检查                |
+| `pnpm test`            | 运行 Vitest 与 pytest                           |
+| `pnpm check`           | 运行格式检查、lint、类型检查、测试和构建        |
 
 ## 开发目录
 
@@ -181,10 +183,10 @@ pnpm check
 - [x] P0 持久化任务基础
 - [x] P0 文档解析与检查
 - [x] P0 分块与索引
-- [ ] P0 混合检索
-- [ ] P0 对话、引用校验与可信回答
-- [ ] P0 问答界面引用跳转
-- [ ] P1 重复检测增强
-- [ ] P1 模型切换与索引版本生命周期
-- [ ] P1 Markdown 导出与 macOS arm64 交付
+- [x] P0 混合检索
+- [x] P0 对话、引用校验与可信回答
+- [x] P0 问答界面引用跳转
+- [x] P1 重复检测增强
+- [x] P1 模型切换与索引版本生命周期
+- [x] P1 Markdown 导出与 macOS arm64 交付
 - [ ] P2 网页维护、自动分类、关联与写作工作流

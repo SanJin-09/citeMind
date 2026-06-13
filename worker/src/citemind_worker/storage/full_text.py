@@ -1,7 +1,7 @@
 import re
 from dataclasses import dataclass
 
-import jieba  # type: ignore[import-untyped]
+import jieba
 
 from citemind_worker.storage.database import SqliteDatabase
 

@@ -787,9 +787,7 @@ class SourceImportService:
             "duplicateOfSourceId": artifact.get("duplicateOfSourceId"),
             "duplicateKind": artifact.get("duplicateKind"),
             "duplicateResolution": artifact.get("duplicateResolution"),
-            "duplicateActions": ["skip", "keep", "link"]
-            if status == "duplicate"
-            else [],
+            "duplicateActions": ["skip", "keep", "link"] if status == "duplicate" else [],
             "originalHash": row["original_hash"],  # type: ignore[index]
             "contentHash": row["content_hash"],  # type: ignore[index]
             "originalPath": row["original_path"],  # type: ignore[index]
@@ -950,7 +948,7 @@ class WebTextExtractor:
                 body = response.read(5_000_000)
         except urllib.error.URLError as error:
             raise ParseFailure(f"网页抓取失败：{error.reason}") from error
-        return body.decode("utf-8", errors="replace")
+        return bytes(body).decode("utf-8", errors="replace")
 
     def _fetch_with_playwright(self, url: str) -> str:
         try:

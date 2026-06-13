@@ -1,7 +1,7 @@
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-import lancedb  # type: ignore[import-untyped]
+import lancedb
 import pyarrow as pa
 
 from citemind_worker.storage.paths import AppDataPaths
@@ -65,12 +65,19 @@ class VectorIndex:
         for index_version_id in dict.fromkeys(index_version_ids):
             self.table.delete(f"index_version_id = '{_escape_sql(index_version_id)}'")
 
+    def delete_knowledge_base(self, knowledge_base_id: str) -> None:
+        self.table.delete(f"knowledge_base_id = '{_escape_sql(knowledge_base_id)}'")
+
+    def delete_orphan_chunks(self, valid_chunk_ids: set[str]) -> int:
+        rows = self.table.to_arrow().select(["chunk_id"]).to_pylist()
+        orphan_ids = [
+            str(row["chunk_id"]) for row in rows if str(row["chunk_id"]) not in valid_chunk_ids
+        ]
+        self.delete_chunk_ids(orphan_ids)
+        return len(orphan_ids)
+
     def count_index_version(self, index_version_id: str) -> int:
-        return int(
-            self.table.count_rows(
-                f"index_version_id = '{_escape_sql(index_version_id)}'"
-            )
-        )
+        return int(self.table.count_rows(f"index_version_id = '{_escape_sql(index_version_id)}'"))
 
     def search(
         self,

@@ -1,4 +1,5 @@
 import { dialog, ipcMain } from "electron";
+import { writeFile } from "node:fs/promises";
 import {
   type BackgroundJobListResponse,
   type BackgroundJobRecord,
@@ -6,6 +7,7 @@ import {
   type BuildIndexResponse,
   type ConversationAnswerRequest,
   type ConversationAnswerResponse,
+  type ConversationExportResult,
   type ConversationListResponse,
   type ConversationMessagesResponse,
   type CreateBackgroundJobRequest,
@@ -21,6 +23,7 @@ import {
   type KnowledgeBaseListResponse,
   type KnowledgeBaseRecord,
   type KnowledgeBaseSourcesResponse,
+  type MaintenanceStatus,
   type ModelCapabilityStatus,
   type ParseChecksResponse,
   type RenameKnowledgeBaseRequest,
@@ -30,6 +33,7 @@ import {
   SEED_DEFAULTS,
   type SeedCredentialStatus,
   type SeedModelDescriptor,
+  type UsageSummary,
   type UpdateSeedDefaultsRequest,
   type UpdateBackgroundJobRequest,
 } from "../shared/contracts";
@@ -44,6 +48,13 @@ interface WorkerSeedStatus {
   capabilities: ModelCapabilityStatus[];
 }
 
+interface WorkerMarkdownExport {
+  conversationId: string;
+  messageId: string | null;
+  fileName: string;
+  markdown: string;
+}
+
 export function registerIpcHandlers(workerManager: PythonWorkerManager): void {
   const seedStore = new SeedCredentialStore();
 
@@ -53,6 +64,20 @@ export function registerIpcHandlers(workerManager: PythonWorkerManager): void {
 
   ipcMain.handle(IPC_CHANNELS.checkWorkerHealth, () => workerManager.health());
   ipcMain.handle(IPC_CHANNELS.restartWorker, () => workerManager.restart());
+  ipcMain.handle(IPC_CHANNELS.maintenanceStatus, () =>
+    workerManager.call<MaintenanceStatus>(
+      "system.maintenance_status",
+      {},
+      30_000,
+    ),
+  );
+  ipcMain.handle(IPC_CHANNELS.cleanupStorage, () =>
+    workerManager.call<MaintenanceStatus>(
+      "system.cleanup_storage",
+      {},
+      120_000,
+    ),
+  );
   ipcMain.handle(IPC_CHANNELS.getSeedStatus, async () => {
     const summary = await seedStore.summary();
     const workerStatus = await getWorkerSeedStatus(workerManager);
@@ -309,17 +334,20 @@ export function registerIpcHandlers(workerManager: PythonWorkerManager): void {
       30_000,
     ),
   );
-  ipcMain.handle(IPC_CHANNELS.estimateIndex, async (_event, knowledgeBaseId) => {
-    const summary = await seedStore.summary();
-    return workerManager.call<IndexBuildEstimate>(
-      "indexes.estimate",
-      {
-        knowledgeBaseId: normalizeKnowledgeBaseId(knowledgeBaseId),
-        embeddingModel: summary.defaultEmbeddingModel,
-      },
-      30_000,
-    );
-  });
+  ipcMain.handle(
+    IPC_CHANNELS.estimateIndex,
+    async (_event, knowledgeBaseId) => {
+      const summary = await seedStore.summary();
+      return workerManager.call<IndexBuildEstimate>(
+        "indexes.estimate",
+        {
+          knowledgeBaseId: normalizeKnowledgeBaseId(knowledgeBaseId),
+          embeddingModel: summary.defaultEmbeddingModel,
+        },
+        30_000,
+      );
+    },
+  );
   ipcMain.handle(IPC_CHANNELS.rollbackIndex, (_event, payload) => {
     const request = normalizeIndexVersionRequest(payload);
     return workerManager.call<BuildIndexResponse>(
@@ -379,6 +407,39 @@ export function registerIpcHandlers(workerManager: PythonWorkerManager): void {
       30_000,
     );
   });
+  ipcMain.handle(
+    IPC_CHANNELS.exportConversationMarkdown,
+    async (_event, payload) => {
+      const request = normalizeConversationExportRequest(payload);
+      const exported = await workerManager.call<WorkerMarkdownExport>(
+        "conversations.export_markdown",
+        request,
+        30_000,
+      );
+      const selection = await dialog.showSaveDialog({
+        title: request.messageId ? "导出回答" : "导出对话",
+        defaultPath: exported.fileName,
+        filters: [{ name: "Markdown", extensions: ["md"] }],
+      });
+      if (selection.canceled || !selection.filePath) {
+        return { cancelled: true } satisfies ConversationExportResult;
+      }
+      await writeFile(selection.filePath, exported.markdown, "utf8");
+      return {
+        cancelled: false,
+        filePath: selection.filePath,
+      } satisfies ConversationExportResult;
+    },
+  );
+  ipcMain.handle(
+    IPC_CHANNELS.conversationUsageSummary,
+    (_event, knowledgeBaseId) =>
+      workerManager.call<UsageSummary>(
+        "conversations.usage_summary",
+        { knowledgeBaseId: normalizeKnowledgeBaseId(knowledgeBaseId) },
+        30_000,
+      ),
+  );
   ipcMain.handle(IPC_CHANNELS.answerConversation, async (_event, payload) => {
     const request = normalizeConversationAnswerRequest(payload);
     const summary = await seedStore.summary();
@@ -611,7 +672,10 @@ function normalizeIndexVersionRequest(payload: unknown): {
   }
   return {
     knowledgeBaseId: normalizeKnowledgeBaseId(payload.knowledgeBaseId),
-    indexVersionId: normalizeNonEmptyString(payload.indexVersionId, "索引版本 ID"),
+    indexVersionId: normalizeNonEmptyString(
+      payload.indexVersionId,
+      "索引版本 ID",
+    ),
   };
 }
 
@@ -625,6 +689,29 @@ function normalizeConversationModelRequest(payload: unknown): {
   return {
     conversationId: normalizeNonEmptyString(payload.conversationId, "对话 ID"),
     modelId: normalizeNonEmptyString(payload.modelId, "对话模型"),
+  };
+}
+
+function normalizeConversationExportRequest(payload: unknown): {
+  conversationId: string;
+  messageId?: string;
+} {
+  if (!isRecord(payload)) {
+    throw new Error("对话导出参数无效");
+  }
+  const messageId = payload.messageId;
+  if (
+    messageId !== undefined &&
+    messageId !== null &&
+    typeof messageId !== "string"
+  ) {
+    throw new Error("回答消息 ID 必须是字符串");
+  }
+  return {
+    conversationId: normalizeNonEmptyString(payload.conversationId, "对话 ID"),
+    messageId: messageId
+      ? normalizeNonEmptyString(messageId, "回答消息 ID")
+      : undefined,
   };
 }
 

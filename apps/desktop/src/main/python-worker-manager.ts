@@ -190,6 +190,15 @@ export class PythonWorkerManager {
       return process.env.CITEMIND_PYTHON;
     }
 
+    const packagedPython = path.join(
+      workerRoot,
+      "runtime",
+      "bin",
+      "python3.12",
+    );
+    if (existsSync(packagedPython)) {
+      return packagedPython;
+    }
     const projectPython = path.join(workerRoot, ".venv", "bin", "python");
     return existsSync(projectPython) ? projectPython : "python3.12";
   }

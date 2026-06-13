@@ -451,7 +451,7 @@ def _extract_chat_delta(chunk: Any) -> str:
             if isinstance(first, dict):
                 delta = first.get("delta")
                 if isinstance(delta, dict) and isinstance(delta.get("content"), str):
-                    return delta["content"]
+                    return str(delta["content"])
     return ""
 
 

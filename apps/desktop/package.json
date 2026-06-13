@@ -8,7 +8,8 @@
     "setup:electron": "install-electron",
     "dev": "electron-vite dev",
     "build": "pnpm typecheck && electron-vite build",
-    "build:mac": "pnpm build && electron-builder --mac --arm64",
+    "build:mac": "pnpm build && node scripts/prepare-worker-runtime.mjs && electron-builder --mac --arm64",
+    "verify:delivery": "node scripts/verify-mac-delivery.mjs",
     "preview": "electron-vite preview",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
@@ -45,7 +46,14 @@
     "files": [
       "out/**/*"
     ],
+    "extraResources": [
+      {
+        "from": "staging/worker",
+        "to": "worker"
+      }
+    ],
     "mac": {
+      "identity": null,
       "target": [
         {
           "target": "dmg",
@@ -54,7 +62,8 @@
           ]
         }
       ],
-      "category": "public.app-category.productivity"
+      "category": "public.app-category.productivity",
+      "artifactName": "${productName}-${version}-${arch}.${ext}"
     }
   }
 }

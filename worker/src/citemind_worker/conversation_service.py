@@ -1,7 +1,9 @@
 import json
+import math
 import re
 import sqlite3
 from collections.abc import AsyncIterator, Callable, Sequence
+from datetime import UTC, datetime
 from time import perf_counter
 from typing import Protocol
 from uuid import uuid4
@@ -99,6 +101,97 @@ class ConversationService:
         return {
             "conversation": conversation,
             "messages": self._message_records(conversation_id),
+        }
+
+    def export_markdown(
+        self,
+        conversation_id: str,
+        *,
+        message_id: str | None = None,
+    ) -> dict[str, object]:
+        conversation = self._conversation_record(conversation_id)
+        messages = self._message_records(conversation_id)
+        if message_id is not None:
+            messages = [
+                message
+                for message in messages
+                if message["id"] == message_id and message["role"] == "assistant"
+            ]
+            if not messages:
+                raise ValueError("Assistant message not found in conversation")
+        markdown = _conversation_markdown(conversation, messages)
+        title = str(conversation["title"])
+        suffix = "-answer" if message_id else "-conversation"
+        return {
+            "conversationId": conversation_id,
+            "messageId": message_id,
+            "fileName": f"{_safe_file_name(title)}{suffix}.md",
+            "markdown": markdown,
+        }
+
+    def usage_summary(self, knowledge_base_id: str) -> dict[str, object]:
+        self._ensure_knowledge_base(knowledge_base_id)
+        with self.storage.database.connect() as connection:
+            message_rows = connection.execute(
+                """
+                SELECT m.role, m.content, m.model_id, m.model_params_json
+                FROM messages m
+                JOIN conversations c ON c.id = m.conversation_id
+                WHERE c.knowledge_base_id = ?
+                ORDER BY m.created_at
+                """,
+                (knowledge_base_id,),
+            ).fetchall()
+            index_rows = connection.execute(
+                """
+                SELECT embedding_model,
+                       (SELECT COUNT(*) FROM chunks WHERE index_version_id = iv.id) AS chunk_count
+                FROM index_versions iv
+                WHERE knowledge_base_id = ?
+                  AND status IN ('ready', 'retired')
+                """,
+                (knowledge_base_id,),
+            ).fetchall()
+
+        chat_calls = 0
+        query_embedding_calls = 0
+        estimated_input_tokens = 0
+        estimated_output_tokens = 0
+        by_model: dict[str, int] = {}
+        for row in message_rows:
+            role = str(row["role"])
+            content = str(row["content"])
+            estimated_tokens = _estimated_tokens(content)
+            if role == "user":
+                query_embedding_calls += 1
+                estimated_input_tokens += estimated_tokens
+                continue
+            if role != "assistant":
+                continue
+            estimated_output_tokens += estimated_tokens
+            params = _json_object(row["model_params_json"])
+            calls = _generation_call_count(params.get("attempts"))
+            chat_calls += calls
+            model_id = str(row["model_id"] or "unknown")
+            by_model[model_id] = by_model.get(model_id, 0) + calls
+
+        index_embedding_calls = sum(math.ceil(int(row["chunk_count"]) / 16) for row in index_rows)
+        return {
+            "knowledgeBaseId": knowledge_base_id,
+            "calls": {
+                "chat": chat_calls,
+                "queryEmbedding": query_embedding_calls,
+                "indexEmbedding": index_embedding_calls,
+                "total": chat_calls + query_embedding_calls + index_embedding_calls,
+            },
+            "estimatedTokens": {
+                "input": estimated_input_tokens,
+                "output": estimated_output_tokens,
+                "total": estimated_input_tokens + estimated_output_tokens,
+            },
+            "byModel": by_model,
+            "estimatedCostCny": None,
+            "pricingNotice": "调用量与 Token 为本地估算，实际费用以火山方舟账单为准。",
         }
 
     def set_model(self, conversation_id: str, model_id: str) -> dict[str, object]:
@@ -1151,3 +1244,95 @@ def _preview(text: str) -> str:
     if len(normalized) <= 240:
         return normalized
     return f"{normalized[:239]}…"
+
+
+def _conversation_markdown(
+    conversation: dict[str, object],
+    messages: Sequence[dict[str, object]],
+) -> str:
+    lines = [
+        f"# {conversation['title']}",
+        "",
+        f"- 对话模型：{conversation.get('modelId') or '未指定'}",
+        f"- 创建时间：{conversation['createdAt']}",
+        f"- 导出时间：{datetime.now(UTC).isoformat()}",
+        "",
+    ]
+    footnotes: list[str] = []
+    for message_index, message in enumerate(messages, start=1):
+        role = str(message["role"])
+        heading = "用户" if role == "user" else "citeMind" if role == "assistant" else "系统"
+        lines.extend([f"## {heading}", ""])
+        paragraphs = [item for item in re.split(r"\n{2,}", str(message["content"])) if item]
+        citations = message.get("citations")
+        citation_items = citations if isinstance(citations, list) else []
+        for paragraph_index, paragraph in enumerate(paragraphs):
+            refs: list[str] = []
+            for citation_index, citation in enumerate(citation_items, start=1):
+                if isinstance(citation, dict) and citation.get("paragraphIndex") == paragraph_index:
+                    ref = f"m{message_index}-c{citation_index}"
+                    refs.append(f"[^{ref}]")
+                    footnotes.append(_citation_footnote(ref, citation))
+            lines.extend([f"{paragraph}{''.join(refs)}", ""])
+        if role == "assistant":
+            lines.extend(
+                [
+                    f"> 模型：{message.get('modelId') or '未记录'} · "
+                    f"索引版本：{message.get('indexVersionId') or '未记录'}",
+                    "",
+                ]
+            )
+    if footnotes:
+        lines.extend(["---", "", "## 引用", "", *footnotes])
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _citation_footnote(ref: str, citation: dict[str, object]) -> str:
+    source = citation.get("source")
+    location = citation.get("location")
+    text = citation.get("text")
+    source_record = source if isinstance(source, dict) else {}
+    location_record = location if isinstance(location, dict) else {}
+    text_record = text if isinstance(text, dict) else {}
+    location_text = _markdown_location(location_record)
+    preview = str(text_record.get("preview") or text_record.get("normalized") or "").strip()
+    return (
+        f"[^{ref}]: {source_record.get('displayName') or '未知来源'}"
+        f"{f' · {location_text}' if location_text else ''}"
+        f" · `{citation.get('chunkId') or 'unknown'}`"
+        f"{f' — {preview}' if preview else ''}"
+    )
+
+
+def _markdown_location(location: dict[str, object]) -> str:
+    page = location.get("pageNumber")
+    if isinstance(page, int):
+        return f"第 {page} 页"
+    headings = location.get("headingPath")
+    if isinstance(headings, list):
+        values = [str(item) for item in headings if isinstance(item, str) and item]
+        if values:
+            return " / ".join(values)
+    anchor = location.get("anchor")
+    return str(anchor) if isinstance(anchor, str) else ""
+
+
+def _safe_file_name(value: str) -> str:
+    clean = re.sub(r'[\\/:*?"<>|]+', "-", value).strip(" .-")
+    return clean[:80] or "citemind"
+
+
+def _estimated_tokens(text: str) -> int:
+    return max(1, math.ceil(len(text) / 4)) if text else 0
+
+
+def _generation_call_count(value: object) -> int:
+    if not isinstance(value, list):
+        return 0
+    calls = 0
+    for attempt in value:
+        if not isinstance(attempt, dict):
+            continue
+        mode = attempt.get("generationMode")
+        calls += 2 if mode in {"plain_text", "plain_text_failed"} else 1
+    return calls

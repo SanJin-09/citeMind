@@ -5,6 +5,8 @@ const api: DesktopApi = {
   system: {
     checkWorkerHealth: () => ipcRenderer.invoke(IPC_CHANNELS.checkWorkerHealth),
     restartWorker: () => ipcRenderer.invoke(IPC_CHANNELS.restartWorker),
+    maintenanceStatus: () => ipcRenderer.invoke(IPC_CHANNELS.maintenanceStatus),
+    cleanupStorage: () => ipcRenderer.invoke(IPC_CHANNELS.cleanupStorage),
   },
   seed: {
     getStatus: () => ipcRenderer.invoke(IPC_CHANNELS.getSeedStatus),
@@ -94,6 +96,16 @@ const api: DesktopApi = {
       }),
     answer: (request) =>
       ipcRenderer.invoke(IPC_CHANNELS.answerConversation, request),
+    exportMarkdown: (conversationId, messageId) =>
+      ipcRenderer.invoke(IPC_CHANNELS.exportConversationMarkdown, {
+        conversationId,
+        messageId,
+      }),
+    usageSummary: (knowledgeBaseId) =>
+      ipcRenderer.invoke(
+        IPC_CHANNELS.conversationUsageSummary,
+        knowledgeBaseId,
+      ),
   },
 };
 

@@ -8,6 +8,7 @@ from citemind_worker.conversation_service import ConversationService
 from citemind_worker.indexing_service import IndexingService
 from citemind_worker.knowledge_base_service import KnowledgeBaseService
 from citemind_worker.logging_config import configure_logging
+from citemind_worker.maintenance_service import MaintenanceService
 from citemind_worker.model_catalog import (
     DEFAULT_ARK_BASE_URL,
     DEFAULT_CHAT_MODEL,
@@ -30,6 +31,7 @@ def create_server(
     indexing_service: IndexingService | None = None,
     retrieval_service: HybridRetrievalService | None = None,
     conversation_service: ConversationService | None = None,
+    maintenance_service: MaintenanceService | None = None,
 ) -> RpcServer:
     server = RpcServer()
     seed_models = model_service or (SeedModelService(storage) if storage is not None else None)
@@ -51,6 +53,9 @@ def create_server(
     conversations = conversation_service or (
         ConversationService(storage, retrieval=retrievals) if storage is not None else None
     )
+    maintenance = maintenance_service or (
+        MaintenanceService(storage) if storage is not None else None
+    )
 
     def health(params: JsonValue) -> JsonValue:
         require_object_params(params)
@@ -69,6 +74,16 @@ def create_server(
         if storage is None:
             return {"ready": False}
         return storage.status()  # type: ignore[return-value]
+
+    def maintenance_status(params: JsonValue) -> JsonValue:
+        require_object_params(params)
+        service = _require_maintenance_service(maintenance)
+        return service.status()  # type: ignore[return-value]
+
+    def cleanup_storage(params: JsonValue) -> JsonValue:
+        require_object_params(params)
+        service = _require_maintenance_service(maintenance)
+        return service.cleanup()  # type: ignore[return-value]
 
     def shutdown(params: JsonValue) -> JsonValue:
         require_object_params(params)
@@ -487,6 +502,28 @@ def create_server(
         except ValueError as error:
             raise RpcError(-32602, str(error)) from error
 
+    def export_conversation(params: JsonValue) -> JsonValue:
+        values = require_object_params(params)
+        service = _require_conversation_service(conversations)
+        conversation_id = _required_str(values, "conversationId")
+        message_id = _optional_nullable_str(values, "messageId")
+        try:
+            return service.export_markdown(
+                conversation_id,
+                message_id=message_id,
+            )  # type: ignore[return-value]
+        except ValueError as error:
+            raise RpcError(-32602, str(error)) from error
+
+    def usage_summary(params: JsonValue) -> JsonValue:
+        values = require_object_params(params)
+        service = _require_conversation_service(conversations)
+        knowledge_base_id = _required_str(values, "knowledgeBaseId")
+        try:
+            return service.usage_summary(knowledge_base_id)  # type: ignore[return-value]
+        except ValueError as error:
+            raise RpcError(-32602, str(error)) from error
+
     async def answer_conversation(params: JsonValue) -> JsonValue:
         values = require_object_params(params)
         service = _require_conversation_service(conversations)
@@ -518,6 +555,8 @@ def create_server(
 
     server.register("system.health", health)
     server.register("system.storage_status", storage_status)
+    server.register("system.maintenance_status", maintenance_status)
+    server.register("system.cleanup_storage", cleanup_storage)
     server.register("system.shutdown", shutdown)
     server.register("models.status", models_status)
     server.register("models.validate_defaults", validate_models)
@@ -553,6 +592,8 @@ def create_server(
     server.register("conversations.list", list_conversations)
     server.register("conversations.messages", conversation_messages)
     server.register("conversations.set_model", set_conversation_model)
+    server.register("conversations.export_markdown", export_conversation)
+    server.register("conversations.usage_summary", usage_summary)
     server.register("conversations.answer", answer_conversation)
     return server
 
@@ -628,6 +669,14 @@ def _require_conversation_service(
 ) -> ConversationService:
     if service is None:
         raise RpcError(-32016, "Conversation service is not available")
+    return service
+
+
+def _require_maintenance_service(
+    service: MaintenanceService | None,
+) -> MaintenanceService:
+    if service is None:
+        raise RpcError(-32017, "Maintenance service is not available")
     return service
 
 

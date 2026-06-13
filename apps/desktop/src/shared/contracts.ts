@@ -461,10 +461,47 @@ export interface ConversationAnswerResponse {
   events: Array<Record<string, unknown>>;
 }
 
+export interface ConversationExportResult {
+  cancelled: boolean;
+  filePath?: string;
+}
+
+export interface UsageSummary {
+  knowledgeBaseId: string;
+  calls: {
+    chat: number;
+    queryEmbedding: number;
+    indexEmbedding: number;
+    total: number;
+  };
+  estimatedTokens: {
+    input: number;
+    output: number;
+    total: number;
+  };
+  byModel: Record<string, number>;
+  estimatedCostCny: number | null;
+  pricingNotice: string;
+}
+
+export interface MaintenanceStatus {
+  rootPath: string;
+  totalBytes: number;
+  sourceCount: number;
+  chunkCount: number;
+  recyclableIndexCount: number;
+  recycledIndexCount?: number;
+  removedFileCount?: number;
+  removedVectorCount?: number;
+  reclaimedBytes?: number;
+}
+
 export interface DesktopApi {
   system: {
     checkWorkerHealth: () => Promise<WorkerHealth>;
     restartWorker: () => Promise<WorkerHealth>;
+    maintenanceStatus: () => Promise<MaintenanceStatus>;
+    cleanupStorage: () => Promise<MaintenanceStatus>;
   };
   seed: {
     getStatus: () => Promise<SeedCredentialStatus>;
@@ -548,12 +585,19 @@ export interface DesktopApi {
     answer: (
       request: ConversationAnswerRequest,
     ) => Promise<ConversationAnswerResponse>;
+    exportMarkdown: (
+      conversationId: string,
+      messageId?: string,
+    ) => Promise<ConversationExportResult>;
+    usageSummary: (knowledgeBaseId: string) => Promise<UsageSummary>;
   };
 }
 
 export const IPC_CHANNELS = {
   checkWorkerHealth: "citemind:system:check-worker-health",
   restartWorker: "citemind:system:restart-worker",
+  maintenanceStatus: "citemind:system:maintenance-status",
+  cleanupStorage: "citemind:system:cleanup-storage",
   getSeedStatus: "citemind:seed:get-status",
   saveSeedCredential: "citemind:seed:save-credential",
   validateSeedCredential: "citemind:seed:validate-credential",
@@ -591,6 +635,8 @@ export const IPC_CHANNELS = {
   conversationMessages: "citemind:conversations:messages",
   setConversationModel: "citemind:conversations:set-model",
   answerConversation: "citemind:conversations:answer",
+  exportConversationMarkdown: "citemind:conversations:export-markdown",
+  conversationUsageSummary: "citemind:conversations:usage-summary",
 } as const;
 
 export const SEED_DEFAULTS = {

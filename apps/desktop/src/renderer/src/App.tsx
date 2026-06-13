@@ -13,12 +13,14 @@ import type {
   IndexVersionRecord,
   KnowledgeBaseRecord,
   KnowledgeBaseSource,
+  MaintenanceStatus,
   ModelCapabilityStatus,
   ModelValidationStatus,
   ParseCheckItem,
   ParseCheckSummary,
   SeedCredentialStatus,
   SeedModelDescriptor,
+  UsageSummary,
   WorkerHealth,
 } from "../../shared/contracts";
 import { SEED_DEFAULTS } from "../../shared/contracts";
@@ -36,6 +38,7 @@ type IconName =
   | "chevron"
   | "close"
   | "document"
+  | "download"
   | "evidence"
   | "folder"
   | "menu"
@@ -276,6 +279,7 @@ function Icon({
     document: (
       <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Zm0 0v6h6M8 13h8M8 17h5" />
     ),
+    download: <path d="M12 3v12m0 0 5-5m-5 5-5-5M5 21h14" />,
     evidence: (
       <path d="M9 3h6l1 2h3a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2h3Zm-1 9 3 3 5-6" />
     ),
@@ -373,6 +377,8 @@ function App(): React.JSX.Element {
   >({});
   const [chatBusy, setChatBusy] = useState(false);
   const [chatError, setChatError] = useState("");
+  const [exportBusyId, setExportBusyId] = useState("");
+  const [exportNotice, setExportNotice] = useState("");
   const [chatModel, setChatModel] = useState<string>(
     SEED_DEFAULTS.defaultChatModel,
   );
@@ -408,6 +414,11 @@ function App(): React.JSX.Element {
   });
   const [seedBusy, setSeedBusy] = useState(false);
   const [seedError, setSeedError] = useState("");
+  const [usageSummary, setUsageSummary] = useState<UsageSummary | null>(null);
+  const [maintenanceStatus, setMaintenanceStatus] =
+    useState<MaintenanceStatus | null>(null);
+  const [maintenanceBusy, setMaintenanceBusy] = useState(false);
+  const [maintenanceNotice, setMaintenanceNotice] = useState("");
 
   const checkHealth = useCallback(async () => {
     setWorker({ kind: "checking" });
@@ -454,6 +465,24 @@ function App(): React.JSX.Element {
     } catch (error) {
       setSeedError(
         error instanceof Error ? error.message : "Seed API 状态读取失败",
+      );
+    }
+  }, []);
+
+  const loadOperationalStatus = useCallback(async (knowledgeBaseId: string) => {
+    try {
+      const [usage, maintenance] = await Promise.all([
+        knowledgeBaseId
+          ? getDesktopApi().conversations.usageSummary(knowledgeBaseId)
+          : Promise.resolve(null),
+        getDesktopApi().system.maintenanceStatus(),
+      ]);
+      setUsageSummary(usage);
+      setMaintenanceStatus(maintenance);
+      setMaintenanceNotice("");
+    } catch (error) {
+      setMaintenanceNotice(
+        error instanceof Error ? error.message : "调用与存储状态读取失败",
       );
     }
   }, []);
@@ -621,6 +650,12 @@ function App(): React.JSX.Element {
     loadParseChecks,
   ]);
 
+  useEffect(() => {
+    if (settingsOpen) {
+      void loadOperationalStatus(activeKnowledgeBaseId);
+    }
+  }, [activeKnowledgeBaseId, loadOperationalStatus, settingsOpen]);
+
   const online = worker.kind === "online";
 
   useEffect(() => {
@@ -664,16 +699,66 @@ function App(): React.JSX.Element {
     setSelectedEvidence(null);
     setSourceJumpNotice("");
     setChatError("");
+    setExportNotice("");
     setSearchQuery("");
     setLastSearchQuery("");
     setSearchResults([]);
     setSearchError("");
   };
 
+  const exportMarkdown = async (messageId?: string): Promise<void> => {
+    if (!conversationId || exportBusyId) {
+      return;
+    }
+    setExportBusyId(messageId ?? "conversation");
+    setChatError("");
+    setExportNotice("");
+    try {
+      const result = await getDesktopApi().conversations.exportMarkdown(
+        conversationId,
+        messageId,
+      );
+      if (!result.cancelled) {
+        setExportNotice(
+          messageId ? "回答已导出为 Markdown" : "对话已导出为 Markdown",
+        );
+      }
+    } catch (error) {
+      setChatError(
+        error instanceof Error ? error.message : "Markdown 导出失败",
+      );
+    } finally {
+      setExportBusyId("");
+    }
+  };
+
+  const cleanupStorage = async (): Promise<void> => {
+    if (maintenanceBusy) {
+      return;
+    }
+    setMaintenanceBusy(true);
+    setMaintenanceNotice("");
+    try {
+      const result = await getDesktopApi().system.cleanupStorage();
+      setMaintenanceStatus(result);
+      setMaintenanceNotice(
+        `已回收 ${result.recycledIndexCount ?? 0} 个索引、${result.removedFileCount ?? 0} 个孤儿文件`,
+      );
+    } catch (error) {
+      setMaintenanceNotice(
+        error instanceof Error ? error.message : "应用数据清理失败",
+      );
+    } finally {
+      setMaintenanceBusy(false);
+    }
+  };
+
   const startNewConversation = (): void => {
     resetConversationWorkspace();
     setQuery("");
-    setChatModel(seedStatus?.defaultChatModel ?? SEED_DEFAULTS.defaultChatModel);
+    setChatModel(
+      seedStatus?.defaultChatModel ?? SEED_DEFAULTS.defaultChatModel,
+    );
   };
 
   const openConversation = async (
@@ -1582,6 +1667,18 @@ function App(): React.JSX.Element {
             icon="chat"
             title="对话"
             subtitle={`${selectedCount} 个来源参与检索`}
+            action={
+              <button
+                aria-label="导出当前对话"
+                className="icon-button"
+                disabled={!conversationId || Boolean(exportBusyId)}
+                title="导出当前对话为 Markdown"
+                type="button"
+                onClick={() => void exportMarkdown()}
+              >
+                <Icon name="download" size={17} />
+              </button>
+            }
           />
           <div
             className={`chat-scroll ${
@@ -1643,6 +1740,11 @@ function App(): React.JSX.Element {
                 <div className="inline-error">{chatError}</div>
               </div>
             )}
+            {exportNotice && (
+              <div className="message-flow">
+                <div className="inline-notice">{exportNotice}</div>
+              </div>
+            )}
 
             {messages.length > 0 && (
               <div className="message-flow">
@@ -1660,6 +1762,8 @@ function App(): React.JSX.Element {
                         selectedEvidence,
                       )}
                       onSelectCitation={selectCitation}
+                      exportBusy={exportBusyId === message.id}
+                      onExport={() => void exportMarkdown(message.id)}
                     />
                   ) : null,
                 )}
@@ -1878,6 +1982,11 @@ function App(): React.JSX.Element {
           onDelete={() => void deleteSeedCredential()}
           onFormChange={setSeedForm}
           onReload={() => void loadSeedStatus()}
+          maintenanceBusy={maintenanceBusy}
+          maintenanceNotice={maintenanceNotice}
+          maintenanceStatus={maintenanceStatus}
+          usageSummary={usageSummary}
+          onCleanup={() => void cleanupStorage()}
           onSave={() => void saveSeedCredential()}
           onSaveDefaults={() => void updateSeedDefaults()}
           onValidate={() => void validateSeedCredential()}
@@ -2026,11 +2135,15 @@ function AssistantAnswerMessage({
   message,
   response,
   selectedChunkId,
+  exportBusy,
+  onExport,
   onSelectCitation,
 }: {
   message: ConversationMessageRecord;
   response?: ConversationAnswerResponse;
   selectedChunkId?: string;
+  exportBusy: boolean;
+  onExport: () => void;
   onSelectCitation: (
     citation: AnswerCitation,
     response?: ConversationAnswerResponse,
@@ -2060,6 +2173,16 @@ function AssistantAnswerMessage({
           <Icon name="sparkle" size={15} />
         </span>
         <strong>citeMind</strong>
+        <button
+          aria-label="导出这条回答"
+          className="icon-button"
+          disabled={exportBusy}
+          title="导出这条回答为 Markdown"
+          type="button"
+          onClick={onExport}
+        >
+          <Icon name="download" size={15} />
+        </button>
       </div>
       {!evidenceSufficient && (
         <div className="evidence-warning">
@@ -2465,8 +2588,8 @@ function ParseCheckPanel({
         <div className="index-estimate">
           <strong>新索引预估</strong>
           <span>
-            {indexEstimate.documentCount} 文档 · {indexEstimate.chunkCount} 文本块 ·{" "}
-            {indexEstimate.estimatedEmbeddingCalls} 次 Embedding 调用
+            {indexEstimate.documentCount} 文档 · {indexEstimate.chunkCount}{" "}
+            文本块 · {indexEstimate.estimatedEmbeddingCalls} 次 Embedding 调用
           </span>
           <small>{indexEstimate.pricingNotice}</small>
         </div>
@@ -2580,7 +2703,9 @@ function ParseCheckPanel({
             <article key={version.id}>
               <div>
                 <strong>
-                  {version.isCurrent ? "当前版本" : sourceStatusLabel(version.status)}
+                  {version.isCurrent
+                    ? "当前版本"
+                    : sourceStatusLabel(version.status)}
                 </strong>
                 <span>{version.embeddingModel}</span>
                 <small>
@@ -2904,6 +3029,11 @@ function SeedSettingsModal({
   error,
   form,
   status,
+  maintenanceBusy,
+  maintenanceNotice,
+  maintenanceStatus,
+  usageSummary,
+  onCleanup,
   onClose,
   onDelete,
   onFormChange,
@@ -2921,6 +3051,11 @@ function SeedSettingsModal({
     defaultEmbeddingModel: string;
   };
   status: SeedCredentialStatus | null;
+  maintenanceBusy: boolean;
+  maintenanceNotice: string;
+  maintenanceStatus: MaintenanceStatus | null;
+  usageSummary: UsageSummary | null;
+  onCleanup: () => void;
   onClose: () => void;
   onDelete: () => void;
   onFormChange: (next: {
@@ -3093,6 +3228,45 @@ function SeedSettingsModal({
             删除配置
           </button>
         </div>
+
+        <section className="operational-status">
+          <div className="model-validation-heading">
+            <strong>调用与存储</strong>
+            <span>{usageSummary?.pricingNotice ?? "正在读取本地估算..."}</span>
+          </div>
+          <div className="operational-metrics">
+            <span>
+              <small>API 调用</small>
+              <strong>{formatNumber(usageSummary?.calls.total ?? 0)}</strong>
+            </span>
+            <span>
+              <small>估算 Token</small>
+              <strong>
+                {formatNumber(usageSummary?.estimatedTokens.total ?? 0)}
+              </strong>
+            </span>
+            <span>
+              <small>数据占用</small>
+              <strong>{formatBytes(maintenanceStatus?.totalBytes ?? 0)}</strong>
+            </span>
+            <span>
+              <small>可回收索引</small>
+              <strong>{maintenanceStatus?.recyclableIndexCount ?? 0}</strong>
+            </span>
+            <button
+              className="button ghost"
+              disabled={maintenanceBusy}
+              type="button"
+              onClick={onCleanup}
+            >
+              <Icon name="trash" size={14} />
+              {maintenanceBusy ? "清理中..." : "立即清理"}
+            </button>
+          </div>
+          {maintenanceNotice && (
+            <p className="maintenance-notice">{maintenanceNotice}</p>
+          )}
+        </section>
 
         <section className="model-validation">
           <div className="model-validation-heading">
@@ -3528,6 +3702,24 @@ function sourceStatusLine(sourcesByStatus: Record<string, number>): string {
   return entries
     .map(([status, count]) => `${sourceStatusLabel(status)} ${count}`)
     .join(" · ");
+}
+
+function formatNumber(value: number): string {
+  return new Intl.NumberFormat("zh-CN").format(value);
+}
+
+function formatBytes(value: number): string {
+  if (value < 1024) {
+    return `${value} B`;
+  }
+  const units = ["KB", "MB", "GB", "TB"];
+  let amount = value / 1024;
+  let unit = units[0];
+  for (let index = 1; index < units.length && amount >= 1024; index += 1) {
+    amount /= 1024;
+    unit = units[index];
+  }
+  return `${amount.toFixed(amount >= 10 ? 0 : 1)} ${unit}`;
 }
 
 function emptyParseSummary(): ParseCheckSummary {

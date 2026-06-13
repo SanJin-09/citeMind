@@ -169,6 +169,60 @@ def test_conversation_answer_persists_messages_and_valid_citations(tmp_path: Pat
     assert messages["messages"][1]["citations"][0]["chunkId"] == "chunk-pdf-valid"
 
 
+def test_conversation_exports_markdown_with_citations_and_usage(tmp_path: Path) -> None:
+    storage = StorageRuntime(tmp_path, vector_dimension=3)
+    storage.initialize()
+    knowledge_base_id = _seed_answer_fixture(storage)
+    gateway = FakeAnswerGateway(
+        [
+            {
+                "evidence_sufficient": True,
+                "refusal_reason": None,
+                "paragraphs": [
+                    {
+                        "text": "Alpha 结论来自当前 PDF 证据。",
+                        "evidence_chunk_ids": ["chunk-pdf-valid"],
+                    }
+                ],
+            }
+        ]
+    )
+    service = ConversationService(
+        storage,
+        retrieval=HybridRetrievalService(storage, embedder=QueryEmbedder()),
+        gateway_factory=lambda _key, _base, _embedding: gateway,
+    )
+    response = asyncio.run(
+        service.answer(
+            knowledge_base_id=knowledge_base_id,
+            query="Alpha 怎么解释？",
+            api_key="ark-test",
+            chat_model="doubao-test-chat",
+        )
+    )
+
+    exported = service.export_markdown(str(response["conversation"]["id"]))
+    single = service.export_markdown(
+        str(response["conversation"]["id"]),
+        message_id=str(response["assistantMessage"]["id"]),
+    )
+    usage = service.usage_summary(knowledge_base_id)
+
+    assert exported["fileName"] == "Alpha 怎么解释？-conversation.md"
+    assert "## 用户" in str(exported["markdown"])
+    assert "## citeMind" in str(exported["markdown"])
+    assert "Alpha.pdf · 第 3 页 · `chunk-pdf-valid`" in str(exported["markdown"])
+    assert "## 用户" not in str(single["markdown"])
+    assert usage["calls"] == {
+        "chat": 1,
+        "queryEmbedding": 1,
+        "indexEmbedding": 1,
+        "total": 3,
+    }
+    assert usage["estimatedCostCny"] is None
+    assert usage["byModel"] == {"doubao-test-chat": 1}
+
+
 def test_conversation_refuses_without_retrieval_candidates(tmp_path: Path) -> None:
     storage = StorageRuntime(tmp_path, vector_dimension=3)
     storage.initialize()

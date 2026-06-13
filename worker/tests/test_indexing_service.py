@@ -408,9 +408,7 @@ def test_index_versions_estimate_rollback_and_failed_retry(tmp_path: Path) -> No
         if version["status"] == "failed"
     )
     assert failed["failureReason"] == "embedding failed"
-    retried = asyncio.run(
-        indexer.retry_failed(knowledge_base_id, str(failed["id"]))
-    )
+    retried = asyncio.run(indexer.retry_failed(knowledge_base_id, str(failed["id"])))
     assert retried["ready"] is True
     assert retried["indexVersion"]["embeddingModel"] == "embedding-failed"
 
