@@ -96,7 +96,11 @@ class RawPdfParser:
 
 
 class FakeEmbedder:
+    def __init__(self) -> None:
+        self.embedded_texts: list[str] = []
+
     async def embed(self, texts: Sequence[str]) -> list[list[float]]:
+        self.embedded_texts.extend(texts)
         vectors: list[list[float]] = []
         for text in texts:
             if text.startswith("pdf"):
@@ -119,6 +123,43 @@ class SlowEmbedder(FakeEmbedder):
     async def embed(self, texts: Sequence[str]) -> list[list[float]]:
         await asyncio.sleep(0.2)
         return await super().embed(texts)
+
+
+class VersionedWebParser(FakeParser):
+    def __init__(self) -> None:
+        self.version = 1
+
+    def parse_web(self, url: str, snapshot_path: Path) -> ParsedDocument:
+        return self.check_web(url, snapshot_path, etag=None, last_modified=None)
+
+    def check_web(
+        self,
+        url: str,
+        snapshot_path: Path,
+        *,
+        etag: str | None,
+        last_modified: str | None,
+    ) -> ParsedDocument:
+        del url, etag, last_modified
+        texts = ["shared evidence", "old evidence" if self.version == 1 else "new evidence"]
+        snapshot_path.write_text("\n".join(texts), encoding="utf-8")
+        return ParsedDocument(
+            parser="fake-web",
+            parser_version="test",
+            source_type="web",
+            original_text="\n\n".join(texts),
+            normalized_text="\n\n".join(texts),
+            blocks=[
+                ParsedBlock(
+                    original_text=text,
+                    normalized_text=text,
+                    location=ParsedLocation(anchor=f"block-{index + 1}"),
+                )
+                for index, text in enumerate(texts)
+            ],
+            snapshot_text=snapshot_path.read_text(encoding="utf-8"),
+            etag=f'"v{self.version}"',
+        )
 
 
 def test_build_index_for_pdf_docx_image_and_web(tmp_path: Path) -> None:
@@ -214,6 +255,33 @@ def test_completed_index_survives_storage_restart(tmp_path: Path) -> None:
         vector=[1.0, 0.0, 0.0],
         limit=1,
     )
+
+
+def test_rebuild_reuses_unchanged_blocks_after_source_version_acceptance(
+    tmp_path: Path,
+) -> None:
+    storage = StorageRuntime(tmp_path, vector_dimension=3)
+    storage.initialize()
+    knowledge_base_id = KnowledgeBaseService(storage).create("增量索引测试")["id"]
+    assert isinstance(knowledge_base_id, str)
+    parser = VersionedWebParser()
+    importer = SourceImportService(storage, parser=parser)
+    imported = importer.import_web(knowledge_base_id, "https://example.com/article")
+    source_id = str(imported["source"]["sourceId"])
+    first_embedder = FakeEmbedder()
+    asyncio.run(IndexingService(storage, embedder=first_embedder).build_index(knowledge_base_id))
+
+    parser.version = 2
+    checked = importer.check_web_update(source_id)
+    importer.decide_source_version(source_id, str(checked["pendingVersionId"]), "accept")
+    second_embedder = FakeEmbedder()
+    rebuilt = asyncio.run(
+        IndexingService(storage, embedder=second_embedder).build_index(knowledge_base_id)
+    )
+
+    assert second_embedder.embedded_texts == ["new evidence"]
+    assert rebuilt["indexVersion"]["reusedChunkCount"] == 1
+    assert rebuilt["indexVersion"]["embeddedChunkCount"] == 1
 
 
 def test_build_index_skips_legacy_raw_pdf_artifacts(tmp_path: Path) -> None:

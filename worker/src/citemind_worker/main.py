@@ -319,6 +319,99 @@ def create_server(
         except ValueError as error:
             raise RpcError(-32602, str(error)) from error
 
+    def check_web_sources(params: JsonValue) -> JsonValue:
+        values = require_object_params(params)
+        service = _require_source_import_service(source_imports)
+        knowledge_base_id = _required_str(values, "knowledgeBaseId")
+        due_only = _optional_bool(values, "dueOnly", False)
+        try:
+            return service.check_web_updates(knowledge_base_id, due_only=due_only)  # type: ignore[return-value]
+        except ValueError as error:
+            raise RpcError(-32602, str(error)) from error
+
+    def check_web_source(params: JsonValue) -> JsonValue:
+        service = _require_source_import_service(source_imports)
+        source_id = _required_str(require_object_params(params), "sourceId")
+        try:
+            return service.check_web_update(source_id)  # type: ignore[return-value]
+        except ValueError as error:
+            raise RpcError(-32602, str(error)) from error
+
+    def list_source_versions(params: JsonValue) -> JsonValue:
+        service = _require_source_import_service(source_imports)
+        source_id = _required_str(require_object_params(params), "sourceId")
+        try:
+            return service.source_versions(source_id)  # type: ignore[return-value]
+        except ValueError as error:
+            raise RpcError(-32602, str(error)) from error
+
+    def source_version_diff(params: JsonValue) -> JsonValue:
+        values = require_object_params(params)
+        service = _require_source_import_service(source_imports)
+        source_id = _required_str(values, "sourceId")
+        version_id = _required_str(values, "versionId")
+        try:
+            return service.source_version_diff(source_id, version_id)  # type: ignore[return-value]
+        except ValueError as error:
+            raise RpcError(-32602, str(error)) from error
+
+    def decide_source_version(params: JsonValue) -> JsonValue:
+        values = require_object_params(params)
+        service = _require_source_import_service(source_imports)
+        source_id = _required_str(values, "sourceId")
+        version_id = _required_str(values, "versionId")
+        decision = _required_str(values, "decision")
+        try:
+            return service.decide_source_version(source_id, version_id, decision)  # type: ignore[return-value]
+        except ValueError as error:
+            raise RpcError(-32602, str(error)) from error
+
+    def update_source_maintenance(params: JsonValue) -> JsonValue:
+        values = require_object_params(params)
+        service = _require_source_import_service(source_imports)
+        source_id = _required_str(values, "sourceId")
+        replacement_source_id = _optional_nullable_str(values, "replacementSourceId")
+        review_at = _optional_nullable_str(values, "reviewAt")
+        expiry_status = _optional_str(values, "expiryStatus", "active")
+        try:
+            return service.update_source_maintenance(
+                source_id,
+                replacement_source_id=replacement_source_id,
+                review_at=review_at,
+                expiry_status=expiry_status,
+            )  # type: ignore[return-value]
+        except ValueError as error:
+            raise RpcError(-32602, str(error)) from error
+
+    def suggest_source_status(params: JsonValue) -> JsonValue:
+        values = require_object_params(params)
+        service = _require_source_import_service(source_imports)
+        source_id = _required_str(values, "sourceId")
+        suggestion = _required_str(values, "suggestion")
+        reason = _required_str(values, "reason")
+        confidence = _optional_float(values, "confidence")
+        if confidence is None:
+            raise RpcError(-32602, "confidence is required")
+        try:
+            return service.suggest_source_status(
+                source_id,
+                suggestion=suggestion,
+                reason=reason,
+                confidence=confidence,
+            )  # type: ignore[return-value]
+        except ValueError as error:
+            raise RpcError(-32602, str(error)) from error
+
+    def decide_source_suggestion(params: JsonValue) -> JsonValue:
+        values = require_object_params(params)
+        service = _require_source_import_service(source_imports)
+        source_id = _required_str(values, "sourceId")
+        decision = _required_str(values, "decision")
+        try:
+            return service.decide_source_suggestion(source_id, decision)  # type: ignore[return-value]
+        except ValueError as error:
+            raise RpcError(-32602, str(error)) from error
+
     async def build_index(params: JsonValue) -> JsonValue:
         values = require_object_params(params)
         service = _require_indexing_service(indexes)
@@ -589,6 +682,14 @@ def create_server(
     server.register("sources.parse_checks", parse_checks)
     server.register("sources.delete", delete_source)
     server.register("sources.resolve_duplicate", resolve_duplicate)
+    server.register("sources.check_web_all", check_web_sources)
+    server.register("sources.check_web", check_web_source)
+    server.register("sources.versions", list_source_versions)
+    server.register("sources.version_diff", source_version_diff)
+    server.register("sources.decide_version", decide_source_version)
+    server.register("sources.update_maintenance", update_source_maintenance)
+    server.register("sources.suggest_status", suggest_source_status)
+    server.register("sources.decide_suggestion", decide_source_suggestion)
     server.register("indexes.build", build_index)
     server.register("indexes.delete", delete_indexes)
     server.register("indexes.rebuild", rebuild_index)

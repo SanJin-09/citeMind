@@ -79,6 +79,18 @@ class VectorIndex:
     def count_index_version(self, index_version_id: str) -> int:
         return int(self.table.count_rows(f"index_version_id = '{_escape_sql(index_version_id)}'"))
 
+    def vectors_by_chunk_ids(self, chunk_ids: Sequence[str]) -> dict[str, list[float]]:
+        unique_ids = list(dict.fromkeys(chunk_ids))
+        if not unique_ids:
+            return {}
+        selected = set(unique_ids)
+        rows = self.table.to_arrow().select(["chunk_id", "vector"]).to_pylist()
+        return {
+            str(row["chunk_id"]): [float(value) for value in row["vector"]]
+            for row in rows
+            if str(row["chunk_id"]) in selected
+        }
+
     def search(
         self,
         *,

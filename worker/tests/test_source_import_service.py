@@ -107,6 +107,45 @@ class FakeParser:
         )
 
 
+class VersionedWebParser(FakeParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self.version = 1
+
+    def parse_web(self, url: str, snapshot_path: Path) -> ParsedDocument:
+        return self.check_web(url, snapshot_path, etag=None, last_modified=None)
+
+    def check_web(
+        self,
+        url: str,
+        snapshot_path: Path,
+        *,
+        etag: str | None,
+        last_modified: str | None,
+    ) -> ParsedDocument:
+        del url, etag, last_modified
+        texts = ["shared evidence", "old evidence" if self.version == 1 else "new evidence"]
+        snapshot_path.write_text("\n".join(texts), encoding="utf-8")
+        return ParsedDocument(
+            parser="fake-web",
+            parser_version="test",
+            source_type="web",
+            original_text="\n\n".join(texts),
+            normalized_text="\n\n".join(texts),
+            blocks=[
+                ParsedBlock(
+                    original_text=text,
+                    normalized_text=text,
+                    location=ParsedLocation(anchor=f"block-{index + 1}"),
+                )
+                for index, text in enumerate(texts)
+            ],
+            snapshot_text=snapshot_path.read_text(encoding="utf-8"),
+            etag=f'"v{self.version}"',
+            last_modified=f"version-{self.version}",
+        )
+
+
 def test_imports_pdf_docx_image_and_web_with_parse_artifacts(tmp_path: Path) -> None:
     storage = StorageRuntime(tmp_path, vector_dimension=3)
     storage.initialize()
@@ -289,3 +328,55 @@ def test_legacy_raw_pdf_duplicate_can_be_reimported(tmp_path: Path) -> None:
     assert checks["summary"]["failed"] == 1
     assert checks["summary"]["success"] == 1
     assert not repaired["parseCheck"]["duplicateOfSourceId"]
+
+
+def test_web_version_maintenance_preserves_current_until_user_accepts(tmp_path: Path) -> None:
+    storage = StorageRuntime(tmp_path, vector_dimension=3)
+    storage.initialize()
+    knowledge_base_id = KnowledgeBaseService(storage).create("网页版本测试")["id"]
+    assert isinstance(knowledge_base_id, str)
+    parser = VersionedWebParser()
+    service = SourceImportService(storage, parser=parser)
+
+    imported = service.import_web(knowledge_base_id, "https://example.com/article")
+    source_id = str(imported["source"]["sourceId"])
+    initial = service.source_versions(source_id)
+    initial_version_id = str(initial["source"]["currentVersionId"])
+    assert initial["versions"][0]["etag"] == '"v1"'
+
+    parser.version = 2
+    checked = service.check_web_update(source_id)
+    pending_version_id = str(checked["pendingVersionId"])
+    pending = service.source_versions(source_id)
+    diff = service.source_version_diff(source_id, pending_version_id)
+
+    assert checked["status"] == "changed"
+    assert pending["source"]["currentVersionId"] == initial_version_id
+    assert pending["versions"][0]["reviewStatus"] == "pending_review"
+    assert pending["versions"][0]["changeSummary"]["unchangedBlocks"] == 1
+    assert "-old evidence" in diff["diff"]
+    assert "+new evidence" in diff["diff"]
+
+    checked_again = service.check_web_update(source_id)
+    assert checked_again["pendingVersionId"] == pending_version_id
+    assert len(service.source_versions(source_id)["versions"]) == 2
+
+    accepted = service.decide_source_version(source_id, pending_version_id, "accept")
+    assert accepted["source"]["currentVersionId"] == pending_version_id
+    assert accepted["versions"][0]["reviewStatus"] == "current"
+
+    service.update_source_maintenance(
+        source_id,
+        replacement_source_id=None,
+        review_at="2030-01-01T00:00:00.000Z",
+        expiry_status="active",
+    )
+    suggested = service.suggest_source_status(
+        source_id,
+        suggestion="expired",
+        reason="正文日期可能已经过期",
+        confidence=0.8,
+    )
+    assert suggested["source"]["modelSuggestion"]["status"] == "pending_confirmation"
+    decided = service.decide_source_suggestion(source_id, "accept")
+    assert decided["source"]["expiryStatus"] == "expired"

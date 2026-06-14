@@ -1,3 +1,4 @@
+import json
 from collections import Counter
 from contextlib import suppress
 from pathlib import Path
@@ -133,15 +134,48 @@ class KnowledgeBaseService:
                     s.display_name,
                     s.uri,
                     s.status,
+                    s.current_version_id,
+                    s.replacement_source_id,
+                    s.review_at,
+                    s.expiry_status,
+                    s.model_suggestion_json,
+                    s.last_checked_at,
                     s.created_at,
                     s.updated_at,
                     (
                         SELECT sv.status
                         FROM source_versions sv
-                        WHERE sv.source_id = s.id
-                        ORDER BY sv.version_number DESC
-                        LIMIT 1
+                        WHERE sv.id = COALESCE(
+                            s.current_version_id,
+                            (
+                                SELECT latest.id
+                                FROM source_versions latest
+                                WHERE latest.source_id = s.id
+                                ORDER BY latest.version_number DESC
+                                LIMIT 1
+                            )
+                        )
                     ) AS latest_version_status,
+                    (
+                        SELECT sv.version_number
+                        FROM source_versions sv
+                        WHERE sv.id = COALESCE(
+                            s.current_version_id,
+                            (
+                                SELECT latest.id
+                                FROM source_versions latest
+                                WHERE latest.source_id = s.id
+                                ORDER BY latest.version_number DESC
+                                LIMIT 1
+                            )
+                        )
+                    ) AS current_version_number,
+                    (
+                        SELECT COUNT(*)
+                        FROM source_versions pending
+                        WHERE pending.source_id = s.id
+                          AND pending.review_status = 'pending_review'
+                    ) AS pending_version_count,
                     (
                         SELECT COUNT(*)
                         FROM source_versions sv
@@ -163,6 +197,14 @@ class KnowledgeBaseService:
                 "uri": row["uri"],
                 "status": str(row["status"]),
                 "latestVersionStatus": row["latest_version_status"],
+                "currentVersionId": row["current_version_id"],
+                "currentVersionNumber": int(row["current_version_number"] or 0),
+                "pendingVersionCount": int(row["pending_version_count"]),
+                "replacementSourceId": row["replacement_source_id"],
+                "reviewAt": row["review_at"],
+                "expiryStatus": str(row["expiry_status"]),
+                "modelSuggestion": _json_object(row["model_suggestion_json"]) or None,
+                "lastCheckedAt": row["last_checked_at"],
                 "chunkCount": int(row["chunk_count"]),
                 "createdAt": str(row["created_at"]),
                 "updatedAt": str(row["updated_at"]),
@@ -288,3 +330,13 @@ def _remove_empty_directories(root: Path) -> None:
         if path.is_dir():
             with suppress(OSError):
                 path.rmdir()
+
+
+def _json_object(value: object) -> dict[str, object]:
+    if not isinstance(value, str) or not value:
+        return {}
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}

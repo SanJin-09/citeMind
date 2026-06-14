@@ -93,9 +93,111 @@ export interface KnowledgeBaseSource {
   uri: string | null;
   status: string;
   latestVersionStatus: string | null;
+  currentVersionId: string | null;
+  currentVersionNumber: number;
+  pendingVersionCount: number;
+  replacementSourceId: string | null;
+  reviewAt: string | null;
+  expiryStatus: "active" | "expired" | "replaced";
+  modelSuggestion: SourceStatusSuggestion | null;
+  lastCheckedAt: string | null;
   chunkCount: number;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface SourceStatusSuggestion {
+  status: "pending_confirmation" | "accepted" | "dismissed";
+  suggestion: "expired" | "conflict";
+  reason: string;
+  confidence: number;
+  createdAt: string;
+  decidedAt?: string;
+}
+
+export interface SourceMaintenanceRecord {
+  id: string;
+  knowledgeBaseId: string;
+  sourceType: KnowledgeBaseSource["sourceType"];
+  displayName: string;
+  uri: string | null;
+  status: string;
+  currentVersionId: string | null;
+  currentVersionNumber: number;
+  replacementSourceId: string | null;
+  reviewAt: string | null;
+  expiryStatus: KnowledgeBaseSource["expiryStatus"];
+  modelSuggestion: SourceStatusSuggestion | null;
+  lastCheckedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface SourceVersionChangeSummary {
+  addedBlocks?: number;
+  removedBlocks?: number;
+  changedBlocks?: number;
+  unchangedBlocks?: number;
+  beforeBlockCount?: number;
+  afterBlockCount?: number;
+}
+
+export interface SourceVersionRecord {
+  id: string;
+  versionNumber: number;
+  contentHash: string | null;
+  originalPath: string | null;
+  snapshotPath: string | null;
+  parseArtifactPath: string | null;
+  status: string;
+  etag: string | null;
+  lastModified: string | null;
+  checkedAt: string | null;
+  previousVersionId: string | null;
+  reviewStatus: "current" | "pending_review" | "superseded" | "rejected";
+  changeSummary: SourceVersionChangeSummary;
+  createdAt: string;
+}
+
+export interface SourceVersionsResponse {
+  source: SourceMaintenanceRecord;
+  versions: SourceVersionRecord[];
+}
+
+export interface SourceVersionDiffResponse {
+  sourceId: string;
+  versionId: string;
+  summary: SourceVersionChangeSummary;
+  diff: string;
+  truncated: boolean;
+}
+
+export interface WebUpdateCheckItem {
+  sourceId: string;
+  status: "unchanged" | "changed";
+  checkedAt: string;
+  pendingVersionId?: string;
+  changeSummary?: SourceVersionChangeSummary;
+}
+
+export interface WebUpdateCheckResponse {
+  knowledgeBaseId: string;
+  checked: number;
+  changed: number;
+  items: WebUpdateCheckItem[];
+}
+
+export interface DecideSourceVersionRequest {
+  sourceId: string;
+  versionId: string;
+  decision: "accept" | "reject";
+}
+
+export interface UpdateSourceMaintenanceRequest {
+  sourceId: string;
+  replacementSourceId?: string | null;
+  reviewAt?: string | null;
+  expiryStatus: KnowledgeBaseSource["expiryStatus"];
 }
 
 export interface KnowledgeBaseSourcesResponse {
@@ -259,6 +361,8 @@ export interface IndexVersionRecord {
   activatedAt: string | null;
   retainedUntil: string | null;
   failureReason: string | null;
+  reusedChunkCount: number;
+  embeddedChunkCount: number;
   chunkCount: number;
 }
 
@@ -553,6 +657,26 @@ export interface DesktopApi {
     resolveDuplicate: (
       request: ResolveDuplicateRequest,
     ) => Promise<ImportSourceResult>;
+    checkWebAll: (
+      knowledgeBaseId: string,
+      dueOnly?: boolean,
+    ) => Promise<WebUpdateCheckResponse>;
+    checkWeb: (sourceId: string) => Promise<WebUpdateCheckItem>;
+    versions: (sourceId: string) => Promise<SourceVersionsResponse>;
+    versionDiff: (
+      sourceId: string,
+      versionId: string,
+    ) => Promise<SourceVersionDiffResponse>;
+    decideVersion: (
+      request: DecideSourceVersionRequest,
+    ) => Promise<SourceVersionsResponse>;
+    updateMaintenance: (
+      request: UpdateSourceMaintenanceRequest,
+    ) => Promise<SourceVersionsResponse>;
+    decideSuggestion: (
+      sourceId: string,
+      decision: "accept" | "dismiss",
+    ) => Promise<SourceVersionsResponse>;
   };
   indexes: {
     build: (knowledgeBaseId: string) => Promise<BuildIndexResponse>;
@@ -623,6 +747,13 @@ export const IPC_CHANNELS = {
   listParseChecks: "citemind:sources:parse-checks",
   deleteSource: "citemind:sources:delete",
   resolveDuplicate: "citemind:sources:resolve-duplicate",
+  checkAllWebSources: "citemind:sources:check-web-all",
+  checkWebSource: "citemind:sources:check-web",
+  listSourceVersions: "citemind:sources:versions",
+  getSourceVersionDiff: "citemind:sources:version-diff",
+  decideSourceVersion: "citemind:sources:decide-version",
+  updateSourceMaintenance: "citemind:sources:update-maintenance",
+  decideSourceSuggestion: "citemind:sources:decide-suggestion",
   buildIndex: "citemind:indexes:build",
   deleteIndex: "citemind:indexes:delete",
   rebuildIndex: "citemind:indexes:rebuild",

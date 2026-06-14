@@ -100,7 +100,8 @@ class IndexingService:
             chunks = self._load_chunks(candidates)
             if not chunks:
                 raise ValueError("解析结果中没有可索引文本块")
-            vectors = await self._embed_chunks(
+            vectors, reused_chunk_count = await self._reuse_or_embed_chunks(
+                knowledge_base_id,
                 chunks,
                 api_key=api_key,
                 base_url=base_url,
@@ -122,6 +123,11 @@ class IndexingService:
                 index_version_id=index_version_id,
                 chunks=chunks,
                 vectors=vectors,
+            )
+            self._record_incremental_counts(
+                index_version_id,
+                reused_chunk_count=reused_chunk_count,
+                embedded_chunk_count=len(chunks) - reused_chunk_count,
             )
             await self._wait_until_runnable(job_id)
             self._validate_index(index_version_id=index_version_id, expected_count=len(chunks))
@@ -217,6 +223,7 @@ class IndexingService:
                 SELECT id, embedding_provider, embedding_model, embedding_dimension,
                        chunking_version, parser_version, status, is_current,
                        created_at, activated_at, retained_until, failure_reason,
+                       reused_chunk_count, embedded_chunk_count,
                        (SELECT COUNT(*) FROM chunks WHERE index_version_id = iv.id) AS chunk_count
                 FROM index_versions iv
                 WHERE knowledge_base_id = ?
@@ -420,7 +427,8 @@ class IndexingService:
                 """
                 SELECT id, embedding_provider, embedding_model, embedding_dimension,
                        chunking_version, parser_version, status, is_current, created_at,
-                       activated_at, retained_until, failure_reason
+                       activated_at, retained_until, failure_reason,
+                       reused_chunk_count, embedded_chunk_count
                 FROM index_versions
                 WHERE knowledge_base_id = ?
                   AND (? IS NULL OR id = ?)
@@ -457,12 +465,15 @@ class IndexingService:
                     sv.id AS source_version_id,
                     sv.parse_artifact_path
                 FROM sources s
-                JOIN source_versions sv ON sv.id = (
-                    SELECT latest.id
-                    FROM source_versions latest
-                    WHERE latest.source_id = s.id
-                    ORDER BY latest.version_number DESC
-                    LIMIT 1
+                JOIN source_versions sv ON sv.id = COALESCE(
+                    s.current_version_id,
+                    (
+                        SELECT latest.id
+                        FROM source_versions latest
+                        WHERE latest.source_id = s.id
+                        ORDER BY latest.version_number DESC
+                        LIMIT 1
+                    )
                 )
                 WHERE s.knowledge_base_id = ?
                   AND s.status IN ('processing', 'ready')
@@ -535,6 +546,109 @@ class IndexingService:
                 ),
             )
         return vectors
+
+    async def _reuse_or_embed_chunks(
+        self,
+        knowledge_base_id: str,
+        chunks: Sequence[ChunkCandidate],
+        *,
+        api_key: str | None,
+        base_url: str,
+        embedding_model: str,
+        job_id: str,
+    ) -> tuple[list[list[float]], int]:
+        reusable = self._reusable_vectors(
+            knowledge_base_id,
+            chunks,
+            embedding_model=embedding_model,
+        )
+        missing = [chunk for chunk in chunks if chunk.content_hash not in reusable]
+        embedded = await self._embed_chunks(
+            missing,
+            api_key=api_key,
+            base_url=base_url,
+            embedding_model=embedding_model,
+            job_id=job_id,
+        )
+        embedded_by_hash = {
+            chunk.content_hash: vector for chunk, vector in zip(missing, embedded, strict=True)
+        }
+        return (
+            [
+                reusable.get(chunk.content_hash) or embedded_by_hash[chunk.content_hash]
+                for chunk in chunks
+            ],
+            len(chunks) - len(missing),
+        )
+
+    def _reusable_vectors(
+        self,
+        knowledge_base_id: str,
+        chunks: Sequence[ChunkCandidate],
+        *,
+        embedding_model: str,
+    ) -> dict[str, list[float]]:
+        if not chunks:
+            return {}
+        with self.storage.database.connect() as connection:
+            current = connection.execute(
+                """
+                SELECT id
+                FROM index_versions
+                WHERE knowledge_base_id = ?
+                  AND is_current = 1
+                  AND status = 'ready'
+                  AND embedding_model = ?
+                  AND embedding_dimension = ?
+                """,
+                (knowledge_base_id, embedding_model, self.storage.vector_index.dimension),
+            ).fetchone()
+            if current is None:
+                return {}
+            rows = connection.execute(
+                """
+                SELECT id, normalized_text, source_version_id
+                FROM chunks
+                WHERE index_version_id = ?
+                """,
+                (current["id"],),
+            ).fetchall()
+        previous_source_versions = {str(row["source_version_id"]) for row in rows}
+        next_source_versions = {chunk.source_version_id for chunk in chunks}
+        if previous_source_versions == next_source_versions:
+            return {}
+        by_text_hash = {
+            _stable_text_hash(str(row["normalized_text"])): str(row["id"]) for row in rows
+        }
+        relevant = {
+            chunk.content_hash: by_text_hash[chunk.content_hash]
+            for chunk in chunks
+            if chunk.content_hash in by_text_hash
+        }
+        vectors = self.storage.vector_index.vectors_by_chunk_ids(list(relevant.values()))
+        return {
+            content_hash: vectors[chunk_id]
+            for content_hash, chunk_id in relevant.items()
+            if chunk_id in vectors
+        }
+
+    def _record_incremental_counts(
+        self,
+        index_version_id: str,
+        *,
+        reused_chunk_count: int,
+        embedded_chunk_count: int,
+    ) -> None:
+        with self.storage.database.connect() as connection:
+            connection.execute(
+                """
+                UPDATE index_versions
+                SET reused_chunk_count = ?, embedded_chunk_count = ?
+                WHERE id = ?
+                """,
+                (reused_chunk_count, embedded_chunk_count, index_version_id),
+            )
+            connection.commit()
 
     async def _wait_until_runnable(self, job_id: str) -> None:
         while True:
@@ -848,10 +962,14 @@ def _content_hash(
     part_index: int,
     text: str,
 ) -> str:
+    del source_version_id, block_index, part_index
+    return _stable_text_hash(text)
+
+
+def _stable_text_hash(text: str) -> str:
     import hashlib
 
-    payload = f"{source_version_id}:{block_index}:{part_index}:{text}".encode()
-    return hashlib.sha256(payload).hexdigest()
+    return hashlib.sha256(_normalize_text(text).encode()).hexdigest()
 
 
 def _stage_checkpoint(
@@ -903,6 +1021,8 @@ def _index_record(row: object, *, chunk_count: int | None = None) -> dict[str, o
         "activatedAt": row["activated_at"],  # type: ignore[index]
         "retainedUntil": row["retained_until"],  # type: ignore[index]
         "failureReason": row["failure_reason"],  # type: ignore[index]
+        "reusedChunkCount": int(row["reused_chunk_count"]),  # type: ignore[index]
+        "embeddedChunkCount": int(row["embedded_chunk_count"]),  # type: ignore[index]
         "chunkCount": int(row["chunk_count"])  # type: ignore[index]
         if chunk_count is None
         else chunk_count,

@@ -55,6 +55,29 @@ const api: DesktopApi = {
       ipcRenderer.invoke(IPC_CHANNELS.deleteSource, sourceId),
     resolveDuplicate: (request) =>
       ipcRenderer.invoke(IPC_CHANNELS.resolveDuplicate, request),
+    checkWebAll: (knowledgeBaseId, dueOnly = false) =>
+      ipcRenderer.invoke(IPC_CHANNELS.checkAllWebSources, {
+        knowledgeBaseId,
+        dueOnly,
+      }),
+    checkWeb: (sourceId) =>
+      ipcRenderer.invoke(IPC_CHANNELS.checkWebSource, sourceId),
+    versions: (sourceId) =>
+      ipcRenderer.invoke(IPC_CHANNELS.listSourceVersions, sourceId),
+    versionDiff: (sourceId, versionId) =>
+      ipcRenderer.invoke(IPC_CHANNELS.getSourceVersionDiff, {
+        sourceId,
+        versionId,
+      }),
+    decideVersion: (request) =>
+      ipcRenderer.invoke(IPC_CHANNELS.decideSourceVersion, request),
+    updateMaintenance: (request) =>
+      ipcRenderer.invoke(IPC_CHANNELS.updateSourceMaintenance, request),
+    decideSuggestion: (sourceId, decision) =>
+      ipcRenderer.invoke(IPC_CHANNELS.decideSourceSuggestion, {
+        sourceId,
+        decision,
+      }),
   },
   indexes: {
     build: (knowledgeBaseId) =>

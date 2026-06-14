@@ -20,6 +20,8 @@ import type {
   ParseCheckSummary,
   SeedCredentialStatus,
   SeedModelDescriptor,
+  SourceVersionDiffResponse,
+  SourceVersionsResponse,
   UsageSummary,
   WorkerHealth,
 } from "../../shared/contracts";
@@ -133,6 +135,14 @@ const FALLBACK_SOURCES: KnowledgeBaseSource[] = [
     uri: null,
     status: "ready",
     latestVersionStatus: "ready",
+    currentVersionId: "demo-source-version-1",
+    currentVersionNumber: 1,
+    pendingVersionCount: 0,
+    replacementSourceId: null,
+    reviewAt: null,
+    expiryStatus: "active",
+    modelSuggestion: null,
+    lastCheckedAt: null,
     chunkCount: 42,
     createdAt: "",
     updatedAt: "",
@@ -144,6 +154,14 @@ const FALLBACK_SOURCES: KnowledgeBaseSource[] = [
     uri: null,
     status: "ready",
     latestVersionStatus: "ready",
+    currentVersionId: "demo-source-version-2",
+    currentVersionNumber: 1,
+    pendingVersionCount: 0,
+    replacementSourceId: null,
+    reviewAt: null,
+    expiryStatus: "active",
+    modelSuggestion: null,
+    lastCheckedAt: null,
     chunkCount: 35,
     createdAt: "",
     updatedAt: "",
@@ -155,6 +173,14 @@ const FALLBACK_SOURCES: KnowledgeBaseSource[] = [
     uri: null,
     status: "ready",
     latestVersionStatus: "ready",
+    currentVersionId: "demo-source-version-3",
+    currentVersionNumber: 1,
+    pendingVersionCount: 0,
+    replacementSourceId: null,
+    reviewAt: null,
+    expiryStatus: "active",
+    modelSuggestion: null,
+    lastCheckedAt: null,
     chunkCount: 21,
     createdAt: "",
     updatedAt: "",
@@ -166,6 +192,14 @@ const FALLBACK_SOURCES: KnowledgeBaseSource[] = [
     uri: null,
     status: "pending",
     latestVersionStatus: "processing",
+    currentVersionId: "demo-source-version-4",
+    currentVersionNumber: 1,
+    pendingVersionCount: 0,
+    replacementSourceId: null,
+    reviewAt: null,
+    expiryStatus: "active",
+    modelSuggestion: null,
+    lastCheckedAt: null,
     chunkCount: 0,
     createdAt: "",
     updatedAt: "",
@@ -352,6 +386,17 @@ function App(): React.JSX.Element {
     null,
   );
   const [sourceDeleteBusyId, setSourceDeleteBusyId] = useState("");
+  const [sourceMaintenance, setSourceMaintenance] =
+    useState<SourceVersionsResponse | null>(null);
+  const [sourceVersionDiff, setSourceVersionDiff] =
+    useState<SourceVersionDiffResponse | null>(null);
+  const [sourceMaintenanceBusy, setSourceMaintenanceBusy] = useState(false);
+  const [sourceMaintenanceError, setSourceMaintenanceError] = useState("");
+  const [sourceMaintenanceForm, setSourceMaintenanceForm] = useState({
+    replacementSourceId: "",
+    reviewAt: "",
+    expiryStatus: "active" as KnowledgeBaseSource["expiryStatus"],
+  });
   const [duplicateBusyId, setDuplicateBusyId] = useState("");
   const [confirmAction, setConfirmAction] = useState<ConfirmAction | null>(
     null,
@@ -679,6 +724,28 @@ function App(): React.JSX.Element {
     online,
     chatBusy,
   ]);
+
+  useEffect(() => {
+    if (!online || !activeKnowledgeBaseId) {
+      return;
+    }
+    const check = async (): Promise<void> => {
+      try {
+        const result = await getDesktopApi().sources.checkWebAll(
+          activeKnowledgeBaseId,
+          true,
+        );
+        if (result.changed > 0) {
+          await loadSources(activeKnowledgeBaseId);
+        }
+      } catch {
+        // Automatic checks stay silent; manual checks expose actionable errors.
+      }
+    };
+    void check();
+    const timer = window.setInterval(() => void check(), 15 * 60 * 1000);
+    return () => window.clearInterval(timer);
+  }, [activeKnowledgeBaseId, loadSources, online]);
 
   const activeKnowledgeBase =
     knowledgeBases.find((item) => item.id === activeKnowledgeBaseId) ??
@@ -1204,6 +1271,164 @@ function App(): React.JSX.Element {
     }
   };
 
+  const openSourceMaintenance = async (
+    source: KnowledgeBaseSource,
+  ): Promise<void> => {
+    setSourceMaintenanceBusy(true);
+    setSourceMaintenanceError("");
+    setSourceVersionDiff(null);
+    try {
+      const result = await getDesktopApi().sources.versions(source.id);
+      setSourceMaintenance(result);
+      setSourceMaintenanceForm({
+        replacementSourceId: result.source.replacementSourceId ?? "",
+        reviewAt: toLocalDateTime(result.source.reviewAt),
+        expiryStatus: result.source.expiryStatus,
+      });
+    } catch (error) {
+      setImportError(
+        error instanceof Error ? error.message : "来源版本读取失败",
+      );
+    } finally {
+      setSourceMaintenanceBusy(false);
+    }
+  };
+
+  const checkSourceUpdate = async (): Promise<void> => {
+    if (!sourceMaintenance) {
+      return;
+    }
+    setSourceMaintenanceBusy(true);
+    setSourceMaintenanceError("");
+    try {
+      await getDesktopApi().sources.checkWeb(sourceMaintenance.source.id);
+      setSourceMaintenance(
+        await getDesktopApi().sources.versions(sourceMaintenance.source.id),
+      );
+      if (activeKnowledgeBaseId) {
+        await loadSources(activeKnowledgeBaseId);
+      }
+    } catch (error) {
+      setSourceMaintenanceError(
+        error instanceof Error ? error.message : "网页更新检查失败",
+      );
+    } finally {
+      setSourceMaintenanceBusy(false);
+    }
+  };
+
+  const inspectSourceVersionDiff = async (versionId: string): Promise<void> => {
+    if (!sourceMaintenance) {
+      return;
+    }
+    setSourceMaintenanceBusy(true);
+    setSourceMaintenanceError("");
+    try {
+      setSourceVersionDiff(
+        await getDesktopApi().sources.versionDiff(
+          sourceMaintenance.source.id,
+          versionId,
+        ),
+      );
+    } catch (error) {
+      setSourceMaintenanceError(
+        error instanceof Error ? error.message : "版本差异读取失败",
+      );
+    } finally {
+      setSourceMaintenanceBusy(false);
+    }
+  };
+
+  const decideSourceVersion = async (
+    versionId: string,
+    decision: "accept" | "reject",
+    rebuild: boolean,
+  ): Promise<void> => {
+    if (!sourceMaintenance) {
+      return;
+    }
+    setSourceMaintenanceBusy(true);
+    setSourceMaintenanceError("");
+    try {
+      setSourceMaintenance(
+        await getDesktopApi().sources.decideVersion({
+          sourceId: sourceMaintenance.source.id,
+          versionId,
+          decision,
+        }),
+      );
+      setSourceVersionDiff(null);
+      if (rebuild && activeKnowledgeBaseId) {
+        setIndexStatus(
+          await getDesktopApi().indexes.rebuild(activeKnowledgeBaseId),
+        );
+      }
+      if (activeKnowledgeBaseId) {
+        await refreshImportState(activeKnowledgeBaseId);
+      }
+    } catch (error) {
+      setSourceMaintenanceError(
+        error instanceof Error ? error.message : "来源版本处理失败",
+      );
+    } finally {
+      setSourceMaintenanceBusy(false);
+    }
+  };
+
+  const saveSourceMaintenance = async (): Promise<void> => {
+    if (!sourceMaintenance) {
+      return;
+    }
+    setSourceMaintenanceBusy(true);
+    setSourceMaintenanceError("");
+    try {
+      setSourceMaintenance(
+        await getDesktopApi().sources.updateMaintenance({
+          sourceId: sourceMaintenance.source.id,
+          replacementSourceId:
+            sourceMaintenanceForm.replacementSourceId || null,
+          reviewAt: fromLocalDateTime(sourceMaintenanceForm.reviewAt),
+          expiryStatus: sourceMaintenanceForm.expiryStatus,
+        }),
+      );
+      if (activeKnowledgeBaseId) {
+        await loadSources(activeKnowledgeBaseId);
+      }
+    } catch (error) {
+      setSourceMaintenanceError(
+        error instanceof Error ? error.message : "来源维护设置保存失败",
+      );
+    } finally {
+      setSourceMaintenanceBusy(false);
+    }
+  };
+
+  const decideSourceSuggestion = async (
+    decision: "accept" | "dismiss",
+  ): Promise<void> => {
+    if (!sourceMaintenance) {
+      return;
+    }
+    setSourceMaintenanceBusy(true);
+    try {
+      setSourceMaintenance(
+        await getDesktopApi().sources.decideSuggestion(
+          sourceMaintenance.source.id,
+          decision,
+        ),
+      );
+      if (activeKnowledgeBaseId) {
+        await loadSources(activeKnowledgeBaseId);
+      }
+    } catch (error) {
+      setSourceMaintenanceError(
+        error instanceof Error ? error.message : "来源建议处理失败",
+      );
+    } finally {
+      setSourceMaintenanceBusy(false);
+    }
+  };
+
   const resolveDuplicate = async (
     sourceId: string,
     action: DuplicateAction,
@@ -1611,6 +1836,16 @@ function App(): React.JSX.Element {
                         <Icon name="check" size={14} />
                       )}
                     </span>
+                  </button>
+                  <button
+                    aria-label={`维护来源版本 ${source.displayName}`}
+                    className="source-maintenance"
+                    disabled={sourceMaintenanceBusy}
+                    title="版本与时效维护"
+                    type="button"
+                    onClick={() => void openSourceMaintenance(source)}
+                  >
+                    <Icon name="refresh" size={15} />
                   </button>
                   <button
                     aria-label={`删除来源 ${source.displayName}`}
@@ -2057,6 +2292,36 @@ function App(): React.JSX.Element {
           onClose={() => setWebImportOpen(false)}
           onFormChange={setWebImportForm}
           onSubmit={() => void importWebSource()}
+        />
+      )}
+
+      {sourceMaintenance && (
+        <SourceMaintenanceDialog
+          busy={sourceMaintenanceBusy}
+          diff={sourceVersionDiff}
+          error={sourceMaintenanceError}
+          form={sourceMaintenanceForm}
+          sources={sources}
+          value={sourceMaintenance}
+          onCheck={() => void checkSourceUpdate()}
+          onClose={() => {
+            if (!sourceMaintenanceBusy) {
+              setSourceMaintenance(null);
+              setSourceVersionDiff(null);
+            }
+          }}
+          onCloseDiff={() => setSourceVersionDiff(null)}
+          onDecideSuggestion={(decision) =>
+            void decideSourceSuggestion(decision)
+          }
+          onDecideVersion={(versionId, decision, rebuild) =>
+            void decideSourceVersion(versionId, decision, rebuild)
+          }
+          onFormChange={setSourceMaintenanceForm}
+          onInspectDiff={(versionId) =>
+            void inspectSourceVersionDiff(versionId)
+          }
+          onSave={() => void saveSourceMaintenance()}
         />
       )}
 
@@ -2841,6 +3106,280 @@ function ParseCheckPanel({
         </div>
       )}
     </section>
+  );
+}
+
+function SourceMaintenanceDialog({
+  busy,
+  diff,
+  error,
+  form,
+  sources,
+  value,
+  onCheck,
+  onClose,
+  onCloseDiff,
+  onDecideSuggestion,
+  onDecideVersion,
+  onFormChange,
+  onInspectDiff,
+  onSave,
+}: {
+  busy: boolean;
+  diff: SourceVersionDiffResponse | null;
+  error: string;
+  form: {
+    replacementSourceId: string;
+    reviewAt: string;
+    expiryStatus: KnowledgeBaseSource["expiryStatus"];
+  };
+  sources: KnowledgeBaseSource[];
+  value: SourceVersionsResponse;
+  onCheck: () => void;
+  onClose: () => void;
+  onCloseDiff: () => void;
+  onDecideSuggestion: (decision: "accept" | "dismiss") => void;
+  onDecideVersion: (
+    versionId: string,
+    decision: "accept" | "reject",
+    rebuild: boolean,
+  ) => void;
+  onFormChange: (next: {
+    replacementSourceId: string;
+    reviewAt: string;
+    expiryStatus: KnowledgeBaseSource["expiryStatus"];
+  }) => void;
+  onInspectDiff: (versionId: string) => void;
+  onSave: () => void;
+}): React.JSX.Element {
+  const suggestion = value.source.modelSuggestion;
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <section
+        aria-modal="true"
+        className="source-maintenance-dialog"
+        role="dialog"
+      >
+        <header className="settings-heading">
+          <div>
+            <p className="eyebrow">Source Maintenance</p>
+            <h2>{value.source.displayName}</h2>
+            <span>
+              当前 v{value.source.currentVersionNumber} ·{" "}
+              {expiryStatusLabel(value.source.expiryStatus)}
+            </span>
+          </div>
+          <button
+            aria-label="关闭来源版本维护"
+            className="icon-button"
+            disabled={busy}
+            type="button"
+            onClick={onClose}
+          >
+            <Icon name="close" size={17} />
+          </button>
+        </header>
+
+        <div className="source-maintenance-body">
+          <section className="source-maintenance-settings">
+            <label>
+              <span>时效状态</span>
+              <select
+                value={form.expiryStatus}
+                onChange={(event) =>
+                  onFormChange({
+                    ...form,
+                    expiryStatus: event.target
+                      .value as KnowledgeBaseSource["expiryStatus"],
+                  })
+                }
+              >
+                <option value="active">有效</option>
+                <option value="expired">已过期</option>
+                <option value="replaced">已替代</option>
+              </select>
+            </label>
+            <label>
+              <span>复查时间</span>
+              <input
+                type="datetime-local"
+                value={form.reviewAt}
+                onChange={(event) =>
+                  onFormChange({ ...form, reviewAt: event.target.value })
+                }
+              />
+            </label>
+            <label>
+              <span>替代文档</span>
+              <select
+                value={form.replacementSourceId}
+                onChange={(event) =>
+                  onFormChange({
+                    ...form,
+                    replacementSourceId: event.target.value,
+                  })
+                }
+              >
+                <option value="">未指定</option>
+                {sources
+                  .filter((source) => source.id !== value.source.id)
+                  .map((source) => (
+                    <option key={source.id} value={source.id}>
+                      {source.displayName}
+                    </option>
+                  ))}
+              </select>
+            </label>
+            <button
+              className="button ghost"
+              disabled={busy}
+              type="button"
+              onClick={onSave}
+            >
+              保存维护设置
+            </button>
+            {value.source.sourceType === "web" && (
+              <button
+                className="button primary"
+                disabled={busy}
+                type="button"
+                onClick={onCheck}
+              >
+                <Icon name="refresh" size={15} />
+                检查网页更新
+              </button>
+            )}
+          </section>
+
+          {suggestion?.status === "pending_confirmation" && (
+            <section className="source-suggestion">
+              <strong>
+                待确认建议：{sourceSuggestionLabel(suggestion.suggestion)}
+              </strong>
+              <span>{suggestion.reason}</span>
+              <small>置信度 {Math.round(suggestion.confidence * 100)}%</small>
+              <div>
+                <button
+                  className="text-button"
+                  disabled={busy}
+                  type="button"
+                  onClick={() => onDecideSuggestion("dismiss")}
+                >
+                  忽略
+                </button>
+                <button
+                  className="button ghost"
+                  disabled={busy}
+                  type="button"
+                  onClick={() => onDecideSuggestion("accept")}
+                >
+                  确认建议
+                </button>
+              </div>
+            </section>
+          )}
+
+          {error && <div className="settings-error">{error}</div>}
+
+          <section className="source-version-section">
+            <div className="source-version-heading">
+              <strong>版本记录</strong>
+              <span>{value.versions.length} 个版本</span>
+            </div>
+            <div className="source-version-list">
+              {value.versions.map((version) => (
+                <article key={version.id}>
+                  <div>
+                    <strong>
+                      v{version.versionNumber} ·{" "}
+                      {sourceVersionReviewLabel(version.reviewStatus)}
+                    </strong>
+                    <small>
+                      {version.checkedAt
+                        ? `检查于 ${formatDateTime(version.checkedAt)}`
+                        : formatDateTime(version.createdAt)}
+                    </small>
+                    {version.etag && <small>ETag {version.etag}</small>}
+                    {version.changeSummary.afterBlockCount !== undefined && (
+                      <span>
+                        +{version.changeSummary.addedBlocks ?? 0} / -
+                        {version.changeSummary.removedBlocks ?? 0} / 未变{" "}
+                        {version.changeSummary.unchangedBlocks ?? 0}
+                      </span>
+                    )}
+                  </div>
+                  <div className="source-version-actions">
+                    {version.previousVersionId && (
+                      <button
+                        className="text-button"
+                        disabled={busy}
+                        type="button"
+                        onClick={() => onInspectDiff(version.id)}
+                      >
+                        查看差异
+                      </button>
+                    )}
+                    {version.reviewStatus === "pending_review" && (
+                      <>
+                        <button
+                          className="text-button danger-text"
+                          disabled={busy}
+                          type="button"
+                          onClick={() =>
+                            onDecideVersion(version.id, "reject", false)
+                          }
+                        >
+                          忽略
+                        </button>
+                        <button
+                          className="button ghost"
+                          disabled={busy}
+                          type="button"
+                          onClick={() =>
+                            onDecideVersion(version.id, "accept", false)
+                          }
+                        >
+                          采用
+                        </button>
+                        <button
+                          className="button primary"
+                          disabled={busy}
+                          type="button"
+                          onClick={() =>
+                            onDecideVersion(version.id, "accept", true)
+                          }
+                        >
+                          采用并重建索引
+                        </button>
+                      </>
+                    )}
+                  </div>
+                </article>
+              ))}
+            </div>
+          </section>
+
+          {diff && (
+            <section className="source-version-diff">
+              <div>
+                <strong>版本差异</strong>
+                <button
+                  aria-label="关闭版本差异"
+                  className="icon-button"
+                  type="button"
+                  onClick={onCloseDiff}
+                >
+                  <Icon name="close" size={15} />
+                </button>
+              </div>
+              <pre>
+                {diff.diff || "正文结构发生变化，但没有可展示的行级差异。"}
+              </pre>
+            </section>
+          )}
+        </div>
+      </section>
+    </div>
   );
 }
 
@@ -3765,7 +4304,60 @@ function sourceMeta(source: KnowledgeBaseSource): string {
     source.latestVersionStatus && source.latestVersionStatus !== source.status
       ? ` · ${sourceStatusLabel(source.latestVersionStatus)}`
       : "";
-  return `${sourceTypeLabel(source.sourceType)} · ${sourceStatusLabel(source.status)}${version}${chunks}`;
+  const pending =
+    source.pendingVersionCount > 0
+      ? ` · ${source.pendingVersionCount} 个更新`
+      : "";
+  const expiry =
+    source.expiryStatus !== "active"
+      ? ` · ${expiryStatusLabel(source.expiryStatus)}`
+      : "";
+  return `${sourceTypeLabel(source.sourceType)} · ${sourceStatusLabel(source.status)}${version}${pending}${expiry}${chunks}`;
+}
+
+function expiryStatusLabel(
+  status: KnowledgeBaseSource["expiryStatus"],
+): string {
+  return {
+    active: "有效",
+    expired: "已过期",
+    replaced: "已替代",
+  }[status];
+}
+
+function sourceSuggestionLabel(suggestion: "expired" | "conflict"): string {
+  return suggestion === "expired" ? "可能已过期" : "可能存在冲突";
+}
+
+function sourceVersionReviewLabel(status: string): string {
+  return (
+    {
+      current: "当前版本",
+      pending_review: "待确认",
+      superseded: "历史版本",
+      rejected: "已忽略",
+    }[status] ?? status
+  );
+}
+
+function toLocalDateTime(value: string | null): string {
+  if (!value) {
+    return "";
+  }
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return "";
+  }
+  const offset = date.getTimezoneOffset() * 60_000;
+  return new Date(date.getTime() - offset).toISOString().slice(0, 16);
+}
+
+function fromLocalDateTime(value: string): string | null {
+  if (!value) {
+    return null;
+  }
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date.toISOString();
 }
 
 function sourceTypeLabel(type: KnowledgeBaseSource["sourceType"]): string {
@@ -3811,6 +4403,18 @@ function parseStatusLabel(status: ParseCheckItem["status"]): string {
 
 function formatNumber(value: number): string {
   return new Intl.NumberFormat("zh-CN").format(value);
+}
+
+function formatDateTime(value: string): string {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime())
+    ? value
+    : new Intl.DateTimeFormat("zh-CN", {
+        month: "2-digit",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+      }).format(date);
 }
 
 function formatBytes(value: number): string {

@@ -7,6 +7,7 @@ from citemind_worker.storage.database import SqliteDatabase
 from citemind_worker.storage.full_text import FullTextIndex, tokenize_for_search
 from citemind_worker.storage.paths import AppDataPaths
 from citemind_worker.storage.runtime import StorageRuntime
+from citemind_worker.storage.schema_migrations import MigrationManager
 from citemind_worker.storage.vector_index import VectorIndex
 
 REQUIRED_TABLES = {
@@ -42,7 +43,7 @@ def test_sqlite_migration_creates_required_tables_and_accepts_null_page_number(
 ) -> None:
     database = SqliteDatabase(AppDataPaths(tmp_path))
 
-    assert database.initialize() == 2
+    assert database.initialize() == 3
     status = database.status()
     assert status["fts5Enabled"] is True
     assert set(status["tables"]) >= REQUIRED_TABLES
@@ -84,6 +85,66 @@ def test_migration_snapshots_existing_database_before_upgrade(tmp_path: Path) ->
     assert len(snapshots) == 1
     with sqlite3.connect(snapshots[0]) as snapshot:
         assert snapshot.execute("SELECT value FROM legacy_marker").fetchone() == ("keep-me",)
+
+
+def test_source_version_migration_marks_only_latest_existing_version_current(
+    tmp_path: Path,
+) -> None:
+    paths = AppDataPaths(tmp_path)
+    paths.ensure()
+    with sqlite3.connect(paths.database) as connection:
+        connection.execute(
+            """
+            CREATE TABLE schema_migrations (
+                version INTEGER PRIMARY KEY,
+                name TEXT NOT NULL,
+                applied_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+            )
+            """
+        )
+        for migration in MigrationManager._load_migrations()[:2]:
+            connection.executescript(migration.sql)
+            connection.execute(
+                "INSERT INTO schema_migrations(version, name) VALUES (?, ?)",
+                (migration.version, migration.name),
+            )
+        connection.execute("INSERT INTO knowledge_bases(id, name) VALUES ('kb-1', '测试知识库')")
+        connection.execute(
+            """
+            INSERT INTO sources(id, knowledge_base_id, source_type, display_name)
+            VALUES ('source-1', 'kb-1', 'web', 'https://example.com')
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO source_versions(id, source_id, version_number)
+            VALUES ('source-version-1', 'source-1', 1), ('source-version-2', 'source-1', 2)
+            """
+        )
+        connection.commit()
+
+    database = SqliteDatabase(paths)
+    assert database.initialize() == 3
+
+    with database.connect() as connection:
+        source = connection.execute(
+            "SELECT current_version_id FROM sources WHERE id = 'source-1'"
+        ).fetchone()
+        versions = connection.execute(
+            """
+            SELECT id, review_status
+            FROM source_versions
+            WHERE source_id = 'source-1'
+            ORDER BY version_number
+            """
+        ).fetchall()
+
+    assert source is not None
+    assert source["current_version_id"] == "source-version-2"
+    assert [(row["id"], row["review_status"]) for row in versions] == [
+        ("source-version-1", "superseded"),
+        ("source-version-2", "current"),
+    ]
 
 
 def test_chinese_fts_search_and_index_version_isolation(tmp_path: Path) -> None:
@@ -152,7 +213,7 @@ def test_storage_runtime_initializes_all_backends(tmp_path: Path) -> None:
     summary = storage.health_summary()
     assert summary == {
         "ready": True,
-        "schemaVersion": 2,
+        "schemaVersion": 3,
         "fts5Enabled": True,
         "vectorDimension": 3,
     }

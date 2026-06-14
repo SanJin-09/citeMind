@@ -12,6 +12,7 @@ import {
   type ConversationMessagesResponse,
   type CreateBackgroundJobRequest,
   type DeleteSourceResponse,
+  type DecideSourceVersionRequest,
   type HybridSearchRequest,
   type HybridSearchResponse,
   type IndexBuildEstimate,
@@ -33,9 +34,14 @@ import {
   SEED_DEFAULTS,
   type SeedCredentialStatus,
   type SeedModelDescriptor,
+  type SourceVersionDiffResponse,
+  type SourceVersionsResponse,
+  type UpdateSourceMaintenanceRequest,
   type UsageSummary,
   type UpdateSeedDefaultsRequest,
   type UpdateBackgroundJobRequest,
+  type WebUpdateCheckItem,
+  type WebUpdateCheckResponse,
 } from "../shared/contracts";
 import type { PythonWorkerManager } from "./python-worker-manager";
 import {
@@ -281,6 +287,74 @@ export function registerIpcHandlers(workerManager: PythonWorkerManager): void {
       "sources.resolve_duplicate",
       { sourceId: request.sourceId, action: request.action },
       60_000,
+    );
+  });
+  ipcMain.handle(IPC_CHANNELS.checkAllWebSources, (_event, payload) => {
+    if (!isRecord(payload)) {
+      throw new Error("网页更新检查参数无效");
+    }
+    return workerManager.call<WebUpdateCheckResponse>(
+      "sources.check_web_all",
+      {
+        knowledgeBaseId: normalizeKnowledgeBaseId(payload.knowledgeBaseId),
+        dueOnly: payload.dueOnly === true,
+      },
+      180_000,
+    );
+  });
+  ipcMain.handle(IPC_CHANNELS.checkWebSource, (_event, sourceId) =>
+    workerManager.call<WebUpdateCheckItem>(
+      "sources.check_web",
+      { sourceId: normalizeNonEmptyString(sourceId, "来源 ID") },
+      180_000,
+    ),
+  );
+  ipcMain.handle(IPC_CHANNELS.listSourceVersions, (_event, sourceId) =>
+    workerManager.call<SourceVersionsResponse>(
+      "sources.versions",
+      { sourceId: normalizeNonEmptyString(sourceId, "来源 ID") },
+      30_000,
+    ),
+  );
+  ipcMain.handle(IPC_CHANNELS.getSourceVersionDiff, (_event, payload) => {
+    const request = normalizeSourceVersionRequest(payload);
+    return workerManager.call<SourceVersionDiffResponse>(
+      "sources.version_diff",
+      request,
+      30_000,
+    );
+  });
+  ipcMain.handle(IPC_CHANNELS.decideSourceVersion, (_event, payload) => {
+    const request = normalizeDecideSourceVersionRequest(payload);
+    return workerManager.call<SourceVersionsResponse>(
+      "sources.decide_version",
+      { ...request },
+      30_000,
+    );
+  });
+  ipcMain.handle(IPC_CHANNELS.updateSourceMaintenance, (_event, payload) => {
+    const request = normalizeUpdateSourceMaintenanceRequest(payload);
+    return workerManager.call<SourceVersionsResponse>(
+      "sources.update_maintenance",
+      { ...request },
+      30_000,
+    );
+  });
+  ipcMain.handle(IPC_CHANNELS.decideSourceSuggestion, (_event, payload) => {
+    if (!isRecord(payload)) {
+      throw new Error("来源建议处理参数无效");
+    }
+    const decision = payload.decision;
+    if (decision !== "accept" && decision !== "dismiss") {
+      throw new Error("来源建议处理方式无效");
+    }
+    return workerManager.call<SourceVersionsResponse>(
+      "sources.decide_suggestion",
+      {
+        sourceId: normalizeNonEmptyString(payload.sourceId, "来源 ID"),
+        decision,
+      },
+      30_000,
     );
   });
   ipcMain.handle(IPC_CHANNELS.buildIndex, async (_event, knowledgeBaseId) => {
@@ -639,6 +713,71 @@ function normalizeResolveDuplicateRequest(
     throw new Error("重复来源处理方式无效");
   }
   return { sourceId, action };
+}
+
+function normalizeSourceVersionRequest(payload: unknown): {
+  sourceId: string;
+  versionId: string;
+} {
+  if (!isRecord(payload)) {
+    throw new Error("来源版本参数无效");
+  }
+  return {
+    sourceId: normalizeNonEmptyString(payload.sourceId, "来源 ID"),
+    versionId: normalizeNonEmptyString(payload.versionId, "来源版本 ID"),
+  };
+}
+
+function normalizeDecideSourceVersionRequest(
+  payload: unknown,
+): DecideSourceVersionRequest {
+  const request = normalizeSourceVersionRequest(payload);
+  if (!isRecord(payload)) {
+    throw new Error("来源版本参数无效");
+  }
+  const decision = payload.decision;
+  if (decision !== "accept" && decision !== "reject") {
+    throw new Error("来源版本处理方式无效");
+  }
+  return { ...request, decision };
+}
+
+function normalizeUpdateSourceMaintenanceRequest(
+  payload: unknown,
+): UpdateSourceMaintenanceRequest {
+  if (!isRecord(payload)) {
+    throw new Error("来源维护参数无效");
+  }
+  const expiryStatus = payload.expiryStatus;
+  if (
+    expiryStatus !== "active" &&
+    expiryStatus !== "expired" &&
+    expiryStatus !== "replaced"
+  ) {
+    throw new Error("来源时效状态无效");
+  }
+  const replacementSourceId = payload.replacementSourceId;
+  const reviewAt = payload.reviewAt;
+  if (
+    replacementSourceId !== undefined &&
+    replacementSourceId !== null &&
+    typeof replacementSourceId !== "string"
+  ) {
+    throw new Error("替代文档 ID 无效");
+  }
+  if (
+    reviewAt !== undefined &&
+    reviewAt !== null &&
+    typeof reviewAt !== "string"
+  ) {
+    throw new Error("复查时间无效");
+  }
+  return {
+    sourceId: normalizeNonEmptyString(payload.sourceId, "来源 ID"),
+    replacementSourceId,
+    reviewAt,
+    expiryStatus,
+  };
 }
 
 function normalizeHybridSearchRequest(payload: unknown): HybridSearchRequest {

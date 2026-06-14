@@ -4,15 +4,18 @@ import importlib
 import json
 import re
 import shutil
+import sqlite3
 import urllib.error
 import urllib.request
 import zipfile
 from collections.abc import Iterable
 from contextlib import suppress
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from difflib import SequenceMatcher, unified_diff
 from html.parser import HTMLParser
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 from uuid import uuid4
 
 from citemind_worker.background_job_service import BackgroundJobService
@@ -59,6 +62,9 @@ class ParsedDocument:
     needs_ocr: bool = False
     warnings: list[str] = field(default_factory=list)
     snapshot_text: str | None = None
+    etag: str | None = None
+    last_modified: str | None = None
+    not_modified: bool = False
 
 
 class ParseFailure(Exception):
@@ -191,6 +197,10 @@ class SourceImportService:
             snapshot_path=snapshot_path,
             parse_artifact_path=artifact_path,
             status="processing",
+            etag=None,
+            last_modified=None,
+            previous_version_id=None,
+            review_status="current",
         )
         job = self.jobs.create("source.import", source_id)
         self.jobs.update_progress(str(job["id"]), status="running", progress=0.1)
@@ -224,6 +234,394 @@ class SourceImportService:
                 source_type="web",
                 message=_public_error(error),
             )
+
+    def check_web_updates(
+        self,
+        knowledge_base_id: str,
+        *,
+        due_only: bool = False,
+    ) -> dict[str, object]:
+        with self.storage.database.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT id
+                FROM sources
+                WHERE knowledge_base_id = ?
+                  AND source_type = 'web'
+                  AND (
+                      ? = 0
+                      OR review_at IS NULL
+                      OR review_at <= strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                  )
+                ORDER BY updated_at DESC
+                """,
+                (knowledge_base_id, int(due_only)),
+            ).fetchall()
+        results = [self.check_web_update(str(row["id"])) for row in rows]
+        return {
+            "knowledgeBaseId": knowledge_base_id,
+            "checked": len(results),
+            "changed": sum(1 for item in results if item["status"] == "changed"),
+            "items": results,
+        }
+
+    def check_web_update(self, source_id: str) -> dict[str, object]:
+        source = self._source_with_current_version(source_id)
+        if str(source["source_type"]) != "web":
+            raise ValueError("只有网页来源支持在线更新检查")
+        url = str(source["uri"] or "")
+        if not url:
+            raise ValueError("网页来源缺少 URL")
+        current_version_id = str(source["source_version_id"])
+        snapshot_path = self.storage.paths.web_snapshots / f"{source_id}-{uuid4().hex}.html"
+        artifact_path = _artifact_path(self.storage, f"source-version-{uuid4().hex}")
+        artifact_path.parent.mkdir(parents=True, exist_ok=True)
+        job = self.jobs.create("web.refresh", source_id)
+        self.jobs.update_progress(str(job["id"]), status="running", progress=0.15)
+        try:
+            checker = getattr(self.parser, "check_web", None)
+            parsed = (
+                checker(
+                    url,
+                    snapshot_path,
+                    etag=_optional_string(source["etag"]),
+                    last_modified=_optional_string(source["last_modified"]),
+                )
+                if callable(checker)
+                else self.parser.parse_web(url, snapshot_path)
+            )
+            checked_at = _now()
+            if parsed.not_modified:
+                self._mark_web_checked(
+                    source_id,
+                    current_version_id,
+                    checked_at=checked_at,
+                    etag=parsed.etag,
+                    last_modified=parsed.last_modified,
+                )
+                self.jobs.update_progress(str(job["id"]), status="completed", progress=1)
+                return {"sourceId": source_id, "status": "unchanged", "checkedAt": checked_at}
+
+            content_hash = _text_hash(parsed.normalized_text)
+            if content_hash == source["content_hash"]:
+                with suppress(OSError):
+                    snapshot_path.unlink()
+                self._mark_web_checked(
+                    source_id,
+                    current_version_id,
+                    checked_at=checked_at,
+                    etag=parsed.etag,
+                    last_modified=parsed.last_modified,
+                )
+                self.jobs.update_progress(str(job["id"]), status="completed", progress=1)
+                return {"sourceId": source_id, "status": "unchanged", "checkedAt": checked_at}
+
+            with self.storage.database.connect() as connection:
+                pending = connection.execute(
+                    """
+                    SELECT id, change_summary_json
+                    FROM source_versions
+                    WHERE source_id = ?
+                      AND review_status = 'pending_review'
+                      AND content_hash = ?
+                    ORDER BY version_number DESC
+                    LIMIT 1
+                    """,
+                    (source_id, content_hash),
+                ).fetchone()
+            if pending is not None:
+                with suppress(OSError):
+                    snapshot_path.unlink()
+                self._mark_web_checked(
+                    source_id,
+                    str(pending["id"]),
+                    checked_at=checked_at,
+                    etag=parsed.etag,
+                    last_modified=parsed.last_modified,
+                )
+                self.jobs.update_progress(str(job["id"]), status="completed", progress=1)
+                return {
+                    "sourceId": source_id,
+                    "status": "changed",
+                    "checkedAt": checked_at,
+                    "pendingVersionId": str(pending["id"]),
+                    "changeSummary": _json_object(pending["change_summary_json"]),
+                }
+
+            source_version_id = artifact_path.stem
+            self._insert_source_version(
+                source_version_id=source_version_id,
+                source_id=source_id,
+                original_path=None,
+                snapshot_path=snapshot_path,
+                parse_artifact_path=artifact_path,
+                status="parsed",
+                etag=parsed.etag,
+                last_modified=parsed.last_modified,
+                previous_version_id=current_version_id,
+                review_status="pending_review",
+            )
+            artifact = _artifact_from_parsed(
+                source_id=source_id,
+                source_version_id=source_version_id,
+                parsed=parsed,
+                original_hash=_text_hash(parsed.snapshot_text or url),
+                content_hash=content_hash,
+                snapshot_path=snapshot_path,
+            )
+            _write_json(artifact_path, artifact)
+            summary = _version_change_summary(
+                _read_artifact(source["parse_artifact_path"]),
+                artifact,
+            )
+            with self.storage.database.connect() as connection:
+                connection.execute(
+                    """
+                    UPDATE source_versions
+                    SET content_hash = ?,
+                        change_summary_json = ?
+                    WHERE id = ?
+                    """,
+                    (content_hash, json.dumps(summary, ensure_ascii=False), source_version_id),
+                )
+                connection.execute(
+                    """
+                    UPDATE sources
+                    SET last_checked_at = ?,
+                        updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                    WHERE id = ?
+                    """,
+                    (checked_at, source_id),
+                )
+                connection.commit()
+            self.jobs.update_progress(str(job["id"]), status="completed", progress=1)
+            return {
+                "sourceId": source_id,
+                "status": "changed",
+                "checkedAt": checked_at,
+                "pendingVersionId": source_version_id,
+                "changeSummary": summary,
+            }
+        except Exception as error:
+            self.jobs.update_progress(
+                str(job["id"]),
+                status="failed",
+                error_message=_public_error(error),
+            )
+            with suppress(OSError):
+                snapshot_path.unlink()
+            raise ValueError(_public_error(error)) from error
+
+    def source_versions(self, source_id: str) -> dict[str, object]:
+        source = self._source_with_current_version(source_id)
+        with self.storage.database.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT id, version_number, content_hash, original_path, snapshot_path,
+                       parse_artifact_path, status, etag, last_modified, checked_at,
+                       previous_version_id, review_status, change_summary_json, created_at
+                FROM source_versions
+                WHERE source_id = ?
+                ORDER BY version_number DESC
+                """,
+                (source_id,),
+            ).fetchall()
+        return {
+            "source": _source_maintenance_record(source),
+            "versions": [_source_version_record(row) for row in rows],
+        }
+
+    def source_version_diff(self, source_id: str, version_id: str) -> dict[str, object]:
+        with self.storage.database.connect() as connection:
+            version = connection.execute(
+                """
+                SELECT id, previous_version_id, parse_artifact_path, change_summary_json
+                FROM source_versions
+                WHERE id = ? AND source_id = ?
+                """,
+                (version_id, source_id),
+            ).fetchone()
+            if version is None:
+                raise ValueError("来源版本不存在")
+            previous = connection.execute(
+                """
+                SELECT parse_artifact_path
+                FROM source_versions
+                WHERE id = ?
+                """,
+                (version["previous_version_id"],),
+            ).fetchone()
+        if previous is None:
+            raise ValueError("来源版本没有可比较的上一版本")
+        before = _artifact_text(_read_artifact(previous["parse_artifact_path"]))
+        after = _artifact_text(_read_artifact(version["parse_artifact_path"]))
+        lines = list(
+            unified_diff(
+                before.splitlines(),
+                after.splitlines(),
+                fromfile="上一版本",
+                tofile="待确认版本",
+                lineterm="",
+            )
+        )
+        return {
+            "sourceId": source_id,
+            "versionId": version_id,
+            "summary": _json_object(version["change_summary_json"]),
+            "diff": "\n".join(lines[:240]),
+            "truncated": len(lines) > 240,
+        }
+
+    def decide_source_version(
+        self,
+        source_id: str,
+        version_id: str,
+        decision: str,
+    ) -> dict[str, object]:
+        if decision not in {"accept", "reject"}:
+            raise ValueError("版本处理方式无效")
+        with self.storage.database.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT status, review_status
+                FROM source_versions
+                WHERE id = ? AND source_id = ?
+                """,
+                (version_id, source_id),
+            ).fetchone()
+            if row is None or str(row["review_status"]) != "pending_review":
+                raise ValueError("来源版本不处于待确认状态")
+            if decision == "accept":
+                connection.execute(
+                    """
+                    UPDATE source_versions
+                    SET review_status = CASE WHEN id = ? THEN 'current' ELSE review_status END
+                    WHERE source_id = ?
+                    """,
+                    (version_id, source_id),
+                )
+                connection.execute(
+                    """
+                    UPDATE source_versions
+                    SET review_status = 'superseded'
+                    WHERE source_id = ? AND id != ? AND review_status = 'current'
+                    """,
+                    (source_id, version_id),
+                )
+                connection.execute(
+                    """
+                    UPDATE sources
+                    SET current_version_id = ?,
+                        status = 'processing',
+                        updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                    WHERE id = ?
+                    """,
+                    (version_id, source_id),
+                )
+            else:
+                connection.execute(
+                    "UPDATE source_versions SET review_status = 'rejected' WHERE id = ?",
+                    (version_id,),
+                )
+            connection.commit()
+        return self.source_versions(source_id)
+
+    def update_source_maintenance(
+        self,
+        source_id: str,
+        *,
+        replacement_source_id: str | None,
+        review_at: str | None,
+        expiry_status: str,
+    ) -> dict[str, object]:
+        if expiry_status not in {"active", "expired", "replaced"}:
+            raise ValueError("来源时效状态无效")
+        if replacement_source_id == source_id:
+            raise ValueError("替代文档不能指向自身")
+        with self.storage.database.connect() as connection:
+            if replacement_source_id is not None:
+                replacement = connection.execute(
+                    "SELECT 1 FROM sources WHERE id = ?",
+                    (replacement_source_id,),
+                ).fetchone()
+                if replacement is None:
+                    raise ValueError("替代文档不存在")
+            cursor = connection.execute(
+                """
+                UPDATE sources
+                SET replacement_source_id = ?,
+                    review_at = ?,
+                    expiry_status = ?,
+                    updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                WHERE id = ?
+                """,
+                (replacement_source_id, review_at, expiry_status, source_id),
+            )
+            connection.commit()
+        if cursor.rowcount == 0:
+            raise ValueError("Source not found")
+        return self.source_versions(source_id)
+
+    def suggest_source_status(
+        self,
+        source_id: str,
+        *,
+        suggestion: str,
+        reason: str,
+        confidence: float,
+    ) -> dict[str, object]:
+        if suggestion not in {"expired", "conflict"}:
+            raise ValueError("模型建议类型无效")
+        if confidence < 0 or confidence > 1:
+            raise ValueError("模型建议置信度无效")
+        payload = {
+            "status": "pending_confirmation",
+            "suggestion": suggestion,
+            "reason": reason,
+            "confidence": confidence,
+            "createdAt": _now(),
+        }
+        with self.storage.database.connect() as connection:
+            cursor = connection.execute(
+                "UPDATE sources SET model_suggestion_json = ? WHERE id = ?",
+                (json.dumps(payload, ensure_ascii=False), source_id),
+            )
+            connection.commit()
+        if cursor.rowcount == 0:
+            raise ValueError("Source not found")
+        return self.source_versions(source_id)
+
+    def decide_source_suggestion(self, source_id: str, decision: str) -> dict[str, object]:
+        if decision not in {"accept", "dismiss"}:
+            raise ValueError("模型建议处理方式无效")
+        with self.storage.database.connect() as connection:
+            row = connection.execute(
+                "SELECT model_suggestion_json FROM sources WHERE id = ?",
+                (source_id,),
+            ).fetchone()
+            if row is None:
+                raise ValueError("Source not found")
+            suggestion = _json_object(row["model_suggestion_json"])
+            if suggestion.get("status") != "pending_confirmation":
+                raise ValueError("来源没有待确认的模型建议")
+            expiry_status = (
+                "expired"
+                if decision == "accept" and suggestion.get("suggestion") == "expired"
+                else None
+            )
+            suggestion["status"] = "accepted" if decision == "accept" else "dismissed"
+            suggestion["decidedAt"] = _now()
+            connection.execute(
+                """
+                UPDATE sources
+                SET expiry_status = COALESCE(?, expiry_status),
+                    model_suggestion_json = ?
+                WHERE id = ?
+                """,
+                (expiry_status, json.dumps(suggestion, ensure_ascii=False), source_id),
+            )
+            connection.commit()
+        return self.source_versions(source_id)
 
     def parse_checks(self, knowledge_base_id: str) -> dict[str, object]:
         with self.storage.database.connect() as connection:
@@ -259,12 +657,15 @@ class SourceImportService:
                         LIMIT 1
                     ) AS job_error
                 FROM sources s
-                LEFT JOIN source_versions sv ON sv.id = (
-                    SELECT latest.id
-                    FROM source_versions latest
-                    WHERE latest.source_id = s.id
-                    ORDER BY latest.version_number DESC
-                    LIMIT 1
+                LEFT JOIN source_versions sv ON sv.id = COALESCE(
+                    s.current_version_id,
+                    (
+                        SELECT latest.id
+                        FROM source_versions latest
+                        WHERE latest.source_id = s.id
+                        ORDER BY latest.version_number DESC
+                        LIMIT 1
+                    )
                 )
                 WHERE s.knowledge_base_id = ?
                 ORDER BY s.updated_at DESC, s.created_at DESC
@@ -469,19 +870,38 @@ class SourceImportService:
             connection.execute(
                 """
                 UPDATE source_versions
-                SET content_hash = ?, status = ?
+                SET content_hash = ?,
+                    status = ?,
+                    etag = COALESCE(?, etag),
+                    last_modified = COALESCE(?, last_modified),
+                    checked_at = CASE
+                        WHEN ? = 'web' THEN strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                        ELSE checked_at
+                    END
                 WHERE id = ?
                 """,
-                (content_hash, version_status, source_version_id),
+                (
+                    content_hash,
+                    version_status,
+                    parsed.etag,
+                    parsed.last_modified,
+                    parsed.source_type,
+                    source_version_id,
+                ),
             )
             connection.execute(
                 """
                 UPDATE sources
                 SET status = 'processing',
+                    current_version_id = COALESCE(current_version_id, ?),
+                    last_checked_at = CASE
+                        WHEN ? = 'web' THEN strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                        ELSE last_checked_at
+                    END,
                     updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
                 WHERE id = ?
                 """,
-                (source_id,),
+                (source_version_id, parsed.source_type, source_id),
             )
             connection.commit()
 
@@ -562,6 +982,62 @@ class SourceImportService:
                     return item
         raise ValueError("Source not found")
 
+    def _source_with_current_version(self, source_id: str) -> sqlite3.Row:
+        with self.storage.database.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT
+                    s.id, s.knowledge_base_id, s.source_type, s.display_name, s.uri,
+                    s.status, s.current_version_id, s.replacement_source_id,
+                    s.review_at, s.expiry_status, s.model_suggestion_json,
+                    s.last_checked_at, s.created_at, s.updated_at,
+                    sv.id AS source_version_id, sv.version_number, sv.content_hash,
+                    sv.parse_artifact_path, sv.etag, sv.last_modified, sv.checked_at
+                FROM sources s
+                JOIN source_versions sv ON sv.id = COALESCE(
+                    s.current_version_id,
+                    (
+                        SELECT latest.id
+                        FROM source_versions latest
+                        WHERE latest.source_id = s.id
+                        ORDER BY latest.version_number DESC
+                        LIMIT 1
+                    )
+                )
+                WHERE s.id = ?
+                """,
+                (source_id,),
+            ).fetchone()
+        if row is None:
+            raise ValueError("Source not found")
+        return cast(sqlite3.Row, row)
+
+    def _mark_web_checked(
+        self,
+        source_id: str,
+        source_version_id: str,
+        *,
+        checked_at: str,
+        etag: str | None,
+        last_modified: str | None,
+    ) -> None:
+        with self.storage.database.connect() as connection:
+            connection.execute(
+                """
+                UPDATE source_versions
+                SET checked_at = ?,
+                    etag = COALESCE(?, etag),
+                    last_modified = COALESCE(?, last_modified)
+                WHERE id = ?
+                """,
+                (checked_at, etag, last_modified, source_version_id),
+            )
+            connection.execute(
+                "UPDATE sources SET last_checked_at = ? WHERE id = ?",
+                (checked_at, source_id),
+            )
+            connection.commit()
+
     def _insert_source(
         self,
         *,
@@ -608,6 +1084,10 @@ class SourceImportService:
         snapshot_path: Path | None,
         parse_artifact_path: Path,
         status: str,
+        etag: str | None = None,
+        last_modified: str | None = None,
+        previous_version_id: str | None = None,
+        review_status: str = "current",
     ) -> None:
         with self.storage.database.connect() as connection:
             version = int(
@@ -624,9 +1104,11 @@ class SourceImportService:
                 """
                 INSERT INTO source_versions(
                     id, source_id, version_number, original_path, snapshot_path,
-                    parse_artifact_path, status
+                    parse_artifact_path, status, etag, last_modified, checked_at,
+                    previous_version_id, review_status
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?,
+                        strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), ?, ?)
                 """,
                 (
                     source_version_id,
@@ -636,6 +1118,10 @@ class SourceImportService:
                     str(snapshot_path) if snapshot_path else None,
                     str(parse_artifact_path),
                     status,
+                    etag,
+                    last_modified,
+                    previous_version_id,
+                    review_status,
                 ),
             )
             connection.commit()
@@ -821,6 +1307,26 @@ class DoclingFirstParser:
         except Exception as error:
             raise ParseFailure(_public_error(error)) from error
 
+    def check_web(
+        self,
+        url: str,
+        snapshot_path: Path,
+        *,
+        etag: str | None,
+        last_modified: str | None,
+    ) -> ParsedDocument:
+        try:
+            return WebTextExtractor().check(
+                url,
+                snapshot_path,
+                etag=etag,
+                last_modified=last_modified,
+            )
+        except ParseFailure:
+            raise
+        except Exception as error:
+            raise ParseFailure(_public_error(error)) from error
+
     def _parse_with_docling(self, path: Path, source_type: str) -> ParsedDocument:
         try:
             module = importlib.import_module("docling.document_converter")
@@ -911,9 +1417,40 @@ class DoclingFirstParser:
         return None
 
 
+@dataclass(frozen=True, slots=True)
+class WebFetch:
+    html_text: str | None
+    etag: str | None
+    last_modified: str | None
+    not_modified: bool = False
+
+
 class WebTextExtractor:
     def parse(self, url: str, snapshot_path: Path) -> ParsedDocument:
-        html_text = self._fetch_static(url)
+        return self.check(url, snapshot_path, etag=None, last_modified=None)
+
+    def check(
+        self,
+        url: str,
+        snapshot_path: Path,
+        *,
+        etag: str | None,
+        last_modified: str | None,
+    ) -> ParsedDocument:
+        fetched = self._fetch_static(url, etag=etag, last_modified=last_modified)
+        if fetched.not_modified:
+            return ParsedDocument(
+                parser="conditional-http",
+                parser_version=PARSER_VERSION,
+                source_type="web",
+                original_text="",
+                normalized_text="",
+                blocks=[],
+                etag=fetched.etag or etag,
+                last_modified=fetched.last_modified or last_modified,
+                not_modified=True,
+            )
+        html_text = fetched.html_text or ""
         snapshot_path.write_text(html_text, encoding="utf-8")
         extracted = _extract_html_text(html_text)
         if len(extracted.normalized_text) < 120 and _looks_dynamic(html_text):
@@ -930,15 +1467,28 @@ class WebTextExtractor:
             normalized_text=extracted.normalized_text,
             blocks=extracted.blocks,
             snapshot_text=html_text,
+            etag=fetched.etag,
+            last_modified=fetched.last_modified,
         )
 
-    def _fetch_static(self, url: str) -> str:
+    def _fetch_static(
+        self,
+        url: str,
+        *,
+        etag: str | None,
+        last_modified: str | None,
+    ) -> WebFetch:
+        headers = {
+            "User-Agent": "citeMind/0.1 document extractor",
+            "Accept": "text/html,application/xhtml+xml",
+        }
+        if etag:
+            headers["If-None-Match"] = etag
+        if last_modified:
+            headers["If-Modified-Since"] = last_modified
         request = urllib.request.Request(
             url,
-            headers={
-                "User-Agent": "citeMind/0.1 document extractor",
-                "Accept": "text/html,application/xhtml+xml",
-            },
+            headers=headers,
         )
         try:
             with urllib.request.urlopen(request, timeout=15) as response:
@@ -946,9 +1496,22 @@ class WebTextExtractor:
                 if "html" not in content_type and "text" not in content_type:
                     raise ParseFailure(f"网页返回非文本内容：{content_type}")
                 body = response.read(5_000_000)
+                return WebFetch(
+                    html_text=bytes(body).decode("utf-8", errors="replace"),
+                    etag=response.headers.get("etag"),
+                    last_modified=response.headers.get("last-modified"),
+                )
+        except urllib.error.HTTPError as error:
+            if error.code == 304:
+                return WebFetch(
+                    html_text=None,
+                    etag=error.headers.get("etag"),
+                    last_modified=error.headers.get("last-modified"),
+                    not_modified=True,
+                )
+            raise ParseFailure(f"网页抓取失败：HTTP {error.code}") from error
         except urllib.error.URLError as error:
             raise ParseFailure(f"网页抓取失败：{error.reason}") from error
-        return bytes(body).decode("utf-8", errors="replace")
 
     def _fetch_with_playwright(self, url: str) -> str:
         try:
@@ -1220,6 +1783,107 @@ def _sha256(path: Path) -> str:
 
 def _text_hash(text: str) -> str:
     return hashlib.sha256(_normalize_text(text).encode("utf-8")).hexdigest()
+
+
+def _version_change_summary(
+    before: dict[str, object],
+    after: dict[str, object],
+) -> dict[str, object]:
+    before_blocks = _artifact_blocks(before)
+    after_blocks = _artifact_blocks(after)
+    matcher = SequenceMatcher(a=before_blocks, b=after_blocks, autojunk=False)
+    added = removed = unchanged = changed = 0
+    for tag, before_start, before_end, after_start, after_end in matcher.get_opcodes():
+        if tag == "equal":
+            unchanged += before_end - before_start
+        elif tag == "insert":
+            added += after_end - after_start
+        elif tag == "delete":
+            removed += before_end - before_start
+        else:
+            changed += max(before_end - before_start, after_end - after_start)
+            removed += before_end - before_start
+            added += after_end - after_start
+    return {
+        "addedBlocks": added,
+        "removedBlocks": removed,
+        "changedBlocks": changed,
+        "unchangedBlocks": unchanged,
+        "beforeBlockCount": len(before_blocks),
+        "afterBlockCount": len(after_blocks),
+    }
+
+
+def _artifact_blocks(artifact: dict[str, object]) -> list[str]:
+    raw_blocks = artifact.get("chunks")
+    if not isinstance(raw_blocks, list):
+        return []
+    return [
+        _normalize_text(str(block.get("normalizedText", "")))
+        for block in raw_blocks
+        if isinstance(block, dict) and block.get("normalizedText")
+    ]
+
+
+def _artifact_text(artifact: dict[str, object]) -> str:
+    return "\n\n".join(_artifact_blocks(artifact))
+
+
+def _source_maintenance_record(row: object) -> dict[str, object]:
+    return {
+        "id": str(row["id"]),  # type: ignore[index]
+        "knowledgeBaseId": str(row["knowledge_base_id"]),  # type: ignore[index]
+        "sourceType": str(row["source_type"]),  # type: ignore[index]
+        "displayName": str(row["display_name"]),  # type: ignore[index]
+        "uri": row["uri"],  # type: ignore[index]
+        "status": str(row["status"]),  # type: ignore[index]
+        "currentVersionId": row["current_version_id"],  # type: ignore[index]
+        "currentVersionNumber": int(row["version_number"]),  # type: ignore[index]
+        "replacementSourceId": row["replacement_source_id"],  # type: ignore[index]
+        "reviewAt": row["review_at"],  # type: ignore[index]
+        "expiryStatus": str(row["expiry_status"]),  # type: ignore[index]
+        "modelSuggestion": _json_object(row["model_suggestion_json"]) or None,  # type: ignore[index]
+        "lastCheckedAt": row["last_checked_at"],  # type: ignore[index]
+        "createdAt": str(row["created_at"]),  # type: ignore[index]
+        "updatedAt": str(row["updated_at"]),  # type: ignore[index]
+    }
+
+
+def _source_version_record(row: object) -> dict[str, object]:
+    return {
+        "id": str(row["id"]),  # type: ignore[index]
+        "versionNumber": int(row["version_number"]),  # type: ignore[index]
+        "contentHash": row["content_hash"],  # type: ignore[index]
+        "originalPath": row["original_path"],  # type: ignore[index]
+        "snapshotPath": row["snapshot_path"],  # type: ignore[index]
+        "parseArtifactPath": row["parse_artifact_path"],  # type: ignore[index]
+        "status": str(row["status"]),  # type: ignore[index]
+        "etag": row["etag"],  # type: ignore[index]
+        "lastModified": row["last_modified"],  # type: ignore[index]
+        "checkedAt": row["checked_at"],  # type: ignore[index]
+        "previousVersionId": row["previous_version_id"],  # type: ignore[index]
+        "reviewStatus": str(row["review_status"]),  # type: ignore[index]
+        "changeSummary": _json_object(row["change_summary_json"]),  # type: ignore[index]
+        "createdAt": str(row["created_at"]),  # type: ignore[index]
+    }
+
+
+def _json_object(value: object) -> dict[str, object]:
+    if not isinstance(value, str) or not value:
+        return {}
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _optional_string(value: object) -> str | None:
+    return value if isinstance(value, str) and value else None
+
+
+def _now() -> str:
+    return datetime.now(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
 def _source_type_for_path(path: Path) -> str:

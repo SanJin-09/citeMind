@@ -131,7 +131,7 @@ def test_health_reports_initialized_storage(tmp_path: Path) -> None:
 
     assert response["result"]["storage"] == {
         "ready": True,
-        "schemaVersion": 2,
+        "schemaVersion": 3,
         "fts5Enabled": True,
         "vectorDimension": 3,
     }
@@ -259,6 +259,36 @@ def test_source_import_rpc_imports_file_and_lists_parse_checks(tmp_path: Path) -
     assert imported["parseCheck"]["status"] == "success"
     assert checks["summary"]["success"] == 1
     assert checks["items"][0]["preview"].startswith("PDF fallback text")
+
+    source_id = imported["source"]["sourceId"]
+    output = StringIO()
+    asyncio.run(
+        server.serve(
+            StringIO(
+                '{"jsonrpc":"2.0","id":"4","method":"sources.update_maintenance",'
+                f'"params":{{"sourceId":"{source_id}","expiryStatus":"expired",'
+                '"reviewAt":"2030-01-01T00:00:00.000Z"}}\n'
+            ),
+            output,
+        )
+    )
+    maintained = json.loads(output.getvalue())["result"]
+
+    output = StringIO()
+    asyncio.run(
+        server.serve(
+            StringIO(
+                '{"jsonrpc":"2.0","id":"5","method":"sources.versions",'
+                f'"params":{{"sourceId":"{source_id}"}}}}\n'
+            ),
+            output,
+        )
+    )
+    versions = json.loads(output.getvalue())["result"]
+
+    assert maintained["source"]["expiryStatus"] == "expired"
+    assert versions["source"]["currentVersionNumber"] == 1
+    assert versions["versions"][0]["reviewStatus"] == "current"
 
 
 def test_index_build_rpc_marks_chunks_ready(tmp_path: Path) -> None:
