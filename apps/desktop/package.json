@@ -40,6 +40,12 @@
   "build": {
     "appId": "com.citemind.desktop",
     "productName": "citeMind",
+    "electronLanguages": [
+      "en",
+      "en_GB",
+      "zh_CN",
+      "zh_TW"
+    ],
     "directories": {
       "output": "release"
     },
