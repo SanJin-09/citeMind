@@ -45,6 +45,9 @@ import {
   type UpdateBackgroundJobRequest,
   type WebUpdateCheckItem,
   type WebUpdateCheckResponse,
+  type WritingExportResult,
+  type WritingProjectListResponse,
+  type WritingProjectResponse,
 } from "../shared/contracts";
 import type { PythonWorkerManager } from "./python-worker-manager";
 import {
@@ -62,6 +65,12 @@ interface WorkerMarkdownExport {
   messageId: string | null;
   fileName: string;
   markdown: string;
+}
+
+interface WorkerWordExport {
+  projectId: string;
+  fileName: string;
+  base64: string;
 }
 
 export function registerIpcHandlers(workerManager: PythonWorkerManager): void {
@@ -591,6 +600,108 @@ export function registerIpcHandlers(workerManager: PythonWorkerManager): void {
       },
       180_000,
     );
+  });
+  ipcMain.handle(IPC_CHANNELS.listWritingProjects, (_event, knowledgeBaseId) =>
+    workerManager.call<WritingProjectListResponse>(
+      "writing.list",
+      { knowledgeBaseId: normalizeKnowledgeBaseId(knowledgeBaseId) },
+      30_000,
+    ),
+  );
+  ipcMain.handle(IPC_CHANNELS.getWritingProject, (_event, projectId) =>
+    workerManager.call<WritingProjectResponse>(
+      "writing.project",
+      { projectId: normalizeNonEmptyString(projectId, "写作项目 ID") },
+      30_000,
+    ),
+  );
+  ipcMain.handle(IPC_CHANNELS.createWritingProject, async (_event, payload) => {
+    if (!isRecord(payload)) {
+      throw new Error("写作项目参数无效");
+    }
+    const workflowType = payload.workflowType;
+    if (workflowType !== "review" && workflowType !== "article") {
+      throw new Error("写作工作流类型无效");
+    }
+    const summary = await seedStore.summary();
+    const apiKey = await seedStore.readApiKey();
+    return workerManager.call<WritingProjectResponse>(
+      "writing.create",
+      {
+        knowledgeBaseId: normalizeKnowledgeBaseId(payload.knowledgeBaseId),
+        goal: normalizeNonEmptyString(payload.goal, "写作目标"),
+        workflowType,
+        apiKey,
+        baseUrl: summary.baseUrl,
+        chatModel: summary.defaultChatModel,
+        embeddingModel: summary.defaultEmbeddingModel,
+      },
+      300_000,
+    );
+  });
+  ipcMain.handle(IPC_CHANNELS.runWritingSection, async (_event, payload) => {
+    if (!isRecord(payload)) {
+      throw new Error("写作分节参数无效");
+    }
+    const sectionId =
+      payload.sectionId === undefined || payload.sectionId === null
+        ? null
+        : normalizeNonEmptyString(payload.sectionId, "写作分节 ID");
+    const summary = await seedStore.summary();
+    const apiKey = await seedStore.readApiKey();
+    return workerManager.call<WritingProjectResponse>(
+      "writing.run_section",
+      {
+        projectId: normalizeNonEmptyString(payload.projectId, "写作项目 ID"),
+        sectionId,
+        revise: payload.revise === true,
+        apiKey,
+        baseUrl: summary.baseUrl,
+        chatModel: summary.defaultChatModel,
+        embeddingModel: summary.defaultEmbeddingModel,
+      },
+      300_000,
+    );
+  });
+  ipcMain.handle(IPC_CHANNELS.updateWritingSection, (_event, payload) => {
+    if (!isRecord(payload)) {
+      throw new Error("写作分节参数无效");
+    }
+    return workerManager.call<WritingProjectResponse>(
+      "writing.update_section",
+      {
+        sectionId: normalizeNonEmptyString(payload.sectionId, "写作分节 ID"),
+        content: normalizeNonEmptyString(payload.content, "写作内容"),
+      },
+      30_000,
+    );
+  });
+  ipcMain.handle(IPC_CHANNELS.auditWritingSection, (_event, sectionId) =>
+    workerManager.call<WritingProjectResponse>(
+      "writing.audit_section",
+      { sectionId: normalizeNonEmptyString(sectionId, "写作分节 ID") },
+      30_000,
+    ),
+  );
+  ipcMain.handle(IPC_CHANNELS.exportWritingWord, async (_event, projectId) => {
+    const exported = await workerManager.call<WorkerWordExport>(
+      "writing.export_word",
+      { projectId: normalizeNonEmptyString(projectId, "写作项目 ID") },
+      30_000,
+    );
+    const selection = await dialog.showSaveDialog({
+      title: "导出写作项目",
+      defaultPath: exported.fileName,
+      filters: [{ name: "Word 文档", extensions: ["docx"] }],
+    });
+    if (selection.canceled || !selection.filePath) {
+      return { cancelled: true } satisfies WritingExportResult;
+    }
+    await writeFile(selection.filePath, Buffer.from(exported.base64, "base64"));
+    return {
+      cancelled: false,
+      filePath: selection.filePath,
+    } satisfies WritingExportResult;
   });
 }
 

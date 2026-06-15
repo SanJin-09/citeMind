@@ -25,6 +25,10 @@ import type {
   SourceVersionsResponse,
   UsageSummary,
   WorkerHealth,
+  WritingProjectRecord,
+  WritingProjectResponse,
+  WritingSectionRecord,
+  WritingWorkflowType,
 } from "../../shared/contracts";
 import { SEED_DEFAULTS } from "../../shared/contracts";
 
@@ -473,6 +477,22 @@ function App(): React.JSX.Element {
     useState<MaintenanceStatus | null>(null);
   const [maintenanceBusy, setMaintenanceBusy] = useState(false);
   const [maintenanceNotice, setMaintenanceNotice] = useState("");
+  const [writingOpen, setWritingOpen] = useState(false);
+  const [writingProjects, setWritingProjects] = useState<
+    WritingProjectRecord[]
+  >([]);
+  const [writingProject, setWritingProject] =
+    useState<WritingProjectResponse | null>(null);
+  const [writingSelectedSectionId, setWritingSelectedSectionId] = useState("");
+  const [writingDrafts, setWritingDrafts] = useState<Record<string, string>>(
+    {},
+  );
+  const [writingGoal, setWritingGoal] = useState("");
+  const [writingWorkflowType, setWritingWorkflowType] =
+    useState<WritingWorkflowType>("review");
+  const [writingBusy, setWritingBusy] = useState(false);
+  const [writingError, setWritingError] = useState("");
+  const [writingNotice, setWritingNotice] = useState("");
 
   const checkHealth = useCallback(async () => {
     setWorker({ kind: "checking" });
@@ -703,6 +723,16 @@ function App(): React.JSX.Element {
     loadIndexLifecycle,
     loadParseChecks,
   ]);
+
+  useEffect(() => {
+    setWritingOpen(false);
+    setWritingProjects([]);
+    setWritingProject(null);
+    setWritingSelectedSectionId("");
+    setWritingDrafts({});
+    setWritingError("");
+    setWritingNotice("");
+  }, [activeKnowledgeBaseId]);
 
   useEffect(() => {
     if (settingsOpen) {
@@ -1762,6 +1792,179 @@ function App(): React.JSX.Element {
     }
   };
 
+  const syncWritingProject = (value: WritingProjectResponse): void => {
+    setWritingProject(value);
+    setWritingProjects((items) => upsertWritingProject(items, value.project));
+    setWritingSelectedSectionId((current) =>
+      value.sections.some((section) => section.id === current)
+        ? current
+        : (value.sections[0]?.id ?? ""),
+    );
+    setWritingDrafts(
+      Object.fromEntries(
+        value.sections.map((section) => [section.id, section.content]),
+      ),
+    );
+  };
+
+  const openWritingWorkspace = async (): Promise<void> => {
+    if (!activeKnowledgeBaseId) {
+      setWritingError("请先选择知识库");
+      setWritingOpen(true);
+      return;
+    }
+    setWritingOpen(true);
+    setWritingBusy(true);
+    setWritingError("");
+    setWritingNotice("");
+    try {
+      const result = await getDesktopApi().writing.list(activeKnowledgeBaseId);
+      setWritingProjects(result.projects);
+      if (result.projects[0]) {
+        syncWritingProject(
+          await getDesktopApi().writing.project(result.projects[0].id),
+        );
+      } else {
+        setWritingProject(null);
+        setWritingSelectedSectionId("");
+        setWritingDrafts({});
+      }
+    } catch (error) {
+      setWritingError(
+        error instanceof Error ? error.message : "写作工作区读取失败",
+      );
+    } finally {
+      setWritingBusy(false);
+    }
+  };
+
+  const openWritingProject = async (projectId: string): Promise<void> => {
+    setWritingBusy(true);
+    setWritingError("");
+    setWritingNotice("");
+    try {
+      syncWritingProject(await getDesktopApi().writing.project(projectId));
+    } catch (error) {
+      setWritingError(
+        error instanceof Error ? error.message : "写作项目读取失败",
+      );
+    } finally {
+      setWritingBusy(false);
+    }
+  };
+
+  const createWritingProject = async (): Promise<void> => {
+    if (!activeKnowledgeBaseId || !writingGoal.trim()) {
+      setWritingError("请输入写作或复习目标");
+      return;
+    }
+    setWritingBusy(true);
+    setWritingError("");
+    setWritingNotice("");
+    try {
+      syncWritingProject(
+        await getDesktopApi().writing.create({
+          knowledgeBaseId: activeKnowledgeBaseId,
+          goal: writingGoal.trim(),
+          workflowType: writingWorkflowType,
+        }),
+      );
+      setWritingGoal("");
+      setWritingNotice("已生成基于当前知识库证据的大纲");
+    } catch (error) {
+      setWritingError(
+        error instanceof Error ? error.message : "写作大纲生成失败",
+      );
+    } finally {
+      setWritingBusy(false);
+    }
+  };
+
+  const runWritingSection = async (
+    sectionId?: string,
+    revise = false,
+  ): Promise<void> => {
+    if (!writingProject) {
+      return;
+    }
+    setWritingBusy(true);
+    setWritingError("");
+    setWritingNotice("");
+    try {
+      syncWritingProject(
+        await getDesktopApi().writing.runSection({
+          projectId: writingProject.project.id,
+          sectionId,
+          revise,
+        }),
+      );
+      setWritingNotice(
+        revise
+          ? "已根据检查结果生成修订内容"
+          : "分节写作完成，引用与冲突检查已同步更新",
+      );
+    } catch (error) {
+      setWritingError(error instanceof Error ? error.message : "分节写作失败");
+    } finally {
+      setWritingBusy(false);
+    }
+  };
+
+  const saveWritingSection = async (sectionId: string): Promise<void> => {
+    setWritingBusy(true);
+    setWritingError("");
+    setWritingNotice("");
+    try {
+      await getDesktopApi().writing.updateSection(
+        sectionId,
+        writingDrafts[sectionId] ?? "",
+      );
+      syncWritingProject(await getDesktopApi().writing.auditSection(sectionId));
+      setWritingNotice("章节内容已保存并重新检查引用");
+    } catch (error) {
+      setWritingError(error instanceof Error ? error.message : "章节保存失败");
+    } finally {
+      setWritingBusy(false);
+    }
+  };
+
+  const auditWritingSection = async (sectionId: string): Promise<void> => {
+    setWritingBusy(true);
+    setWritingError("");
+    setWritingNotice("");
+    try {
+      syncWritingProject(await getDesktopApi().writing.auditSection(sectionId));
+      setWritingNotice("引用与冲突检查已更新");
+    } catch (error) {
+      setWritingError(error instanceof Error ? error.message : "章节检查失败");
+    } finally {
+      setWritingBusy(false);
+    }
+  };
+
+  const exportWritingWord = async (): Promise<void> => {
+    if (!writingProject) {
+      return;
+    }
+    setWritingBusy(true);
+    setWritingError("");
+    setWritingNotice("");
+    try {
+      const result = await getDesktopApi().writing.exportWord(
+        writingProject.project.id,
+      );
+      setWritingNotice(
+        result.cancelled
+          ? "已取消导出"
+          : `Word 文档已导出到 ${result.filePath ?? "所选位置"}`,
+      );
+    } catch (error) {
+      setWritingError(error instanceof Error ? error.message : "Word 导出失败");
+    } finally {
+      setWritingBusy(false);
+    }
+  };
+
   return (
     <main className={`app-shell ${evidenceOpen ? "" : "evidence-collapsed"}`}>
       <header className="topbar">
@@ -2060,6 +2263,15 @@ function App(): React.JSX.Element {
             subtitle={`${selectedCount} 个来源参与检索`}
             action={
               <div className="chat-header-actions">
+                <button
+                  className="writing-header-button"
+                  title="复习与写作工作流"
+                  type="button"
+                  onClick={() => void openWritingWorkspace()}
+                >
+                  <Icon name="book" size={15} />
+                  <span>写作</span>
+                </button>
                 <ConversationHistoryMenu
                   activeConversationId={conversationId}
                   busy={chatBusy || Boolean(conversationDeleteBusyId)}
@@ -2394,6 +2606,39 @@ function App(): React.JSX.Element {
         />
       )}
 
+      {writingOpen && (
+        <WritingWorkspaceDialog
+          busy={writingBusy}
+          drafts={writingDrafts}
+          error={writingError}
+          goal={writingGoal}
+          notice={writingNotice}
+          project={writingProject}
+          projects={writingProjects}
+          selectedSectionId={writingSelectedSectionId}
+          workflowType={writingWorkflowType}
+          onAudit={(sectionId) => void auditWritingSection(sectionId)}
+          onClose={() => {
+            if (!writingBusy) {
+              setWritingOpen(false);
+            }
+          }}
+          onCreate={() => void createWritingProject()}
+          onDraftChange={(sectionId, content) =>
+            setWritingDrafts((items) => ({ ...items, [sectionId]: content }))
+          }
+          onExport={() => void exportWritingWord()}
+          onGoalChange={setWritingGoal}
+          onOpenProject={(projectId) => void openWritingProject(projectId)}
+          onRevise={(sectionId) => void runWritingSection(sectionId, true)}
+          onRun={(sectionId) => void runWritingSection(sectionId)}
+          onRunNext={() => void runWritingSection()}
+          onSave={(sectionId) => void saveWritingSection(sectionId)}
+          onSelectSection={setWritingSelectedSectionId}
+          onWorkflowTypeChange={setWritingWorkflowType}
+        />
+      )}
+
       {webImportOpen && (
         <WebImportDialog
           busy={importBusy}
@@ -2485,6 +2730,369 @@ function App(): React.JSX.Element {
         />
       )}
     </main>
+  );
+}
+
+function WritingWorkspaceDialog({
+  busy,
+  drafts,
+  error,
+  goal,
+  notice,
+  project,
+  projects,
+  selectedSectionId,
+  workflowType,
+  onAudit,
+  onClose,
+  onCreate,
+  onDraftChange,
+  onExport,
+  onGoalChange,
+  onOpenProject,
+  onRevise,
+  onRun,
+  onRunNext,
+  onSave,
+  onSelectSection,
+  onWorkflowTypeChange,
+}: {
+  busy: boolean;
+  drafts: Record<string, string>;
+  error: string;
+  goal: string;
+  notice: string;
+  project: WritingProjectResponse | null;
+  projects: WritingProjectRecord[];
+  selectedSectionId: string;
+  workflowType: WritingWorkflowType;
+  onAudit: (sectionId: string) => void;
+  onClose: () => void;
+  onCreate: () => void;
+  onDraftChange: (sectionId: string, content: string) => void;
+  onExport: () => void;
+  onGoalChange: (value: string) => void;
+  onOpenProject: (projectId: string) => void;
+  onRevise: (sectionId: string) => void;
+  onRun: (sectionId: string) => void;
+  onRunNext: () => void;
+  onSave: (sectionId: string) => void;
+  onSelectSection: (sectionId: string) => void;
+  onWorkflowTypeChange: (value: WritingWorkflowType) => void;
+}): React.JSX.Element {
+  const section =
+    project?.sections.find((item) => item.id === selectedSectionId) ??
+    project?.sections[0];
+  const suggestions = section?.audit.revisionSuggestions ?? [];
+  const conflicts = section?.audit.conflicts ?? [];
+  const invalidCitations =
+    section?.audit.citationValidation?.invalidCitations ?? [];
+
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <section
+        aria-modal="true"
+        className="writing-workspace-dialog"
+        role="dialog"
+      >
+        <header className="writing-workspace-heading">
+          <div>
+            <span className="eyebrow">LangGraph 写作工作流</span>
+            <h2>复习与写作</h2>
+            <p>大纲、逐节内容和检查点均绑定到当前知识库证据。</p>
+          </div>
+          <div>
+            <button
+              className="button ghost"
+              disabled={!project || busy}
+              type="button"
+              onClick={onRunNext}
+            >
+              <Icon name="sparkle" size={15} /> 逐节继续
+            </button>
+            <button
+              className="button ghost"
+              disabled={!project || busy}
+              type="button"
+              onClick={onExport}
+            >
+              <Icon name="download" size={15} /> 导出 Word
+            </button>
+            <button
+              aria-label="关闭写作工作区"
+              className="icon-button"
+              disabled={busy}
+              type="button"
+              onClick={onClose}
+            >
+              <Icon name="close" size={17} />
+            </button>
+          </div>
+        </header>
+
+        <div className="writing-workspace-body">
+          <aside className="writing-projects">
+            <div className="writing-create">
+              <strong>创建工作流</strong>
+              <div className="writing-mode-switch" role="group">
+                <button
+                  className={workflowType === "review" ? "active" : ""}
+                  disabled={busy}
+                  type="button"
+                  onClick={() => onWorkflowTypeChange("review")}
+                >
+                  复习提纲
+                </button>
+                <button
+                  className={workflowType === "article" ? "active" : ""}
+                  disabled={busy}
+                  type="button"
+                  onClick={() => onWorkflowTypeChange("article")}
+                >
+                  写作大纲
+                </button>
+              </div>
+              <textarea
+                aria-label="写作或复习目标"
+                disabled={busy}
+                placeholder="例如：整理产品架构的复习提纲"
+                value={goal}
+                onChange={(event) => onGoalChange(event.target.value)}
+              />
+              <button
+                className="button primary"
+                disabled={busy || !goal.trim()}
+                type="button"
+                onClick={onCreate}
+              >
+                <Icon name="sparkle" size={15} /> 生成证据大纲
+              </button>
+            </div>
+            <div className="writing-project-list">
+              <div className="writing-column-heading">
+                <strong>工作流</strong>
+                <span>{projects.length}</span>
+              </div>
+              {projects.map((item) => (
+                <button
+                  className={item.id === project?.project.id ? "active" : ""}
+                  disabled={busy}
+                  key={item.id}
+                  type="button"
+                  onClick={() => onOpenProject(item.id)}
+                >
+                  <strong>{item.title}</strong>
+                  <span>
+                    {writingWorkflowLabel(item.workflowType)} ·{" "}
+                    {writingStatusLabel(item.status)}
+                  </span>
+                </button>
+              ))}
+              {projects.length === 0 && (
+                <p className="writing-empty">还没有写作工作流</p>
+              )}
+            </div>
+          </aside>
+
+          <section className="writing-editor">
+            {project ? (
+              <>
+                <div className="writing-project-summary">
+                  <div>
+                    <span>
+                      {writingWorkflowLabel(project.project.workflowType)}
+                    </span>
+                    <h3>{project.project.title}</h3>
+                    <p>{project.project.goal}</p>
+                  </div>
+                  <span className={`writing-status ${project.project.status}`}>
+                    {writingStatusLabel(project.project.status)}
+                  </span>
+                </div>
+                <div className="writing-section-tabs">
+                  {project.sections.map((item) => (
+                    <button
+                      className={item.id === section?.id ? "active" : ""}
+                      disabled={busy}
+                      key={item.id}
+                      type="button"
+                      onClick={() => onSelectSection(item.id)}
+                    >
+                      <span>{item.position + 1}</span>
+                      <strong>{item.title}</strong>
+                      <small>{writingStatusLabel(item.status)}</small>
+                    </button>
+                  ))}
+                </div>
+                {section && (
+                  <div className="writing-section-editor">
+                    <div className="writing-section-heading">
+                      <div>
+                        <h4>{section.title}</h4>
+                        <p>{section.purpose}</p>
+                      </div>
+                      <span>{section.citations.length} 条引用</span>
+                    </div>
+                    {section.reviewPoints.length > 0 && (
+                      <ul className="writing-review-points">
+                        {section.reviewPoints.map((point) => (
+                          <li key={point}>{point}</li>
+                        ))}
+                      </ul>
+                    )}
+                    <textarea
+                      aria-label={`编辑章节 ${section.title}`}
+                      disabled={busy}
+                      placeholder="生成章节后可在此编辑内容"
+                      value={drafts[section.id] ?? section.content}
+                      onChange={(event) =>
+                        onDraftChange(section.id, event.target.value)
+                      }
+                    />
+                    <div className="writing-editor-actions">
+                      <button
+                        className="button primary"
+                        disabled={busy}
+                        type="button"
+                        onClick={() => onRun(section.id)}
+                      >
+                        <Icon name="sparkle" size={15} />
+                        {section.status === "failed"
+                          ? "从检查点恢复"
+                          : "生成章节"}
+                      </button>
+                      <button
+                        className="button ghost"
+                        disabled={busy || !(drafts[section.id] ?? "").trim()}
+                        type="button"
+                        onClick={() => onSave(section.id)}
+                      >
+                        保存编辑
+                      </button>
+                      <button
+                        className="button ghost"
+                        disabled={busy || !section.content}
+                        type="button"
+                        onClick={() => onAudit(section.id)}
+                      >
+                        <Icon name="check" size={15} /> 检查引用
+                      </button>
+                      <button
+                        className="button ghost"
+                        disabled={busy || suggestions.length === 0}
+                        type="button"
+                        onClick={() => onRevise(section.id)}
+                      >
+                        <Icon name="refresh" size={15} /> 自动修订
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </>
+            ) : (
+              <div className="writing-empty-main">
+                <Icon name="book" size={30} />
+                <strong>创建复习提纲或证据写作大纲</strong>
+                <span>生成后可逐节写作，并从失败检查点继续。</span>
+              </div>
+            )}
+          </section>
+
+          <aside className="writing-audit">
+            <div className="writing-column-heading">
+              <strong>引用与检查</strong>
+              <span>{section?.audit.valid ? "通过" : "待处理"}</span>
+            </div>
+            {section ? (
+              <>
+                <div className="writing-audit-metrics">
+                  <span>
+                    <strong>{section.citations.length}</strong>
+                    引用证据
+                  </span>
+                  <span>
+                    <strong>{invalidCitations.length}</strong>
+                    无效引用
+                  </span>
+                  <span>
+                    <strong>{conflicts.length}</strong>
+                    证据冲突
+                  </span>
+                </div>
+                <WritingAuditList
+                  empty="当前没有修订建议"
+                  items={suggestions.map((item) => item.message)}
+                  title="自动修订建议"
+                />
+                <WritingAuditList
+                  empty="当前没有确认的证据冲突"
+                  items={conflicts.map(writingConflictLabel)}
+                  title="冲突检查"
+                />
+                <div className="writing-checkpoints">
+                  <div className="writing-column-heading">
+                    <strong>最近检查点</strong>
+                    <span>{project?.checkpoints.length ?? 0}</span>
+                  </div>
+                  {project?.checkpoints.slice(0, 8).map((checkpoint) => (
+                    <div key={checkpoint.id}>
+                      <Icon
+                        name={
+                          checkpoint.status === "completed"
+                            ? "check"
+                            : "refresh"
+                        }
+                        size={13}
+                      />
+                      <span>
+                        <strong>
+                          {writingCheckpointLabel(checkpoint.step)}
+                        </strong>
+                        <small>{formatDateTime(checkpoint.createdAt)}</small>
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </>
+            ) : (
+              <p className="writing-empty">选择工作流后显示检查结果</p>
+            )}
+          </aside>
+        </div>
+        {(error || notice) && (
+          <footer
+            className={error ? "writing-feedback error" : "writing-feedback"}
+          >
+            {error || notice}
+          </footer>
+        )}
+      </section>
+    </div>
+  );
+}
+
+function WritingAuditList({
+  empty,
+  items,
+  title,
+}: {
+  empty: string;
+  items: string[];
+  title: string;
+}): React.JSX.Element {
+  return (
+    <section className="writing-audit-list">
+      <strong>{title}</strong>
+      {items.length > 0 ? (
+        <ul>
+          {items.map((item, index) => (
+            <li key={`${index}:${item}`}>{item}</li>
+          ))}
+        </ul>
+      ) : (
+        <p>{empty}</p>
+      )}
+    </section>
   );
 }
 
@@ -4786,6 +5394,64 @@ function formatDateTime(value: string): string {
         hour: "2-digit",
         minute: "2-digit",
       }).format(date);
+}
+
+function upsertWritingProject(
+  projects: WritingProjectRecord[],
+  value: WritingProjectRecord,
+): WritingProjectRecord[] {
+  return [value, ...projects.filter((project) => project.id !== value.id)].sort(
+    (left, right) => right.updatedAt.localeCompare(left.updatedAt),
+  );
+}
+
+function writingWorkflowLabel(value: WritingWorkflowType): string {
+  return value === "review" ? "复习提纲" : "证据写作";
+}
+
+function writingStatusLabel(
+  value: WritingProjectRecord["status"] | WritingSectionRecord["status"],
+): string {
+  const labels: Record<string, string> = {
+    planning: "规划中",
+    ready: "大纲就绪",
+    pending: "待生成",
+    running: "执行中",
+    needs_review: "待检查",
+    needs_revision: "待修订",
+    completed: "已完成",
+    failed: "可恢复",
+  };
+  return labels[value] ?? value;
+}
+
+function writingConflictLabel(value: Record<string, unknown>): string {
+  if (
+    typeof value.sourceDisplayName === "string" &&
+    typeof value.relatedDisplayName === "string"
+  ) {
+    return `${value.sourceDisplayName} 与 ${value.relatedDisplayName} 存在已确认冲突`;
+  }
+  for (const key of ["reason", "basis", "summary", "message"]) {
+    if (typeof value[key] === "string" && value[key]) {
+      return value[key] as string;
+    }
+  }
+  return "引用证据之间存在已确认冲突";
+}
+
+function writingCheckpointLabel(value: string): string {
+  const labels: Record<string, string> = {
+    outline: "证据大纲",
+    prepare: "准备章节",
+    retrieval: "检索证据",
+    retrieve: "检索证据",
+    draft: "生成草稿",
+    audit: "引用检查",
+    persist: "保存章节",
+    workflow: "失败恢复点",
+  };
+  return labels[value] ?? value;
 }
 
 function formatBytes(value: number): string {

@@ -645,6 +645,106 @@ export interface ConversationExportResult {
   filePath?: string;
 }
 
+export type WritingWorkflowType = "review" | "article";
+export type WritingProjectStatus =
+  | "planning"
+  | "ready"
+  | "running"
+  | "needs_revision"
+  | "completed"
+  | "failed";
+export type WritingSectionStatus =
+  | "pending"
+  | "running"
+  | "needs_review"
+  | "needs_revision"
+  | "completed"
+  | "failed";
+
+export interface WritingProjectRecord {
+  id: string;
+  knowledgeBaseId: string;
+  title: string;
+  goal: string;
+  workflowType: WritingWorkflowType;
+  status: WritingProjectStatus;
+  modelId: string | null;
+  indexVersionId: string | null;
+  outline: {
+    title?: string;
+    summary?: string;
+    sections?: Array<Record<string, unknown>>;
+  };
+  audit: Record<string, unknown>;
+  errorMessage: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface WritingSectionRecord {
+  id: string;
+  projectId: string;
+  position: number;
+  title: string;
+  purpose: string;
+  reviewPoints: string[];
+  outlineEvidenceChunkIds: string[];
+  status: WritingSectionStatus;
+  content: string;
+  paragraphs: Array<{ text: string; evidenceChunkIds: string[] }>;
+  audit: {
+    valid?: boolean;
+    conflicts?: Array<Record<string, unknown>>;
+    revisionSuggestions?: Array<{ type: string; message: string }>;
+    citationValidation?: {
+      valid?: boolean;
+      invalidCitations?: Array<Record<string, unknown>>;
+    };
+  };
+  citations: AnswerCitation[];
+  errorMessage: string | null;
+  retryCount: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface WritingCheckpointRecord {
+  id: string;
+  sectionId: string | null;
+  step: string;
+  status: "completed" | "failed";
+  errorMessage: string | null;
+  createdAt: string;
+}
+
+export interface WritingProjectResponse {
+  project: WritingProjectRecord;
+  sections: WritingSectionRecord[];
+  checkpoints: WritingCheckpointRecord[];
+}
+
+export interface WritingProjectListResponse {
+  knowledgeBaseId: string;
+  projects: WritingProjectRecord[];
+}
+
+export interface CreateWritingProjectRequest {
+  knowledgeBaseId: string;
+  goal: string;
+  workflowType: WritingWorkflowType;
+}
+
+export interface RunWritingSectionRequest {
+  projectId: string;
+  sectionId?: string | null;
+  revise?: boolean;
+}
+
+export interface WritingExportResult {
+  cancelled: boolean;
+  filePath?: string;
+}
+
 export interface UsageSummary {
   knowledgeBaseId: string;
   calls: {
@@ -800,6 +900,22 @@ export interface DesktopApi {
     ) => Promise<ConversationExportResult>;
     usageSummary: (knowledgeBaseId: string) => Promise<UsageSummary>;
   };
+  writing: {
+    list: (knowledgeBaseId: string) => Promise<WritingProjectListResponse>;
+    project: (projectId: string) => Promise<WritingProjectResponse>;
+    create: (
+      request: CreateWritingProjectRequest,
+    ) => Promise<WritingProjectResponse>;
+    runSection: (
+      request: RunWritingSectionRequest,
+    ) => Promise<WritingProjectResponse>;
+    updateSection: (
+      sectionId: string,
+      content: string,
+    ) => Promise<WritingProjectResponse>;
+    auditSection: (sectionId: string) => Promise<WritingProjectResponse>;
+    exportWord: (projectId: string) => Promise<WritingExportResult>;
+  };
 }
 
 export const IPC_CHANNELS = {
@@ -859,6 +975,13 @@ export const IPC_CHANNELS = {
   answerConversation: "citemind:conversations:answer",
   exportConversationMarkdown: "citemind:conversations:export-markdown",
   conversationUsageSummary: "citemind:conversations:usage-summary",
+  listWritingProjects: "citemind:writing:list",
+  getWritingProject: "citemind:writing:project",
+  createWritingProject: "citemind:writing:create",
+  runWritingSection: "citemind:writing:run-section",
+  updateWritingSection: "citemind:writing:update-section",
+  auditWritingSection: "citemind:writing:audit-section",
+  exportWritingWord: "citemind:writing:export-word",
 } as const;
 
 export const SEED_DEFAULTS = {

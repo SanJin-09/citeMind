@@ -21,6 +21,7 @@ from citemind_worker.rpc import JsonValue, RpcError, RpcServer, require_object_p
 from citemind_worker.source_import_service import SourceImportService
 from citemind_worker.source_organization_service import SourceOrganizationService
 from citemind_worker.storage import StorageRuntime
+from citemind_worker.writing_workflow_service import WritingWorkflowService
 
 
 def create_server(
@@ -34,6 +35,7 @@ def create_server(
     retrieval_service: HybridRetrievalService | None = None,
     conversation_service: ConversationService | None = None,
     maintenance_service: MaintenanceService | None = None,
+    writing_workflow_service: WritingWorkflowService | None = None,
 ) -> RpcServer:
     server = RpcServer()
     seed_models = model_service or (SeedModelService(storage) if storage is not None else None)
@@ -60,6 +62,9 @@ def create_server(
     )
     maintenance = maintenance_service or (
         MaintenanceService(storage) if storage is not None else None
+    )
+    writing = writing_workflow_service or (
+        WritingWorkflowService(storage) if storage is not None else None
     )
 
     def health(params: JsonValue) -> JsonValue:
@@ -478,6 +483,95 @@ def create_server(
         except ValueError as error:
             raise RpcError(-32602, str(error)) from error
 
+    def list_writing_projects(params: JsonValue) -> JsonValue:
+        values = require_object_params(params)
+        service = _require_writing_workflow_service(writing)
+        knowledge_base_id = _required_str(values, "knowledgeBaseId")
+        try:
+            return service.list_projects(knowledge_base_id)  # type: ignore[return-value]
+        except ValueError as error:
+            raise RpcError(-32602, str(error)) from error
+
+    def get_writing_project(params: JsonValue) -> JsonValue:
+        service = _require_writing_workflow_service(writing)
+        project_id = _required_str(require_object_params(params), "projectId")
+        try:
+            return service.project(project_id)  # type: ignore[return-value]
+        except ValueError as error:
+            raise RpcError(-32602, str(error)) from error
+
+    async def create_writing_project(params: JsonValue) -> JsonValue:
+        values = require_object_params(params)
+        service = _require_writing_workflow_service(writing)
+        knowledge_base_id = _required_str(values, "knowledgeBaseId")
+        goal = _required_str(values, "goal")
+        workflow_type = _required_str(values, "workflowType")
+        api_key = _required_str(values, "apiKey")
+        base_url = _optional_str(values, "baseUrl", DEFAULT_ARK_BASE_URL)
+        chat_model = _optional_str(values, "chatModel", DEFAULT_CHAT_MODEL)
+        embedding_model = _optional_str(values, "embeddingModel", DEFAULT_EMBEDDING_MODEL)
+        try:
+            return await service.create_project(
+                knowledge_base_id,
+                goal=goal,
+                workflow_type=workflow_type,
+                api_key=api_key,
+                base_url=base_url,
+                chat_model=chat_model,
+                embedding_model=embedding_model,
+            )  # type: ignore[return-value]
+        except ValueError as error:
+            raise RpcError(-32602, str(error)) from error
+
+    async def run_writing_section(params: JsonValue) -> JsonValue:
+        values = require_object_params(params)
+        service = _require_writing_workflow_service(writing)
+        project_id = _required_str(values, "projectId")
+        section_id = _optional_nullable_str(values, "sectionId")
+        revise = _optional_bool(values, "revise", False)
+        api_key = _required_str(values, "apiKey")
+        base_url = _optional_str(values, "baseUrl", DEFAULT_ARK_BASE_URL)
+        chat_model = _optional_str(values, "chatModel", DEFAULT_CHAT_MODEL)
+        embedding_model = _optional_str(values, "embeddingModel", DEFAULT_EMBEDDING_MODEL)
+        try:
+            return await service.run_section(
+                project_id,
+                section_id=section_id,
+                revise=revise,
+                api_key=api_key,
+                base_url=base_url,
+                chat_model=chat_model,
+                embedding_model=embedding_model,
+            )  # type: ignore[return-value]
+        except ValueError as error:
+            raise RpcError(-32602, str(error)) from error
+
+    def update_writing_section(params: JsonValue) -> JsonValue:
+        values = require_object_params(params)
+        service = _require_writing_workflow_service(writing)
+        section_id = _required_str(values, "sectionId")
+        content = _required_str(values, "content")
+        try:
+            return service.update_section(section_id, content)  # type: ignore[return-value]
+        except ValueError as error:
+            raise RpcError(-32602, str(error)) from error
+
+    def audit_writing_section(params: JsonValue) -> JsonValue:
+        service = _require_writing_workflow_service(writing)
+        section_id = _required_str(require_object_params(params), "sectionId")
+        try:
+            return service.audit_section(section_id)  # type: ignore[return-value]
+        except ValueError as error:
+            raise RpcError(-32602, str(error)) from error
+
+    def export_writing_word(params: JsonValue) -> JsonValue:
+        service = _require_writing_workflow_service(writing)
+        project_id = _required_str(require_object_params(params), "projectId")
+        try:
+            return service.export_word(project_id)  # type: ignore[return-value]
+        except ValueError as error:
+            raise RpcError(-32602, str(error)) from error
+
     async def build_index(params: JsonValue) -> JsonValue:
         values = require_object_params(params)
         service = _require_indexing_service(indexes)
@@ -761,6 +855,13 @@ def create_server(
     server.register("sources.suggest_tags", suggest_source_tags)
     server.register("sources.decide_tag", decide_source_tag)
     server.register("sources.decide_relation", decide_source_relation)
+    server.register("writing.list", list_writing_projects)
+    server.register("writing.project", get_writing_project)
+    server.register("writing.create", create_writing_project)
+    server.register("writing.run_section", run_writing_section)
+    server.register("writing.update_section", update_writing_section)
+    server.register("writing.audit_section", audit_writing_section)
+    server.register("writing.export_word", export_writing_word)
     server.register("indexes.build", build_index)
     server.register("indexes.delete", delete_indexes)
     server.register("indexes.rebuild", rebuild_index)
@@ -867,6 +968,14 @@ def _require_maintenance_service(
 ) -> MaintenanceService:
     if service is None:
         raise RpcError(-32017, "Maintenance service is not available")
+    return service
+
+
+def _require_writing_workflow_service(
+    service: WritingWorkflowService | None,
+) -> WritingWorkflowService:
+    if service is None:
+        raise RpcError(-32019, "Writing workflow service is not available")
     return service
 
 

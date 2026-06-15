@@ -131,9 +131,36 @@ def test_health_reports_initialized_storage(tmp_path: Path) -> None:
 
     assert response["result"]["storage"] == {
         "ready": True,
-        "schemaVersion": 4,
+        "schemaVersion": 5,
         "fts5Enabled": True,
         "vectorDimension": 3,
+    }
+
+
+def test_writing_rpc_lists_projects_for_knowledge_base(tmp_path: Path) -> None:
+    storage = StorageRuntime(tmp_path, vector_dimension=3)
+    storage.initialize()
+    with storage.database.connect() as connection:
+        connection.execute(
+            "INSERT INTO knowledge_bases(id, name) VALUES ('kb-writing', '写作知识库')"
+        )
+        connection.commit()
+    server = create_server(storage)
+    output = StringIO()
+    asyncio.run(
+        server.serve(
+            StringIO(
+                '{"jsonrpc":"2.0","id":"1","method":"writing.list",'
+                '"params":{"knowledgeBaseId":"kb-writing"}}\n'
+            ),
+            output,
+        )
+    )
+    response = json.loads(output.getvalue())
+
+    assert response["result"] == {
+        "knowledgeBaseId": "kb-writing",
+        "projects": [],
     }
 
 

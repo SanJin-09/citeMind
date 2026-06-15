@@ -142,6 +142,25 @@ const api: DesktopApi = {
         knowledgeBaseId,
       ),
   },
+  writing: {
+    list: (knowledgeBaseId) =>
+      ipcRenderer.invoke(IPC_CHANNELS.listWritingProjects, knowledgeBaseId),
+    project: (projectId) =>
+      ipcRenderer.invoke(IPC_CHANNELS.getWritingProject, projectId),
+    create: (request) =>
+      ipcRenderer.invoke(IPC_CHANNELS.createWritingProject, request),
+    runSection: (request) =>
+      ipcRenderer.invoke(IPC_CHANNELS.runWritingSection, request),
+    updateSection: (sectionId, content) =>
+      ipcRenderer.invoke(IPC_CHANNELS.updateWritingSection, {
+        sectionId,
+        content,
+      }),
+    auditSection: (sectionId) =>
+      ipcRenderer.invoke(IPC_CHANNELS.auditWritingSection, sectionId),
+    exportWord: (projectId) =>
+      ipcRenderer.invoke(IPC_CHANNELS.exportWritingWord, projectId),
+  },
 };
 
 contextBridge.exposeInMainWorld("citeMind", api);

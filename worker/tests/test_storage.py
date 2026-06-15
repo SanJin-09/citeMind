@@ -26,6 +26,10 @@ REQUIRED_TABLES = {
     "messages",
     "answer_citations",
     "background_jobs",
+    "writing_projects",
+    "writing_sections",
+    "writing_citations",
+    "writing_checkpoints",
     "chunks_fts",
 }
 
@@ -47,7 +51,7 @@ def test_sqlite_migration_creates_required_tables_and_accepts_null_page_number(
 ) -> None:
     database = SqliteDatabase(AppDataPaths(tmp_path))
 
-    assert database.initialize() == 4
+    assert database.initialize() == 5
     status = database.status()
     assert status["fts5Enabled"] is True
     assert set(status["tables"]) >= REQUIRED_TABLES
@@ -128,7 +132,7 @@ def test_source_version_migration_marks_only_latest_existing_version_current(
         connection.commit()
 
     database = SqliteDatabase(paths)
-    assert database.initialize() == 4
+    assert database.initialize() == 5
 
     with database.connect() as connection:
         source = connection.execute(
@@ -217,7 +221,7 @@ def test_storage_runtime_initializes_all_backends(tmp_path: Path) -> None:
     summary = storage.health_summary()
     assert summary == {
         "ready": True,
-        "schemaVersion": 4,
+        "schemaVersion": 5,
         "fts5Enabled": True,
         "vectorDimension": 3,
     }
