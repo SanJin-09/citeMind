@@ -131,7 +131,7 @@ def test_health_reports_initialized_storage(tmp_path: Path) -> None:
 
     assert response["result"]["storage"] == {
         "ready": True,
-        "schemaVersion": 3,
+        "schemaVersion": 4,
         "fts5Enabled": True,
         "vectorDimension": 3,
     }
@@ -289,6 +289,22 @@ def test_source_import_rpc_imports_file_and_lists_parse_checks(tmp_path: Path) -
     assert maintained["source"]["expiryStatus"] == "expired"
     assert versions["source"]["currentVersionNumber"] == 1
     assert versions["versions"][0]["reviewStatus"] == "current"
+
+    output = StringIO()
+    asyncio.run(
+        server.serve(
+            StringIO(
+                '{"jsonrpc":"2.0","id":"6","method":"sources.organization",'
+                f'"params":{{"sourceId":"{source_id}"}}}}\n'
+            ),
+            output,
+        )
+    )
+    organization = json.loads(output.getvalue())["result"]
+
+    assert organization["sourceId"] == source_id
+    assert organization["classification"]["category"]
+    assert organization["tags"] == []
 
 
 def test_index_build_rpc_marks_chunks_ready(tmp_path: Path) -> None:

@@ -181,7 +181,11 @@ def test_imports_pdf_docx_image_and_web_with_parse_artifacts(tmp_path: Path) -> 
 
     with storage.database.connect() as connection:
         rows = connection.execute("SELECT status FROM sources").fetchall()
+        classification_count = connection.execute(
+            "SELECT COUNT(*) FROM source_classifications"
+        ).fetchone()[0]
     assert {str(row["status"]) for row in rows} == {"processing"}
+    assert classification_count == 4
 
 
 def test_import_marks_duplicate_content_without_indexing(tmp_path: Path) -> None:
@@ -206,6 +210,12 @@ def test_import_marks_duplicate_content_without_indexing(tmp_path: Path) -> None
     assert duplicate["duplicateActions"] == ["skip", "keep", "link"]
     assert duplicate["chunkCount"] == 1
     assert duplicate["sourceStatus"] == "duplicate"
+    with storage.database.connect() as connection:
+        relation = connection.execute(
+            "SELECT relation_type, confidence FROM source_relations"
+        ).fetchone()
+    assert relation is not None
+    assert tuple(relation) == ("duplicate", 1.0)
 
 
 def test_duplicate_resolution_preserves_files_and_controls_index_eligibility(

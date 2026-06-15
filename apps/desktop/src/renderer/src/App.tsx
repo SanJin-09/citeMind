@@ -20,6 +20,7 @@ import type {
   ParseCheckSummary,
   SeedCredentialStatus,
   SeedModelDescriptor,
+  SourceOrganizationResponse,
   SourceVersionDiffResponse,
   SourceVersionsResponse,
   UsageSummary,
@@ -390,6 +391,11 @@ function App(): React.JSX.Element {
     useState<SourceVersionsResponse | null>(null);
   const [sourceVersionDiff, setSourceVersionDiff] =
     useState<SourceVersionDiffResponse | null>(null);
+  const [sourceOrganization, setSourceOrganization] =
+    useState<SourceOrganizationResponse | null>(null);
+  const [sourceTagDrafts, setSourceTagDrafts] = useState<
+    Record<string, string>
+  >({});
   const [sourceMaintenanceBusy, setSourceMaintenanceBusy] = useState(false);
   const [sourceMaintenanceError, setSourceMaintenanceError] = useState("");
   const [sourceMaintenanceForm, setSourceMaintenanceForm] = useState({
@@ -1278,8 +1284,15 @@ function App(): React.JSX.Element {
     setSourceMaintenanceError("");
     setSourceVersionDiff(null);
     try {
-      const result = await getDesktopApi().sources.versions(source.id);
+      const [result, organization] = await Promise.all([
+        getDesktopApi().sources.versions(source.id),
+        getDesktopApi().sources.organization(source.id),
+      ]);
       setSourceMaintenance(result);
+      setSourceOrganization(organization);
+      setSourceTagDrafts(
+        Object.fromEntries(organization.tags.map((tag) => [tag.id, tag.tag])),
+      );
       setSourceMaintenanceForm({
         replacementSourceId: result.source.replacementSourceId ?? "",
         reviewAt: toLocalDateTime(result.source.reviewAt),
@@ -1288,6 +1301,103 @@ function App(): React.JSX.Element {
     } catch (error) {
       setImportError(
         error instanceof Error ? error.message : "来源版本读取失败",
+      );
+    } finally {
+      setSourceMaintenanceBusy(false);
+    }
+  };
+
+  const classifySource = async (): Promise<void> => {
+    if (!sourceMaintenance) {
+      return;
+    }
+    setSourceMaintenanceBusy(true);
+    setSourceMaintenanceError("");
+    try {
+      setSourceOrganization(
+        await getDesktopApi().sources.classify(sourceMaintenance.source.id),
+      );
+    } catch (error) {
+      setSourceMaintenanceError(
+        error instanceof Error ? error.message : "来源规则分类失败",
+      );
+    } finally {
+      setSourceMaintenanceBusy(false);
+    }
+  };
+
+  const suggestSourceTags = async (): Promise<void> => {
+    if (!sourceMaintenance) {
+      return;
+    }
+    setSourceMaintenanceBusy(true);
+    setSourceMaintenanceError("");
+    try {
+      const organization = await getDesktopApi().sources.suggestTags(
+        sourceMaintenance.source.id,
+      );
+      setSourceOrganization(organization);
+      setSourceTagDrafts(
+        Object.fromEntries(organization.tags.map((tag) => [tag.id, tag.tag])),
+      );
+    } catch (error) {
+      setSourceMaintenanceError(
+        error instanceof Error ? error.message : "主题标签建议生成失败",
+      );
+    } finally {
+      setSourceMaintenanceBusy(false);
+    }
+  };
+
+  const decideSourceTag = async (
+    tagId: string,
+    decision: "confirm" | "dismiss",
+  ): Promise<void> => {
+    if (!sourceMaintenance) {
+      return;
+    }
+    setSourceMaintenanceBusy(true);
+    setSourceMaintenanceError("");
+    try {
+      const organization = await getDesktopApi().sources.decideTag({
+        sourceId: sourceMaintenance.source.id,
+        tagId,
+        decision,
+        correctedTag: decision === "confirm" ? sourceTagDrafts[tagId] : null,
+      });
+      setSourceOrganization(organization);
+      setSourceTagDrafts(
+        Object.fromEntries(organization.tags.map((tag) => [tag.id, tag.tag])),
+      );
+    } catch (error) {
+      setSourceMaintenanceError(
+        error instanceof Error ? error.message : "主题标签处理失败",
+      );
+    } finally {
+      setSourceMaintenanceBusy(false);
+    }
+  };
+
+  const decideSourceRelation = async (
+    relationId: string,
+    decision: "confirm" | "dismiss",
+  ): Promise<void> => {
+    if (!sourceMaintenance) {
+      return;
+    }
+    setSourceMaintenanceBusy(true);
+    setSourceMaintenanceError("");
+    try {
+      setSourceOrganization(
+        await getDesktopApi().sources.decideRelation({
+          sourceId: sourceMaintenance.source.id,
+          relationId,
+          decision,
+        }),
+      );
+    } catch (error) {
+      setSourceMaintenanceError(
+        error instanceof Error ? error.message : "来源关联处理失败",
       );
     } finally {
       setSourceMaintenanceBusy(false);
@@ -2301,18 +2411,29 @@ function App(): React.JSX.Element {
           diff={sourceVersionDiff}
           error={sourceMaintenanceError}
           form={sourceMaintenanceForm}
+          organization={sourceOrganization}
           sources={sources}
+          tagDrafts={sourceTagDrafts}
           value={sourceMaintenance}
           onCheck={() => void checkSourceUpdate()}
+          onClassify={() => void classifySource()}
           onClose={() => {
             if (!sourceMaintenanceBusy) {
               setSourceMaintenance(null);
               setSourceVersionDiff(null);
+              setSourceOrganization(null);
+              setSourceTagDrafts({});
             }
           }}
           onCloseDiff={() => setSourceVersionDiff(null)}
           onDecideSuggestion={(decision) =>
             void decideSourceSuggestion(decision)
+          }
+          onDecideRelation={(relationId, decision) =>
+            void decideSourceRelation(relationId, decision)
+          }
+          onDecideTag={(tagId, decision) =>
+            void decideSourceTag(tagId, decision)
           }
           onDecideVersion={(versionId, decision, rebuild) =>
             void decideSourceVersion(versionId, decision, rebuild)
@@ -2322,6 +2443,10 @@ function App(): React.JSX.Element {
             void inspectSourceVersionDiff(versionId)
           }
           onSave={() => void saveSourceMaintenance()}
+          onSuggestTags={() => void suggestSourceTags()}
+          onTagDraftChange={(tagId, value) =>
+            setSourceTagDrafts((items) => ({ ...items, [tagId]: value }))
+          }
         />
       )}
 
@@ -3114,16 +3239,23 @@ function SourceMaintenanceDialog({
   diff,
   error,
   form,
+  organization,
   sources,
+  tagDrafts,
   value,
   onCheck,
+  onClassify,
   onClose,
   onCloseDiff,
+  onDecideRelation,
   onDecideSuggestion,
+  onDecideTag,
   onDecideVersion,
   onFormChange,
   onInspectDiff,
   onSave,
+  onSuggestTags,
+  onTagDraftChange,
 }: {
   busy: boolean;
   diff: SourceVersionDiffResponse | null;
@@ -3133,12 +3265,20 @@ function SourceMaintenanceDialog({
     reviewAt: string;
     expiryStatus: KnowledgeBaseSource["expiryStatus"];
   };
+  organization: SourceOrganizationResponse | null;
   sources: KnowledgeBaseSource[];
+  tagDrafts: Record<string, string>;
   value: SourceVersionsResponse;
   onCheck: () => void;
+  onClassify: () => void;
   onClose: () => void;
   onCloseDiff: () => void;
+  onDecideRelation: (
+    relationId: string,
+    decision: "confirm" | "dismiss",
+  ) => void;
   onDecideSuggestion: (decision: "accept" | "dismiss") => void;
+  onDecideTag: (tagId: string, decision: "confirm" | "dismiss") => void;
   onDecideVersion: (
     versionId: string,
     decision: "accept" | "reject",
@@ -3151,8 +3291,18 @@ function SourceMaintenanceDialog({
   }) => void;
   onInspectDiff: (versionId: string) => void;
   onSave: () => void;
+  onSuggestTags: () => void;
+  onTagDraftChange: (tagId: string, value: string) => void;
 }): React.JSX.Element {
   const suggestion = value.source.modelSuggestion;
+  const confirmedTags =
+    organization?.tags.filter((tag) => tag.status === "confirmed") ?? [];
+  const pendingTags =
+    organization?.tags.filter((tag) => tag.status === "pending") ?? [];
+  const visibleRelations =
+    organization?.relations.filter(
+      (relation) => relation.status !== "dismissed",
+    ) ?? [];
   return (
     <div className="modal-backdrop" role="presentation">
       <section
@@ -3278,6 +3428,204 @@ function SourceMaintenanceDialog({
               </div>
             </section>
           )}
+
+          <section className="source-organization-section">
+            <div className="source-version-heading">
+              <strong>规则分类</strong>
+              <button
+                className="text-button"
+                disabled={busy}
+                type="button"
+                onClick={onClassify}
+              >
+                重新分析
+              </button>
+            </div>
+            {organization?.classification ? (
+              <>
+                <div className="source-classification-grid">
+                  <div>
+                    <span>分类</span>
+                    <strong>{organization.classification.category}</strong>
+                  </div>
+                  <div>
+                    <span>标题</span>
+                    <strong>
+                      {organization.classification.title || "未识别"}
+                    </strong>
+                  </div>
+                  <div>
+                    <span>作者</span>
+                    <strong>
+                      {organization.classification.author || "未识别"}
+                    </strong>
+                  </div>
+                  <div>
+                    <span>文档时间</span>
+                    <strong>
+                      {organization.classification.documentTime || "未识别"}
+                    </strong>
+                  </div>
+                </div>
+                {organization.classification.ruleBasis.rules &&
+                  organization.classification.ruleBasis.rules.length > 0 && (
+                    <p className="source-organization-basis">
+                      分类依据：
+                      {organization.classification.ruleBasis.rules
+                        .map((rule) => `${rule.field}=${rule.value}`)
+                        .join(" · ")}
+                    </p>
+                  )}
+              </>
+            ) : (
+              <p className="source-organization-empty">正在读取分类结果...</p>
+            )}
+          </section>
+
+          <section className="source-organization-section">
+            <div className="source-version-heading">
+              <strong>主题标签</strong>
+              <button
+                className="button ghost"
+                disabled={busy}
+                type="button"
+                onClick={onSuggestTags}
+              >
+                <Icon name="sparkle" size={14} />
+                生成标签建议
+              </button>
+            </div>
+            {confirmedTags.length > 0 && (
+              <div className="source-confirmed-tags">
+                {confirmedTags.map((tag) => (
+                  <span key={tag.id}>{tag.tag}</span>
+                ))}
+              </div>
+            )}
+            {pendingTags.length > 0 ? (
+              <div className="source-tag-suggestions">
+                {pendingTags.map((tag) => (
+                  <article key={tag.id}>
+                    <div>
+                      <input
+                        aria-label={`修改标签 ${tag.tag}`}
+                        disabled={busy}
+                        value={tagDrafts[tag.id] ?? tag.tag}
+                        onChange={(event) =>
+                          onTagDraftChange(tag.id, event.target.value)
+                        }
+                      />
+                      <span>
+                        {tag.origin === "correction" ? "已复用历史修正 · " : ""}
+                        置信度 {Math.round(tag.confidence * 100)}%
+                      </span>
+                      <small>{tag.reason || "模型根据正文主题生成"}</small>
+                    </div>
+                    <div>
+                      <button
+                        className="text-button danger-text"
+                        disabled={busy}
+                        type="button"
+                        onClick={() => onDecideTag(tag.id, "dismiss")}
+                      >
+                        忽略
+                      </button>
+                      <button
+                        className="button ghost"
+                        disabled={busy}
+                        type="button"
+                        onClick={() => onDecideTag(tag.id, "confirm")}
+                      >
+                        确认
+                      </button>
+                    </div>
+                  </article>
+                ))}
+              </div>
+            ) : (
+              confirmedTags.length === 0 && (
+                <p className="source-organization-empty">
+                  尚无标签，生成建议后可确认、修改或忽略。
+                </p>
+              )
+            )}
+          </section>
+
+          <section className="source-organization-section">
+            <div className="source-version-heading">
+              <strong>来源关联</strong>
+              <span>{visibleRelations.length} 个候选关联</span>
+            </div>
+            {visibleRelations.length > 0 ? (
+              <div className="source-relation-list">
+                {visibleRelations.map((relation) => (
+                  <article key={relation.id}>
+                    <div>
+                      <strong>{relation.relatedDisplayName}</strong>
+                      <span>
+                        {sourceRelationLabel(relation.relationType)} · 置信度{" "}
+                        {Math.round(relation.confidence * 100)}% ·{" "}
+                        {sourceRelationStatusLabel(relation.status)}
+                      </span>
+                      <small>
+                        {relation.basis.reason || "根据来源内容生成关联"}
+                      </small>
+                      {relation.basis.sharedKeywords &&
+                        relation.basis.sharedKeywords.length > 0 && (
+                          <small>
+                            共享关键词：
+                            {relation.basis.sharedKeywords.join("、")}
+                          </small>
+                        )}
+                      {relation.basis.textSimilarity !== undefined && (
+                        <small>
+                          正文相似{" "}
+                          {Math.round(relation.basis.textSimilarity * 100)}% ·
+                          标题相似{" "}
+                          {Math.round(
+                            (relation.basis.titleSimilarity ?? 0) * 100,
+                          )}
+                          % · 关键词相似{" "}
+                          {Math.round(
+                            (relation.basis.tokenSimilarity ?? 0) * 100,
+                          )}
+                          %
+                        </small>
+                      )}
+                    </div>
+                    {relation.status === "pending" && (
+                      <div>
+                        <button
+                          className="text-button danger-text"
+                          disabled={busy}
+                          type="button"
+                          onClick={() =>
+                            onDecideRelation(relation.id, "dismiss")
+                          }
+                        >
+                          忽略
+                        </button>
+                        <button
+                          className="button ghost"
+                          disabled={busy}
+                          type="button"
+                          onClick={() =>
+                            onDecideRelation(relation.id, "confirm")
+                          }
+                        >
+                          确认关联
+                        </button>
+                      </div>
+                    )}
+                  </article>
+                ))}
+              </div>
+            ) : (
+              <p className="source-organization-empty">
+                未发现精确重复或近似重复来源。
+              </p>
+            )}
+          </section>
 
           {error && <div className="settings-error">{error}</div>}
 
@@ -4338,6 +4686,29 @@ function sourceVersionReviewLabel(status: string): string {
       rejected: "已忽略",
     }[status] ?? status
   );
+}
+
+function sourceRelationLabel(
+  type: SourceOrganizationResponse["relations"][number]["relationType"],
+): string {
+  return {
+    duplicate: "精确重复",
+    near_duplicate: "近似重复",
+    related: "相关资料",
+    supplements: "补充资料",
+    conflicts: "内容冲突",
+    replaces: "替代资料",
+  }[type];
+}
+
+function sourceRelationStatusLabel(
+  status: SourceOrganizationResponse["relations"][number]["status"],
+): string {
+  return {
+    pending: "待确认",
+    confirmed: "已确认",
+    dismissed: "已忽略",
+  }[status];
 }
 
 function toLocalDateTime(value: string | null): string {

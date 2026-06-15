@@ -200,6 +200,81 @@ export interface UpdateSourceMaintenanceRequest {
   expiryStatus: KnowledgeBaseSource["expiryStatus"];
 }
 
+export interface SourceClassificationRecord {
+  category: string;
+  title: string | null;
+  author: string | null;
+  documentTime: string | null;
+  ruleBasis: {
+    folder?: string | null;
+    filename?: string;
+    title?: string;
+    author?: string | null;
+    documentTime?: string | null;
+    rules?: Array<{ field: string; value: string; result: string }>;
+  };
+  updatedAt: string;
+}
+
+export interface SourceTagRecord {
+  id: string;
+  tag: string;
+  suggestedTag: string | null;
+  origin: "model" | "correction" | "user";
+  status: "pending" | "confirmed" | "dismissed";
+  reason: string | null;
+  confidence: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface SourceRelationRecord {
+  id: string;
+  relatedSourceId: string;
+  relatedDisplayName: string;
+  relationType:
+    | "duplicate"
+    | "near_duplicate"
+    | "related"
+    | "supplements"
+    | "conflicts"
+    | "replaces";
+  basis: {
+    reason?: string;
+    contentHashEqual?: boolean;
+    textSimilarity?: number;
+    titleSimilarity?: number;
+    tokenSimilarity?: number;
+    sharedKeywords?: string[];
+  };
+  confidence: number;
+  status: "pending" | "confirmed" | "dismissed";
+  origin: "rule" | "model" | "user";
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface SourceOrganizationResponse {
+  sourceId: string;
+  knowledgeBaseId: string;
+  classification: SourceClassificationRecord | null;
+  tags: SourceTagRecord[];
+  relations: SourceRelationRecord[];
+}
+
+export interface DecideSourceTagRequest {
+  sourceId: string;
+  tagId: string;
+  decision: "confirm" | "dismiss";
+  correctedTag?: string | null;
+}
+
+export interface DecideSourceRelationRequest {
+  sourceId: string;
+  relationId: string;
+  decision: "confirm" | "dismiss";
+}
+
 export interface KnowledgeBaseSourcesResponse {
   knowledgeBaseId: string;
   sources: KnowledgeBaseSource[];
@@ -677,6 +752,15 @@ export interface DesktopApi {
       sourceId: string,
       decision: "accept" | "dismiss",
     ) => Promise<SourceVersionsResponse>;
+    organization: (sourceId: string) => Promise<SourceOrganizationResponse>;
+    classify: (sourceId: string) => Promise<SourceOrganizationResponse>;
+    suggestTags: (sourceId: string) => Promise<SourceOrganizationResponse>;
+    decideTag: (
+      request: DecideSourceTagRequest,
+    ) => Promise<SourceOrganizationResponse>;
+    decideRelation: (
+      request: DecideSourceRelationRequest,
+    ) => Promise<SourceOrganizationResponse>;
   };
   indexes: {
     build: (knowledgeBaseId: string) => Promise<BuildIndexResponse>;
@@ -754,6 +838,11 @@ export const IPC_CHANNELS = {
   decideSourceVersion: "citemind:sources:decide-version",
   updateSourceMaintenance: "citemind:sources:update-maintenance",
   decideSourceSuggestion: "citemind:sources:decide-suggestion",
+  getSourceOrganization: "citemind:sources:organization",
+  classifySource: "citemind:sources:classify",
+  suggestSourceTags: "citemind:sources:suggest-tags",
+  decideSourceTag: "citemind:sources:decide-tag",
+  decideSourceRelation: "citemind:sources:decide-relation",
   buildIndex: "citemind:indexes:build",
   deleteIndex: "citemind:indexes:delete",
   rebuildIndex: "citemind:indexes:rebuild",

@@ -19,6 +19,7 @@ from typing import Any, Protocol, cast
 from uuid import uuid4
 
 from citemind_worker.background_job_service import BackgroundJobService
+from citemind_worker.source_organization_service import SourceOrganizationService
 from citemind_worker.storage import StorageRuntime
 
 PARSER_VERSION = "citemind-parser-v1"
@@ -86,10 +87,12 @@ class SourceImportService:
         *,
         parser: DocumentParser | None = None,
         jobs: BackgroundJobService | None = None,
+        organizer: SourceOrganizationService | None = None,
     ) -> None:
         self.storage = storage
         self.parser = parser or DoclingFirstParser()
         self.jobs = jobs or BackgroundJobService(storage)
+        self.organizer = organizer or SourceOrganizationService(storage)
 
     def import_file(
         self,
@@ -524,6 +527,8 @@ class SourceImportService:
                     (version_id,),
                 )
             connection.commit()
+        if decision == "accept":
+            self._refresh_organization(source_id)
         return self.source_versions(source_id)
 
     def update_source_maintenance(
@@ -915,11 +920,16 @@ class SourceImportService:
                 index=0,
             ),
         )
+        self._refresh_organization(source_id)
         if duplicate_source_id:
             self._mark_duplicate(source_id, source_version_id, content_hash=content_hash)
             if duplicate_action != "ask":
                 return self.resolve_duplicate(source_id, duplicate_action)
         return self._import_result(source_id)
+
+    def _refresh_organization(self, source_id: str) -> None:
+        with suppress(OSError, ValueError, sqlite3.Error):
+            self.organizer.details(source_id)
 
     def _fail_import(
         self,

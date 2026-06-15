@@ -12,6 +12,8 @@ import {
   type ConversationMessagesResponse,
   type CreateBackgroundJobRequest,
   type DeleteSourceResponse,
+  type DecideSourceRelationRequest,
+  type DecideSourceTagRequest,
   type DecideSourceVersionRequest,
   type HybridSearchRequest,
   type HybridSearchResponse,
@@ -36,6 +38,7 @@ import {
   type SeedModelDescriptor,
   type SourceVersionDiffResponse,
   type SourceVersionsResponse,
+  type SourceOrganizationResponse,
   type UpdateSourceMaintenanceRequest,
   type UsageSummary,
   type UpdateSeedDefaultsRequest,
@@ -354,6 +357,53 @@ export function registerIpcHandlers(workerManager: PythonWorkerManager): void {
         sourceId: normalizeNonEmptyString(payload.sourceId, "来源 ID"),
         decision,
       },
+      30_000,
+    );
+  });
+  ipcMain.handle(IPC_CHANNELS.getSourceOrganization, (_event, sourceId) =>
+    workerManager.call<SourceOrganizationResponse>(
+      "sources.organization",
+      { sourceId: normalizeNonEmptyString(sourceId, "来源 ID") },
+      60_000,
+    ),
+  );
+  ipcMain.handle(IPC_CHANNELS.classifySource, (_event, sourceId) =>
+    workerManager.call<SourceOrganizationResponse>(
+      "sources.classify",
+      { sourceId: normalizeNonEmptyString(sourceId, "来源 ID") },
+      60_000,
+    ),
+  );
+  ipcMain.handle(IPC_CHANNELS.suggestSourceTags, async (_event, sourceId) => {
+    const summary = await seedStore.summary();
+    const apiKey = await seedStore.readApiKey();
+    if (!apiKey) {
+      throw new Error("请先配置并验证 Seed API");
+    }
+    return workerManager.call<SourceOrganizationResponse>(
+      "sources.suggest_tags",
+      {
+        sourceId: normalizeNonEmptyString(sourceId, "来源 ID"),
+        apiKey,
+        baseUrl: summary.baseUrl,
+        chatModel: summary.defaultChatModel,
+      },
+      120_000,
+    );
+  });
+  ipcMain.handle(IPC_CHANNELS.decideSourceTag, (_event, payload) => {
+    const request = normalizeDecideSourceTagRequest(payload);
+    return workerManager.call<SourceOrganizationResponse>(
+      "sources.decide_tag",
+      { ...request },
+      30_000,
+    );
+  });
+  ipcMain.handle(IPC_CHANNELS.decideSourceRelation, (_event, payload) => {
+    const request = normalizeDecideSourceRelationRequest(payload);
+    return workerManager.call<SourceOrganizationResponse>(
+      "sources.decide_relation",
+      { ...request },
       30_000,
     );
   });
@@ -777,6 +827,49 @@ function normalizeUpdateSourceMaintenanceRequest(
     replacementSourceId,
     reviewAt,
     expiryStatus,
+  };
+}
+
+function normalizeDecideSourceTagRequest(
+  payload: unknown,
+): DecideSourceTagRequest {
+  if (!isRecord(payload)) {
+    throw new Error("标签处理参数无效");
+  }
+  const decision = payload.decision;
+  if (decision !== "confirm" && decision !== "dismiss") {
+    throw new Error("标签处理方式无效");
+  }
+  const correctedTag = payload.correctedTag;
+  if (
+    correctedTag !== undefined &&
+    correctedTag !== null &&
+    typeof correctedTag !== "string"
+  ) {
+    throw new Error("修正标签无效");
+  }
+  return {
+    sourceId: normalizeNonEmptyString(payload.sourceId, "来源 ID"),
+    tagId: normalizeNonEmptyString(payload.tagId, "标签 ID"),
+    decision,
+    correctedTag,
+  };
+}
+
+function normalizeDecideSourceRelationRequest(
+  payload: unknown,
+): DecideSourceRelationRequest {
+  if (!isRecord(payload)) {
+    throw new Error("来源关联处理参数无效");
+  }
+  const decision = payload.decision;
+  if (decision !== "confirm" && decision !== "dismiss") {
+    throw new Error("来源关联处理方式无效");
+  }
+  return {
+    sourceId: normalizeNonEmptyString(payload.sourceId, "来源 ID"),
+    relationId: normalizeNonEmptyString(payload.relationId, "关联 ID"),
+    decision,
   };
 }
 

@@ -78,6 +78,16 @@ const api: DesktopApi = {
         sourceId,
         decision,
       }),
+    organization: (sourceId) =>
+      ipcRenderer.invoke(IPC_CHANNELS.getSourceOrganization, sourceId),
+    classify: (sourceId) =>
+      ipcRenderer.invoke(IPC_CHANNELS.classifySource, sourceId),
+    suggestTags: (sourceId) =>
+      ipcRenderer.invoke(IPC_CHANNELS.suggestSourceTags, sourceId),
+    decideTag: (request) =>
+      ipcRenderer.invoke(IPC_CHANNELS.decideSourceTag, request),
+    decideRelation: (request) =>
+      ipcRenderer.invoke(IPC_CHANNELS.decideSourceRelation, request),
   },
   indexes: {
     build: (knowledgeBaseId) =>

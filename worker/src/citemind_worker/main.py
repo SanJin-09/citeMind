@@ -19,6 +19,7 @@ from citemind_worker.model_service import SeedModelService
 from citemind_worker.retrieval_service import HybridRetrievalService
 from citemind_worker.rpc import JsonValue, RpcError, RpcServer, require_object_params
 from citemind_worker.source_import_service import SourceImportService
+from citemind_worker.source_organization_service import SourceOrganizationService
 from citemind_worker.storage import StorageRuntime
 
 
@@ -28,6 +29,7 @@ def create_server(
     knowledge_base_service: KnowledgeBaseService | None = None,
     background_job_service: BackgroundJobService | None = None,
     source_import_service: SourceImportService | None = None,
+    source_organization_service: SourceOrganizationService | None = None,
     indexing_service: IndexingService | None = None,
     retrieval_service: HybridRetrievalService | None = None,
     conversation_service: ConversationService | None = None,
@@ -43,6 +45,9 @@ def create_server(
     )
     source_imports = source_import_service or (
         SourceImportService(storage, jobs=background_jobs) if storage is not None else None
+    )
+    source_organizations = source_organization_service or (
+        SourceOrganizationService(storage) if storage is not None else None
     )
     indexes = indexing_service or (
         IndexingService(storage, jobs=background_jobs) if storage is not None else None
@@ -412,6 +417,67 @@ def create_server(
         except ValueError as error:
             raise RpcError(-32602, str(error)) from error
 
+    def source_organization(params: JsonValue) -> JsonValue:
+        service = _require_source_organization_service(source_organizations)
+        source_id = _required_str(require_object_params(params), "sourceId")
+        try:
+            return service.details(source_id)  # type: ignore[return-value]
+        except ValueError as error:
+            raise RpcError(-32602, str(error)) from error
+
+    def classify_source(params: JsonValue) -> JsonValue:
+        service = _require_source_organization_service(source_organizations)
+        source_id = _required_str(require_object_params(params), "sourceId")
+        try:
+            return service.classify(source_id)  # type: ignore[return-value]
+        except ValueError as error:
+            raise RpcError(-32602, str(error)) from error
+
+    async def suggest_source_tags(params: JsonValue) -> JsonValue:
+        values = require_object_params(params)
+        service = _require_source_organization_service(source_organizations)
+        source_id = _required_str(values, "sourceId")
+        api_key = _required_str(values, "apiKey")
+        base_url = _optional_str(values, "baseUrl", DEFAULT_ARK_BASE_URL)
+        chat_model = _optional_str(values, "chatModel", DEFAULT_CHAT_MODEL)
+        try:
+            return await service.suggest_tags(
+                source_id,
+                api_key=api_key,
+                base_url=base_url,
+                chat_model=chat_model,
+            )  # type: ignore[return-value]
+        except ValueError as error:
+            raise RpcError(-32602, str(error)) from error
+
+    def decide_source_tag(params: JsonValue) -> JsonValue:
+        values = require_object_params(params)
+        service = _require_source_organization_service(source_organizations)
+        source_id = _required_str(values, "sourceId")
+        tag_id = _required_str(values, "tagId")
+        decision = _required_str(values, "decision")
+        corrected_tag = _optional_nullable_str(values, "correctedTag")
+        try:
+            return service.decide_tag(
+                source_id,
+                tag_id,
+                decision,
+                corrected_tag=corrected_tag,
+            )  # type: ignore[return-value]
+        except ValueError as error:
+            raise RpcError(-32602, str(error)) from error
+
+    def decide_source_relation(params: JsonValue) -> JsonValue:
+        values = require_object_params(params)
+        service = _require_source_organization_service(source_organizations)
+        source_id = _required_str(values, "sourceId")
+        relation_id = _required_str(values, "relationId")
+        decision = _required_str(values, "decision")
+        try:
+            return service.decide_relation(source_id, relation_id, decision)  # type: ignore[return-value]
+        except ValueError as error:
+            raise RpcError(-32602, str(error)) from error
+
     async def build_index(params: JsonValue) -> JsonValue:
         values = require_object_params(params)
         service = _require_indexing_service(indexes)
@@ -690,6 +756,11 @@ def create_server(
     server.register("sources.update_maintenance", update_source_maintenance)
     server.register("sources.suggest_status", suggest_source_status)
     server.register("sources.decide_suggestion", decide_source_suggestion)
+    server.register("sources.organization", source_organization)
+    server.register("sources.classify", classify_source)
+    server.register("sources.suggest_tags", suggest_source_tags)
+    server.register("sources.decide_tag", decide_source_tag)
+    server.register("sources.decide_relation", decide_source_relation)
     server.register("indexes.build", build_index)
     server.register("indexes.delete", delete_indexes)
     server.register("indexes.rebuild", rebuild_index)
@@ -758,6 +829,14 @@ def _require_source_import_service(
 ) -> SourceImportService:
     if service is None:
         raise RpcError(-32013, "Source import service is not available")
+    return service
+
+
+def _require_source_organization_service(
+    service: SourceOrganizationService | None,
+) -> SourceOrganizationService:
+    if service is None:
+        raise RpcError(-32018, "Source organization service is not available")
     return service
 
 
