@@ -1,6 +1,16 @@
 import { dialog, ipcMain } from "electron";
 import { writeFile } from "node:fs/promises";
 import {
+  type AgentRunConfirmationRequest,
+  type AgentRunConfirmationResolution,
+  type AgentRunDelegationRequest,
+  type AgentRunListResponse,
+  type AgentRunOutputRequest,
+  type AgentRunRecoveryResponse,
+  type AgentRunResponse,
+  type AgentRunToolCallFinishRequest,
+  type AgentRunToolCallStartRequest,
+  type AgentRunTransitionRequest,
   type BackgroundJobListResponse,
   type BackgroundJobRecord,
   type BackgroundJobStatus,
@@ -10,6 +20,7 @@ import {
   type ConversationExportResult,
   type ConversationListResponse,
   type ConversationMessagesResponse,
+  type CreateAgentRunRequest,
   type CreateBackgroundJobRequest,
   type DeleteSourceResponse,
   type DecideSourceRelationRequest,
@@ -227,6 +238,103 @@ export function registerIpcHandlers(workerManager: PythonWorkerManager): void {
   ipcMain.handle(IPC_CHANNELS.recoverJobs, () =>
     workerManager.call<BackgroundJobListResponse>("jobs.recover"),
   );
+  ipcMain.handle(IPC_CHANNELS.createAgentRun, (_event, payload) => {
+    const request = normalizeCreateAgentRunRequest(payload);
+    return workerManager.call<AgentRunResponse>("agent_runs.create", request);
+  });
+  ipcMain.handle(IPC_CHANNELS.listAgentRuns, (_event, payload) => {
+    const request = normalizeListAgentRunsRequest(payload);
+    return workerManager.call<AgentRunListResponse>("agent_runs.list", request);
+  });
+  ipcMain.handle(IPC_CHANNELS.getAgentRun, (_event, runId) =>
+    workerManager.call<AgentRunResponse>("agent_runs.get", {
+      runId: normalizeAgentRunId(runId),
+    }),
+  );
+  ipcMain.handle(IPC_CHANNELS.updateAgentRunPlan, (_event, payload) => {
+    const request = normalizeAgentRunPlanRequest(payload);
+    return workerManager.call<AgentRunResponse>(
+      "agent_runs.update_plan",
+      request,
+    );
+  });
+  ipcMain.handle(IPC_CHANNELS.transitionAgentRun, (_event, payload) => {
+    const request = normalizeAgentRunTransitionRequest(payload);
+    return workerManager.call<AgentRunResponse>(
+      "agent_runs.transition",
+      request,
+    );
+  });
+  ipcMain.handle(IPC_CHANNELS.pauseAgentRun, (_event, runId) =>
+    workerManager.call<AgentRunResponse>("agent_runs.pause", {
+      runId: normalizeAgentRunId(runId),
+    }),
+  );
+  ipcMain.handle(IPC_CHANNELS.resumeAgentRun, (_event, runId) =>
+    workerManager.call<AgentRunResponse>("agent_runs.resume", {
+      runId: normalizeAgentRunId(runId),
+    }),
+  );
+  ipcMain.handle(IPC_CHANNELS.cancelAgentRun, (_event, payload) => {
+    const request = normalizeAgentRunCancelRequest(payload);
+    return workerManager.call<AgentRunResponse>("agent_runs.cancel", request);
+  });
+  ipcMain.handle(IPC_CHANNELS.retryAgentRun, (_event, runId) =>
+    workerManager.call<AgentRunResponse>("agent_runs.retry", {
+      runId: normalizeAgentRunId(runId),
+    }),
+  );
+  ipcMain.handle(IPC_CHANNELS.recoverAgentRuns, () =>
+    workerManager.call<AgentRunRecoveryResponse>("agent_runs.recover"),
+  );
+  ipcMain.handle(IPC_CHANNELS.startAgentRunToolCall, (_event, payload) => {
+    const request = normalizeAgentRunToolCallStartRequest(payload);
+    return workerManager.call<AgentRunResponse>(
+      "agent_runs.start_tool_call",
+      request,
+    );
+  });
+  ipcMain.handle(IPC_CHANNELS.finishAgentRunToolCall, (_event, payload) => {
+    const request = normalizeAgentRunToolCallFinishRequest(payload);
+    return workerManager.call<AgentRunResponse>(
+      "agent_runs.finish_tool_call",
+      request,
+    );
+  });
+  ipcMain.handle(
+    IPC_CHANNELS.requestAgentRunConfirmation,
+    (_event, payload) => {
+      const request = normalizeAgentRunConfirmationRequest(payload);
+      return workerManager.call<AgentRunResponse>(
+        "agent_runs.request_confirmation",
+        request,
+      );
+    },
+  );
+  ipcMain.handle(
+    IPC_CHANNELS.resolveAgentRunConfirmation,
+    (_event, payload) => {
+      const request = normalizeAgentRunConfirmationResolution(payload);
+      return workerManager.call<AgentRunResponse>(
+        "agent_runs.resolve_confirmation",
+        request,
+      );
+    },
+  );
+  ipcMain.handle(IPC_CHANNELS.recordAgentRunDelegation, (_event, payload) => {
+    const request = normalizeAgentRunDelegationRequest(payload);
+    return workerManager.call<AgentRunResponse>(
+      "agent_runs.record_delegation",
+      request,
+    );
+  });
+  ipcMain.handle(IPC_CHANNELS.saveAgentRunOutput, (_event, payload) => {
+    const request = normalizeAgentRunOutputRequest(payload);
+    return workerManager.call<AgentRunResponse>(
+      "agent_runs.save_output",
+      request,
+    );
+  });
   ipcMain.handle(
     IPC_CHANNELS.importSourceFiles,
     async (_event, knowledgeBaseId) => {
@@ -1116,6 +1224,24 @@ const JOB_STATUSES = new Set<BackgroundJobStatus>([
   "retrying",
 ]);
 
+const AGENT_RUN_STATUSES = new Set<AgentRunTransitionRequest["status"]>([
+  "planning",
+  "waiting_confirmation",
+  "executing",
+  "paused",
+  "completed",
+  "cancelled",
+  "failed",
+]);
+
+const AGENT_TOOL_CALL_FINAL_STATUSES = new Set<
+  AgentRunToolCallFinishRequest["status"]
+>(["completed", "failed", "cancelled"]);
+
+const AGENT_CONFIRMATION_FINAL_STATUSES = new Set<
+  AgentRunConfirmationResolution["status"]
+>(["confirmed", "rejected", "cancelled"]);
+
 function normalizeListJobsOptions(payload: unknown): Record<string, unknown> {
   if (payload === undefined || payload === null) {
     return {};
@@ -1231,9 +1357,255 @@ function normalizeUpdateJobRequest(
   return request;
 }
 
+function normalizeCreateAgentRunRequest(
+  payload: unknown,
+): CreateAgentRunRequest {
+  if (!isRecord(payload)) {
+    throw new Error("AgentRun 创建参数无效");
+  }
+  return {
+    knowledgeBaseId: normalizeKnowledgeBaseId(payload.knowledgeBaseId),
+    goal: normalizeNonEmptyString(payload.goal, "AgentRun 目标"),
+    skillId: normalizeNonEmptyString(payload.skillId, "Skill ID"),
+    skillVersion: normalizeNonEmptyString(payload.skillVersion, "Skill 版本"),
+    title: normalizeOptionalNullableString(payload.title, "AgentRun 标题"),
+    sourceIds: normalizeOptionalStringArray(payload.sourceIds, "来源范围"),
+    indexVersionId: normalizeOptionalNullableString(
+      payload.indexVersionId,
+      "索引版本 ID",
+    ),
+    models: normalizeOptionalRecord(payload.models, "模型配置"),
+    budgets: normalizeOptionalRecord(payload.budgets, "预算配置"),
+  };
+}
+
+function normalizeListAgentRunsRequest(
+  payload: unknown,
+): Record<string, unknown> {
+  if (!isRecord(payload)) {
+    throw new Error("AgentRun 列表参数无效");
+  }
+  const request: Record<string, unknown> = {
+    knowledgeBaseId: normalizeKnowledgeBaseId(payload.knowledgeBaseId),
+  };
+  if (payload.includeTerminal !== undefined) {
+    if (typeof payload.includeTerminal !== "boolean") {
+      throw new Error("AgentRun 完成状态筛选参数无效");
+    }
+    request.includeTerminal = payload.includeTerminal;
+  }
+  if (payload.limit !== undefined) {
+    if (typeof payload.limit !== "number" || !Number.isInteger(payload.limit)) {
+      throw new Error("AgentRun 数量限制无效");
+    }
+    request.limit = payload.limit;
+  }
+  return request;
+}
+
+function normalizeAgentRunPlanRequest(payload: unknown): {
+  runId: string;
+  plan: Record<string, unknown>;
+  summary?: string | null;
+} {
+  if (!isRecord(payload)) {
+    throw new Error("AgentRun 计划参数无效");
+  }
+  const plan = normalizeOptionalRecord(payload.plan, "AgentRun 计划");
+  if (!plan) {
+    throw new Error("AgentRun 计划不能为空");
+  }
+  return {
+    runId: normalizeAgentRunId(payload.runId),
+    plan,
+    summary: normalizeOptionalNullableString(payload.summary, "计划摘要"),
+  };
+}
+
+function normalizeAgentRunTransitionRequest(
+  payload: unknown,
+): AgentRunTransitionRequest {
+  if (!isRecord(payload)) {
+    throw new Error("AgentRun 状态迁移参数无效");
+  }
+  const status = payload.status;
+  if (!isAgentRunStatus(status)) {
+    throw new Error("AgentRun 状态无效");
+  }
+  return {
+    runId: normalizeAgentRunId(payload.runId),
+    status,
+    stage: normalizeOptionalNullableString(payload.stage, "阶段"),
+    summary: normalizeOptionalNullableString(payload.summary, "摘要"),
+    errorMessage: normalizeOptionalNullableString(
+      payload.errorMessage,
+      "错误信息",
+    ),
+    stopReason: normalizeOptionalNullableString(payload.stopReason, "停止原因"),
+  };
+}
+
+function normalizeAgentRunCancelRequest(payload: unknown): {
+  runId: string;
+  reason?: string | null;
+} {
+  if (!isRecord(payload)) {
+    throw new Error("AgentRun 取消参数无效");
+  }
+  return {
+    runId: normalizeAgentRunId(payload.runId),
+    reason: normalizeOptionalNullableString(payload.reason, "取消原因"),
+  };
+}
+
+function normalizeAgentRunToolCallStartRequest(
+  payload: unknown,
+): AgentRunToolCallStartRequest {
+  if (!isRecord(payload)) {
+    throw new Error("AgentRun Tool 调用参数无效");
+  }
+  return {
+    runId: normalizeAgentRunId(payload.runId),
+    toolName: normalizeNonEmptyString(payload.toolName, "Tool 名称"),
+    actionSummary: normalizeNonEmptyString(payload.actionSummary, "动作摘要"),
+    stepId: normalizeOptionalNullableString(payload.stepId, "步骤 ID"),
+    skillId: normalizeOptionalNullableString(payload.skillId, "Skill ID"),
+    skillVersion: normalizeOptionalNullableString(
+      payload.skillVersion,
+      "Skill 版本",
+    ),
+    workingDirectory: normalizeOptionalNullableString(
+      payload.workingDirectory,
+      "工作目录",
+    ),
+    sanitizedParams: normalizeOptionalRecord(
+      payload.sanitizedParams,
+      "脱敏参数",
+    ),
+  };
+}
+
+function normalizeAgentRunToolCallFinishRequest(
+  payload: unknown,
+): AgentRunToolCallFinishRequest {
+  if (!isRecord(payload)) {
+    throw new Error("AgentRun Tool 完成参数无效");
+  }
+  const status = payload.status;
+  if (!isAgentToolCallFinalStatus(status)) {
+    throw new Error("AgentRun Tool 状态无效");
+  }
+  return {
+    toolCallId: normalizeNonEmptyString(payload.toolCallId, "Tool 调用 ID"),
+    status,
+    exitCode: normalizeOptionalNullableInteger(payload.exitCode, "退出码"),
+    stdoutSummary: normalizeOptionalNullableString(
+      payload.stdoutSummary,
+      "标准输出摘要",
+    ),
+    stderrSummary: normalizeOptionalNullableString(
+      payload.stderrSummary,
+      "错误输出摘要",
+    ),
+    errorMessage: normalizeOptionalNullableString(
+      payload.errorMessage,
+      "错误信息",
+    ),
+  };
+}
+
+function normalizeAgentRunConfirmationRequest(
+  payload: unknown,
+): AgentRunConfirmationRequest {
+  if (!isRecord(payload)) {
+    throw new Error("AgentRun 确认请求参数无效");
+  }
+  return {
+    runId: normalizeAgentRunId(payload.runId),
+    prompt: normalizeNonEmptyString(payload.prompt, "确认提示"),
+    options: normalizeOptionalObjectArray(payload.options, "确认选项"),
+  };
+}
+
+function normalizeAgentRunConfirmationResolution(
+  payload: unknown,
+): AgentRunConfirmationResolution {
+  if (!isRecord(payload)) {
+    throw new Error("AgentRun 确认处理参数无效");
+  }
+  const status = payload.status;
+  if (!isAgentConfirmationFinalStatus(status)) {
+    throw new Error("AgentRun 确认状态无效");
+  }
+  return {
+    confirmationId: normalizeNonEmptyString(
+      payload.confirmationId,
+      "确认请求 ID",
+    ),
+    status,
+    decision: normalizeOptionalRecord(payload.decision, "确认决策"),
+  };
+}
+
+function normalizeAgentRunDelegationRequest(
+  payload: unknown,
+): AgentRunDelegationRequest {
+  if (!isRecord(payload)) {
+    throw new Error("AgentRun 委派参数无效");
+  }
+  return {
+    runId: normalizeAgentRunId(payload.runId),
+    delegateeRole: normalizeNonEmptyString(
+      payload.delegateeRole,
+      "子 Agent 角色",
+    ),
+    task: normalizeNonEmptyString(payload.task, "委派任务"),
+    inputScope: normalizeOptionalRecord(payload.inputScope, "输入范围"),
+    childRunId: normalizeOptionalNullableString(
+      payload.childRunId,
+      "子 AgentRun ID",
+    ),
+  };
+}
+
+function normalizeAgentRunOutputRequest(
+  payload: unknown,
+): AgentRunOutputRequest {
+  if (!isRecord(payload)) {
+    throw new Error("AgentRun 输出参数无效");
+  }
+  const outputType = payload.outputType;
+  if (
+    outputType !== "draft" &&
+    outputType !== "final" &&
+    outputType !== "intermediate"
+  ) {
+    throw new Error("AgentRun 输出类型无效");
+  }
+  const content = payload.content;
+  if (typeof content !== "string") {
+    throw new Error("AgentRun 输出内容必须是字符串");
+  }
+  return {
+    runId: normalizeAgentRunId(payload.runId),
+    outputType,
+    title: normalizeNonEmptyString(payload.title, "输出标题"),
+    content,
+    payload: normalizeOptionalRecord(payload.payload, "输出元数据"),
+    citations: normalizeOptionalCitationArray(payload.citations),
+  };
+}
+
 function normalizeJobId(value: unknown): string {
   if (typeof value !== "string" || !value.trim()) {
     throw new Error("任务 ID 无效");
+  }
+  return value;
+}
+
+function normalizeAgentRunId(value: unknown): string {
+  if (typeof value !== "string" || !value.trim()) {
+    throw new Error("AgentRun ID 无效");
   }
   return value;
 }
@@ -1254,6 +1626,135 @@ function isJobStatus(value: unknown): value is BackgroundJobStatus {
   return (
     typeof value === "string" && JOB_STATUSES.has(value as BackgroundJobStatus)
   );
+}
+
+function isAgentRunStatus(
+  value: unknown,
+): value is AgentRunTransitionRequest["status"] {
+  return (
+    typeof value === "string" &&
+    AGENT_RUN_STATUSES.has(value as AgentRunTransitionRequest["status"])
+  );
+}
+
+function isAgentToolCallFinalStatus(
+  value: unknown,
+): value is AgentRunToolCallFinishRequest["status"] {
+  return (
+    typeof value === "string" &&
+    AGENT_TOOL_CALL_FINAL_STATUSES.has(
+      value as AgentRunToolCallFinishRequest["status"],
+    )
+  );
+}
+
+function isAgentConfirmationFinalStatus(
+  value: unknown,
+): value is AgentRunConfirmationResolution["status"] {
+  return (
+    typeof value === "string" &&
+    AGENT_CONFIRMATION_FINAL_STATUSES.has(
+      value as AgentRunConfirmationResolution["status"],
+    )
+  );
+}
+
+function normalizeOptionalNullableString(
+  value: unknown,
+  label: string,
+): string | null | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (value === null) {
+    return null;
+  }
+  if (typeof value !== "string") {
+    throw new Error(`${label}必须是字符串`);
+  }
+  return value;
+}
+
+function normalizeOptionalNullableInteger(
+  value: unknown,
+  label: string,
+): number | null | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (value === null) {
+    return null;
+  }
+  if (typeof value !== "number" || !Number.isInteger(value)) {
+    throw new Error(`${label}必须是整数`);
+  }
+  return value;
+}
+
+function normalizeOptionalRecord(
+  value: unknown,
+  label: string,
+): Record<string, unknown> | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (!isRecord(value)) {
+    throw new Error(`${label}必须是对象`);
+  }
+  return value;
+}
+
+function normalizeOptionalStringArray(
+  value: unknown,
+  label: string,
+): string[] | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (!Array.isArray(value) || value.some((item) => typeof item !== "string")) {
+    throw new Error(`${label}必须是字符串数组`);
+  }
+  return value;
+}
+
+function normalizeOptionalObjectArray(
+  value: unknown,
+  label: string,
+): Array<Record<string, unknown>> | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (!Array.isArray(value) || value.some((item) => !isRecord(item))) {
+    throw new Error(`${label}必须是对象数组`);
+  }
+  return value;
+}
+
+function normalizeOptionalCitationArray(
+  value: unknown,
+): AgentRunOutputRequest["citations"] {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (!Array.isArray(value)) {
+    throw new Error("引用必须是数组");
+  }
+  return value.map((item) => {
+    if (!isRecord(item)) {
+      throw new Error("引用项必须是对象");
+    }
+    const paragraphIndex = item.paragraphIndex;
+    if (
+      typeof paragraphIndex !== "number" ||
+      !Number.isInteger(paragraphIndex)
+    ) {
+      throw new Error("引用段落序号必须是整数");
+    }
+    return {
+      paragraphIndex,
+      chunkId: normalizeNonEmptyString(item.chunkId, "引用片段 ID"),
+    };
+  });
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

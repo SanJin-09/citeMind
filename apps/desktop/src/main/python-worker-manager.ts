@@ -49,7 +49,7 @@ export class PythonWorkerManager {
 
   async call<T>(
     method: string,
-    params: Record<string, unknown> = {},
+    params: object = {},
     timeoutMs = 10_000,
   ): Promise<T> {
     if (!this.rpc || this.workerProcess?.exitCode !== null) {

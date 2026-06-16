@@ -44,6 +44,42 @@ const api: DesktopApi = {
     retry: (jobId) => ipcRenderer.invoke(IPC_CHANNELS.retryJob, jobId),
     recover: () => ipcRenderer.invoke(IPC_CHANNELS.recoverJobs),
   },
+  agentRuns: {
+    list: (knowledgeBaseId, options) =>
+      ipcRenderer.invoke(IPC_CHANNELS.listAgentRuns, {
+        knowledgeBaseId,
+        ...options,
+      }),
+    get: (runId) => ipcRenderer.invoke(IPC_CHANNELS.getAgentRun, runId),
+    create: (request) =>
+      ipcRenderer.invoke(IPC_CHANNELS.createAgentRun, request),
+    updatePlan: (runId, plan, summary) =>
+      ipcRenderer.invoke(IPC_CHANNELS.updateAgentRunPlan, {
+        runId,
+        plan,
+        summary,
+      }),
+    transition: (request) =>
+      ipcRenderer.invoke(IPC_CHANNELS.transitionAgentRun, request),
+    pause: (runId) => ipcRenderer.invoke(IPC_CHANNELS.pauseAgentRun, runId),
+    resume: (runId) => ipcRenderer.invoke(IPC_CHANNELS.resumeAgentRun, runId),
+    cancel: (runId, reason) =>
+      ipcRenderer.invoke(IPC_CHANNELS.cancelAgentRun, { runId, reason }),
+    retry: (runId) => ipcRenderer.invoke(IPC_CHANNELS.retryAgentRun, runId),
+    recover: () => ipcRenderer.invoke(IPC_CHANNELS.recoverAgentRuns),
+    startToolCall: (request) =>
+      ipcRenderer.invoke(IPC_CHANNELS.startAgentRunToolCall, request),
+    finishToolCall: (request) =>
+      ipcRenderer.invoke(IPC_CHANNELS.finishAgentRunToolCall, request),
+    requestConfirmation: (request) =>
+      ipcRenderer.invoke(IPC_CHANNELS.requestAgentRunConfirmation, request),
+    resolveConfirmation: (request) =>
+      ipcRenderer.invoke(IPC_CHANNELS.resolveAgentRunConfirmation, request),
+    recordDelegation: (request) =>
+      ipcRenderer.invoke(IPC_CHANNELS.recordAgentRunDelegation, request),
+    saveOutput: (request) =>
+      ipcRenderer.invoke(IPC_CHANNELS.saveAgentRunOutput, request),
+  },
   sources: {
     importFiles: (knowledgeBaseId) =>
       ipcRenderer.invoke(IPC_CHANNELS.importSourceFiles, knowledgeBaseId),

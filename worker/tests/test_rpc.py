@@ -131,7 +131,7 @@ def test_health_reports_initialized_storage(tmp_path: Path) -> None:
 
     assert response["result"]["storage"] == {
         "ready": True,
-        "schemaVersion": 6,
+        "schemaVersion": 7,
         "fts5Enabled": True,
         "vectorDimension": 3,
     }

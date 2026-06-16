@@ -3,6 +3,7 @@ import os
 import sys
 from pathlib import Path
 
+from citemind_worker.agent_run_service import AgentRunService
 from citemind_worker.background_job_service import BackgroundJobService
 from citemind_worker.conversation_service import ConversationService
 from citemind_worker.indexing_service import IndexingService
@@ -36,6 +37,7 @@ def create_server(
     conversation_service: ConversationService | None = None,
     maintenance_service: MaintenanceService | None = None,
     writing_workflow_service: WritingWorkflowService | None = None,
+    agent_run_service: AgentRunService | None = None,
 ) -> RpcServer:
     server = RpcServer()
     seed_models = model_service or (SeedModelService(storage) if storage is not None else None)
@@ -66,6 +68,7 @@ def create_server(
     writing = writing_workflow_service or (
         WritingWorkflowService(storage) if storage is not None else None
     )
+    agent_runs = agent_run_service or (AgentRunService(storage) if storage is not None else None)
 
     def health(params: JsonValue) -> JsonValue:
         require_object_params(params)
@@ -266,6 +269,245 @@ def create_server(
         require_object_params(params)
         service = _require_background_job_service(background_jobs)
         return service.recover_unfinished()  # type: ignore[return-value]
+
+    def create_agent_run(params: JsonValue) -> JsonValue:
+        values = require_object_params(params)
+        service = _require_agent_run_service(agent_runs)
+        knowledge_base_id = _required_str(values, "knowledgeBaseId")
+        goal = _required_str(values, "goal")
+        skill_id = _required_str(values, "skillId")
+        skill_version = _required_str(values, "skillVersion")
+        title = _optional_nullable_str(values, "title")
+        source_ids = _optional_string_list(values, "sourceIds")
+        index_version_id = _optional_nullable_str(values, "indexVersionId")
+        models = _optional_dict(values, "models")
+        budgets = _optional_dict(values, "budgets")
+        try:
+            return service.create(
+                knowledge_base_id,
+                goal=goal,
+                skill_id=skill_id,
+                skill_version=skill_version,
+                title=title,
+                source_ids=source_ids,
+                index_version_id=index_version_id,
+                models=models,
+                budgets=budgets,
+            )  # type: ignore[return-value]
+        except ValueError as error:
+            raise RpcError(-32602, str(error)) from error
+
+    def list_agent_runs(params: JsonValue) -> JsonValue:
+        values = require_object_params(params)
+        service = _require_agent_run_service(agent_runs)
+        knowledge_base_id = _required_str(values, "knowledgeBaseId")
+        include_terminal = _optional_bool(values, "includeTerminal", True)
+        limit = _optional_int(values, "limit", 50)
+        try:
+            return service.list_runs(
+                knowledge_base_id,
+                include_terminal=include_terminal,
+                limit=limit,
+            )  # type: ignore[return-value]
+        except ValueError as error:
+            raise RpcError(-32602, str(error)) from error
+
+    def get_agent_run(params: JsonValue) -> JsonValue:
+        service = _require_agent_run_service(agent_runs)
+        run_id = _required_str(require_object_params(params), "runId")
+        try:
+            return service.get(run_id)  # type: ignore[return-value]
+        except ValueError as error:
+            raise RpcError(-32602, str(error)) from error
+
+    def update_agent_run_plan(params: JsonValue) -> JsonValue:
+        values = require_object_params(params)
+        service = _require_agent_run_service(agent_runs)
+        run_id = _required_str(values, "runId")
+        plan = _optional_dict(values, "plan")
+        if plan is None:
+            raise RpcError(-32602, "plan must be an object")
+        summary = _optional_nullable_str(values, "summary")
+        try:
+            return service.update_plan(run_id, plan, summary=summary)  # type: ignore[return-value]
+        except ValueError as error:
+            raise RpcError(-32602, str(error)) from error
+
+    def transition_agent_run(params: JsonValue) -> JsonValue:
+        values = require_object_params(params)
+        service = _require_agent_run_service(agent_runs)
+        run_id = _required_str(values, "runId")
+        status = _required_str(values, "status")
+        stage = _optional_nullable_str(values, "stage")
+        summary = _optional_nullable_str(values, "summary")
+        error_message = _optional_nullable_str(values, "errorMessage")
+        stop_reason = _optional_nullable_str(values, "stopReason")
+        try:
+            return service.transition(
+                run_id,
+                status,  # type: ignore[arg-type]
+                stage=stage,
+                summary=summary,
+                error_message=error_message,
+                stop_reason=stop_reason,
+            )  # type: ignore[return-value]
+        except ValueError as error:
+            raise RpcError(-32602, str(error)) from error
+
+    def pause_agent_run(params: JsonValue) -> JsonValue:
+        service = _require_agent_run_service(agent_runs)
+        run_id = _required_str(require_object_params(params), "runId")
+        try:
+            return service.pause(run_id)  # type: ignore[return-value]
+        except ValueError as error:
+            raise RpcError(-32602, str(error)) from error
+
+    def resume_agent_run(params: JsonValue) -> JsonValue:
+        service = _require_agent_run_service(agent_runs)
+        run_id = _required_str(require_object_params(params), "runId")
+        try:
+            return service.resume(run_id)  # type: ignore[return-value]
+        except ValueError as error:
+            raise RpcError(-32602, str(error)) from error
+
+    def cancel_agent_run(params: JsonValue) -> JsonValue:
+        values = require_object_params(params)
+        service = _require_agent_run_service(agent_runs)
+        run_id = _required_str(values, "runId")
+        reason = _optional_nullable_str(values, "reason")
+        try:
+            return service.cancel(run_id, reason=reason)  # type: ignore[return-value]
+        except ValueError as error:
+            raise RpcError(-32602, str(error)) from error
+
+    def retry_agent_run(params: JsonValue) -> JsonValue:
+        service = _require_agent_run_service(agent_runs)
+        run_id = _required_str(require_object_params(params), "runId")
+        try:
+            return service.retry(run_id)  # type: ignore[return-value]
+        except ValueError as error:
+            raise RpcError(-32602, str(error)) from error
+
+    def recover_agent_runs(params: JsonValue) -> JsonValue:
+        require_object_params(params)
+        service = _require_agent_run_service(agent_runs)
+        return service.recover_unfinished()  # type: ignore[return-value]
+
+    def start_agent_tool_call(params: JsonValue) -> JsonValue:
+        values = require_object_params(params)
+        service = _require_agent_run_service(agent_runs)
+        run_id = _required_str(values, "runId")
+        tool_name = _required_str(values, "toolName")
+        action_summary = _required_str(values, "actionSummary")
+        step_id = _optional_nullable_str(values, "stepId")
+        skill_id = _optional_nullable_str(values, "skillId")
+        skill_version = _optional_nullable_str(values, "skillVersion")
+        working_directory = _optional_nullable_str(values, "workingDirectory")
+        sanitized_params = _optional_dict(values, "sanitizedParams")
+        try:
+            return service.start_tool_call(
+                run_id,
+                tool_name=tool_name,
+                action_summary=action_summary,
+                step_id=step_id,
+                skill_id=skill_id,
+                skill_version=skill_version,
+                working_directory=working_directory,
+                sanitized_params=sanitized_params,
+            )  # type: ignore[return-value]
+        except ValueError as error:
+            raise RpcError(-32602, str(error)) from error
+
+    def finish_agent_tool_call(params: JsonValue) -> JsonValue:
+        values = require_object_params(params)
+        service = _require_agent_run_service(agent_runs)
+        tool_call_id = _required_str(values, "toolCallId")
+        status = _required_str(values, "status")
+        exit_code = _optional_nullable_int(values, "exitCode")
+        stdout_summary = _optional_nullable_str(values, "stdoutSummary")
+        stderr_summary = _optional_nullable_str(values, "stderrSummary")
+        error_message = _optional_nullable_str(values, "errorMessage")
+        try:
+            return service.finish_tool_call(
+                tool_call_id,
+                status=status,
+                exit_code=exit_code,
+                stdout_summary=stdout_summary,
+                stderr_summary=stderr_summary,
+                error_message=error_message,
+            )  # type: ignore[return-value]
+        except ValueError as error:
+            raise RpcError(-32602, str(error)) from error
+
+    def request_agent_confirmation(params: JsonValue) -> JsonValue:
+        values = require_object_params(params)
+        service = _require_agent_run_service(agent_runs)
+        run_id = _required_str(values, "runId")
+        prompt = _required_str(values, "prompt")
+        options = _optional_object_list(values, "options")
+        try:
+            return service.request_confirmation(
+                run_id,
+                prompt=prompt,
+                options=options,
+            )  # type: ignore[return-value]
+        except ValueError as error:
+            raise RpcError(-32602, str(error)) from error
+
+    def resolve_agent_confirmation(params: JsonValue) -> JsonValue:
+        values = require_object_params(params)
+        service = _require_agent_run_service(agent_runs)
+        confirmation_id = _required_str(values, "confirmationId")
+        status = _required_str(values, "status")
+        decision = _optional_dict(values, "decision") or {}
+        try:
+            return service.resolve_confirmation(
+                confirmation_id,
+                decision=decision,
+                status=status,
+            )  # type: ignore[return-value]
+        except ValueError as error:
+            raise RpcError(-32602, str(error)) from error
+
+    def record_agent_delegation(params: JsonValue) -> JsonValue:
+        values = require_object_params(params)
+        service = _require_agent_run_service(agent_runs)
+        run_id = _required_str(values, "runId")
+        delegatee_role = _required_str(values, "delegateeRole")
+        task = _required_str(values, "task")
+        input_scope = _optional_dict(values, "inputScope")
+        child_run_id = _optional_nullable_str(values, "childRunId")
+        try:
+            return service.record_delegation(
+                run_id,
+                delegatee_role=delegatee_role,
+                task=task,
+                input_scope=input_scope,
+                child_run_id=child_run_id,
+            )  # type: ignore[return-value]
+        except ValueError as error:
+            raise RpcError(-32602, str(error)) from error
+
+    def save_agent_output(params: JsonValue) -> JsonValue:
+        values = require_object_params(params)
+        service = _require_agent_run_service(agent_runs)
+        run_id = _required_str(values, "runId")
+        output_type = _required_str(values, "outputType")
+        title = _required_str(values, "title")
+        content = _required_str(values, "content")
+        payload = _optional_dict(values, "payload")
+        citations = _optional_object_list(values, "citations")
+        try:
+            return service.save_output(
+                run_id,
+                output_type=output_type,
+                title=title,
+                content=content,
+                payload=payload,
+                citations=citations,
+            )  # type: ignore[return-value]
+        except ValueError as error:
+            raise RpcError(-32602, str(error)) from error
 
     def import_file(params: JsonValue) -> JsonValue:
         values = require_object_params(params)
@@ -837,6 +1079,22 @@ def create_server(
     server.register("jobs.cancel", cancel_job)
     server.register("jobs.retry", retry_job)
     server.register("jobs.recover", recover_jobs)
+    server.register("agent_runs.create", create_agent_run)
+    server.register("agent_runs.list", list_agent_runs)
+    server.register("agent_runs.get", get_agent_run)
+    server.register("agent_runs.update_plan", update_agent_run_plan)
+    server.register("agent_runs.transition", transition_agent_run)
+    server.register("agent_runs.pause", pause_agent_run)
+    server.register("agent_runs.resume", resume_agent_run)
+    server.register("agent_runs.cancel", cancel_agent_run)
+    server.register("agent_runs.retry", retry_agent_run)
+    server.register("agent_runs.recover", recover_agent_runs)
+    server.register("agent_runs.start_tool_call", start_agent_tool_call)
+    server.register("agent_runs.finish_tool_call", finish_agent_tool_call)
+    server.register("agent_runs.request_confirmation", request_agent_confirmation)
+    server.register("agent_runs.resolve_confirmation", resolve_agent_confirmation)
+    server.register("agent_runs.record_delegation", record_agent_delegation)
+    server.register("agent_runs.save_output", save_agent_output)
     server.register("sources.import_file", import_file)
     server.register("sources.import_web", import_web)
     server.register("sources.parse_checks", parse_checks)
@@ -886,6 +1144,7 @@ async def serve() -> None:
     storage = StorageRuntime(_resolve_data_root())
     storage.initialize()
     BackgroundJobService(storage).recover_unfinished()
+    AgentRunService(storage).recover_unfinished()
     server = create_server(storage)
     await server.serve(sys.stdin, sys.stdout)
 
@@ -922,6 +1181,14 @@ def _require_background_job_service(
 ) -> BackgroundJobService:
     if service is None:
         raise RpcError(-32012, "Background job service is not available")
+    return service
+
+
+def _require_agent_run_service(
+    service: AgentRunService | None,
+) -> AgentRunService:
+    if service is None:
+        raise RpcError(-32020, "AgentRun service is not available")
     return service
 
 
@@ -1022,6 +1289,15 @@ def _optional_int(values: dict[str, JsonValue], key: str, fallback: int) -> int:
     return value
 
 
+def _optional_nullable_int(values: dict[str, JsonValue], key: str) -> int | None:
+    value = values.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, int):
+        raise RpcError(-32602, f"{key} must be an integer")
+    return value
+
+
 def _optional_float(values: dict[str, JsonValue], key: str) -> float | None:
     value = values.get(key)
     if value is None:
@@ -1037,4 +1313,25 @@ def _optional_dict(values: dict[str, JsonValue], key: str) -> dict[str, object] 
         return None
     if not isinstance(value, dict):
         raise RpcError(-32602, f"{key} must be an object")
+    return value  # type: ignore[return-value]
+
+
+def _optional_string_list(values: dict[str, JsonValue], key: str) -> list[str] | None:
+    value = values.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
+        raise RpcError(-32602, f"{key} must be a string array")
+    return [item for item in value if isinstance(item, str)]
+
+
+def _optional_object_list(
+    values: dict[str, JsonValue],
+    key: str,
+) -> list[dict[str, object]] | None:
+    value = values.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, list) or any(not isinstance(item, dict) for item in value):
+        raise RpcError(-32602, f"{key} must be an object array")
     return value  # type: ignore[return-value]

@@ -47,11 +47,7 @@ export class JsonRpcClient {
     });
   }
 
-  call<T>(
-    method: string,
-    params: Record<string, unknown> = {},
-    timeoutMs = 10_000,
-  ): Promise<T> {
+  call<T>(method: string, params: object = {}, timeoutMs = 10_000): Promise<T> {
     if (this.disposed) {
       return Promise.reject(new Error("JSON-RPC client is disposed"));
     }
@@ -74,7 +70,7 @@ export class JsonRpcClient {
     });
   }
 
-  notify(method: string, params: Record<string, unknown> = {}): void {
+  notify(method: string, params: object = {}): void {
     if (!this.disposed) {
       this.child.stdin.write(
         `${JSON.stringify({ jsonrpc: "2.0", method, params })}\n`,

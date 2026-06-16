@@ -728,6 +728,210 @@ export interface WritingProjectListResponse {
   projects: WritingProjectRecord[];
 }
 
+export type AgentRunStatus =
+  | "planning"
+  | "waiting_confirmation"
+  | "executing"
+  | "paused"
+  | "completed"
+  | "cancelled"
+  | "failed";
+
+export interface AgentRunRecord {
+  id: string;
+  knowledgeBaseId: string;
+  title: string;
+  goal: string;
+  skillId: string;
+  skillVersion: string;
+  status: AgentRunStatus;
+  sourceScope: string[];
+  indexVersionId: string | null;
+  models: Record<string, unknown>;
+  budgets: Record<string, unknown>;
+  usage: Record<string, unknown>;
+  plan: Record<string, unknown>;
+  draft: Record<string, unknown>;
+  finalOutput: Record<string, unknown>;
+  errorMessage: string | null;
+  stopReason: string | null;
+  retryCount: number;
+  startedAt: string | null;
+  completedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AgentRunEventRecord {
+  id: string;
+  runId: string;
+  sequence: number;
+  eventType: string;
+  stage: string | null;
+  status: string | null;
+  title: string;
+  summary: string | null;
+  payload: Record<string, unknown>;
+  createdAt: string;
+}
+
+export interface AgentRunToolCallRecord {
+  id: string;
+  runId: string;
+  stepId: string | null;
+  toolName: string;
+  skillId: string | null;
+  skillVersion: string | null;
+  actionSummary: string;
+  workingDirectory: string | null;
+  sanitizedParams: Record<string, unknown>;
+  status: "pending" | "running" | "completed" | "failed" | "cancelled";
+  startedAt: string;
+  completedAt: string | null;
+  durationMs: number | null;
+  exitCode: number | null;
+  stdoutSummary: string | null;
+  stderrSummary: string | null;
+  errorMessage: string | null;
+}
+
+export interface AgentRunConfirmationRecord {
+  id: string;
+  runId: string;
+  prompt: string;
+  status: "pending" | "confirmed" | "rejected" | "cancelled";
+  options: unknown[];
+  decision: Record<string, unknown>;
+  requestedAt: string;
+  resolvedAt: string | null;
+}
+
+export interface AgentRunDelegationRecord {
+  id: string;
+  runId: string;
+  childRunId: string | null;
+  delegateeRole: string;
+  task: string;
+  inputScope: Record<string, unknown>;
+  status: "pending" | "running" | "completed" | "failed" | "cancelled";
+  output: Record<string, unknown>;
+  stopReason: string | null;
+  createdAt: string;
+  completedAt: string | null;
+}
+
+export interface AgentRunOutputRecord {
+  id: string;
+  runId: string;
+  outputType: "draft" | "final" | "intermediate";
+  title: string;
+  content: string;
+  payload: Record<string, unknown>;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AgentRunCitationRecord {
+  id: string;
+  runId: string;
+  outputId: string | null;
+  paragraphIndex: number;
+  chunkId: string;
+  createdAt: string;
+}
+
+export interface AgentRunResponse {
+  run: AgentRunRecord;
+  events: AgentRunEventRecord[];
+  toolCalls: AgentRunToolCallRecord[];
+  confirmations: AgentRunConfirmationRecord[];
+  delegations: AgentRunDelegationRecord[];
+  outputs: AgentRunOutputRecord[];
+  citations: AgentRunCitationRecord[];
+}
+
+export interface AgentRunListResponse {
+  knowledgeBaseId: string;
+  runs: AgentRunRecord[];
+}
+
+export interface AgentRunRecoveryResponse {
+  runs: AgentRunRecord[];
+}
+
+export interface CreateAgentRunRequest {
+  knowledgeBaseId: string;
+  goal: string;
+  skillId: string;
+  skillVersion: string;
+  title?: string | null;
+  sourceIds?: string[];
+  indexVersionId?: string | null;
+  models?: Record<string, unknown>;
+  budgets?: Record<string, unknown>;
+}
+
+export interface AgentRunTransitionRequest {
+  runId: string;
+  status: AgentRunStatus;
+  stage?: string | null;
+  summary?: string | null;
+  errorMessage?: string | null;
+  stopReason?: string | null;
+}
+
+export interface AgentRunToolCallStartRequest {
+  runId: string;
+  toolName: string;
+  actionSummary: string;
+  stepId?: string | null;
+  skillId?: string | null;
+  skillVersion?: string | null;
+  workingDirectory?: string | null;
+  sanitizedParams?: Record<string, unknown>;
+}
+
+export interface AgentRunToolCallFinishRequest {
+  toolCallId: string;
+  status: "completed" | "failed" | "cancelled";
+  exitCode?: number | null;
+  stdoutSummary?: string | null;
+  stderrSummary?: string | null;
+  errorMessage?: string | null;
+}
+
+export interface AgentRunConfirmationRequest {
+  runId: string;
+  prompt: string;
+  options?: Array<Record<string, unknown>>;
+}
+
+export interface AgentRunConfirmationResolution {
+  confirmationId: string;
+  status: "confirmed" | "rejected" | "cancelled";
+  decision?: Record<string, unknown>;
+}
+
+export interface AgentRunDelegationRequest {
+  runId: string;
+  delegateeRole: string;
+  task: string;
+  inputScope?: Record<string, unknown>;
+  childRunId?: string | null;
+}
+
+export interface AgentRunOutputRequest {
+  runId: string;
+  outputType: "draft" | "final" | "intermediate";
+  title: string;
+  content: string;
+  payload?: Record<string, unknown>;
+  citations?: Array<{
+    paragraphIndex: number;
+    chunkId: string;
+  }>;
+}
+
 export interface CreateWritingProjectRequest {
   knowledgeBaseId: string;
   goal: string;
@@ -769,7 +973,20 @@ export interface MaintenanceStatus {
   sourceCount: number;
   chunkCount: number;
   recyclableIndexCount: number;
+  recyclableSourceVersionCount: number;
+  qualityMetrics: {
+    parseSuccessRate: number | null;
+    indexDurationMs: number | null;
+    retrievalLatencyMs: number | null;
+    firstTokenLatencyMs: number | null;
+    citationFailureRate: number | null;
+    embeddingCalls: number;
+    embeddingTexts: number;
+    embeddingRetries: number;
+    embeddingInputCharacters: number;
+  };
   recycledIndexCount?: number;
+  recycledSourceVersionCount?: number;
   removedFileCount?: number;
   removedVectorCount?: number;
   reclaimedBytes?: number;
@@ -823,6 +1040,46 @@ export interface DesktopApi {
     cancel: (jobId: string) => Promise<BackgroundJobRecord>;
     retry: (jobId: string) => Promise<BackgroundJobRecord>;
     recover: () => Promise<BackgroundJobListResponse>;
+  };
+  agentRuns: {
+    list: (
+      knowledgeBaseId: string,
+      options?: { includeTerminal?: boolean; limit?: number },
+    ) => Promise<AgentRunListResponse>;
+    get: (runId: string) => Promise<AgentRunResponse>;
+    create: (request: CreateAgentRunRequest) => Promise<AgentRunResponse>;
+    updatePlan: (
+      runId: string,
+      plan: Record<string, unknown>,
+      summary?: string | null,
+    ) => Promise<AgentRunResponse>;
+    transition: (
+      request: AgentRunTransitionRequest,
+    ) => Promise<AgentRunResponse>;
+    pause: (runId: string) => Promise<AgentRunResponse>;
+    resume: (runId: string) => Promise<AgentRunResponse>;
+    cancel: (
+      runId: string,
+      reason?: string | null,
+    ) => Promise<AgentRunResponse>;
+    retry: (runId: string) => Promise<AgentRunResponse>;
+    recover: () => Promise<AgentRunRecoveryResponse>;
+    startToolCall: (
+      request: AgentRunToolCallStartRequest,
+    ) => Promise<AgentRunResponse>;
+    finishToolCall: (
+      request: AgentRunToolCallFinishRequest,
+    ) => Promise<AgentRunResponse>;
+    requestConfirmation: (
+      request: AgentRunConfirmationRequest,
+    ) => Promise<AgentRunResponse>;
+    resolveConfirmation: (
+      request: AgentRunConfirmationResolution,
+    ) => Promise<AgentRunResponse>;
+    recordDelegation: (
+      request: AgentRunDelegationRequest,
+    ) => Promise<AgentRunResponse>;
+    saveOutput: (request: AgentRunOutputRequest) => Promise<AgentRunResponse>;
   };
   sources: {
     importFiles: (knowledgeBaseId: string) => Promise<ImportFilesResponse>;
@@ -942,6 +1199,22 @@ export const IPC_CHANNELS = {
   cancelJob: "citemind:jobs:cancel",
   retryJob: "citemind:jobs:retry",
   recoverJobs: "citemind:jobs:recover",
+  createAgentRun: "citemind:agent-runs:create",
+  listAgentRuns: "citemind:agent-runs:list",
+  getAgentRun: "citemind:agent-runs:get",
+  updateAgentRunPlan: "citemind:agent-runs:update-plan",
+  transitionAgentRun: "citemind:agent-runs:transition",
+  pauseAgentRun: "citemind:agent-runs:pause",
+  resumeAgentRun: "citemind:agent-runs:resume",
+  cancelAgentRun: "citemind:agent-runs:cancel",
+  retryAgentRun: "citemind:agent-runs:retry",
+  recoverAgentRuns: "citemind:agent-runs:recover",
+  startAgentRunToolCall: "citemind:agent-runs:start-tool-call",
+  finishAgentRunToolCall: "citemind:agent-runs:finish-tool-call",
+  requestAgentRunConfirmation: "citemind:agent-runs:request-confirmation",
+  resolveAgentRunConfirmation: "citemind:agent-runs:resolve-confirmation",
+  recordAgentRunDelegation: "citemind:agent-runs:record-delegation",
+  saveAgentRunOutput: "citemind:agent-runs:save-output",
   importSourceFiles: "citemind:sources:import-files",
   importWebSource: "citemind:sources:import-web",
   listParseChecks: "citemind:sources:parse-checks",
