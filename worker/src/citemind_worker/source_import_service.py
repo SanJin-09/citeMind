@@ -15,10 +15,12 @@ from datetime import UTC, datetime
 from difflib import SequenceMatcher, unified_diff
 from html.parser import HTMLParser
 from pathlib import Path
+from time import perf_counter
 from typing import Any, Protocol, cast
 from uuid import uuid4
 
 from citemind_worker.background_job_service import BackgroundJobService
+from citemind_worker.quality_metrics import record_metric
 from citemind_worker.source_organization_service import SourceOrganizationService
 from citemind_worker.storage import StorageRuntime
 
@@ -141,10 +143,11 @@ class SourceImportService:
         )
         job = self.jobs.create("source.import", source_id)
         self.jobs.update_progress(str(job["id"]), status="running", progress=0.1)
+        started = perf_counter()
 
         try:
             parsed = self.parser.parse_file(object_path, source_type)
-            return self._complete_parsed_import(
+            result = self._complete_parsed_import(
                 job_id=str(job["id"]),
                 knowledge_base_id=knowledge_base_id,
                 source_id=source_id,
@@ -158,7 +161,7 @@ class SourceImportService:
                 duplicate_action=duplicate_action,
             )
         except Exception as error:
-            return self._fail_import(
+            result = self._fail_import(
                 job_id=str(job["id"]),
                 source_id=source_id,
                 source_version_id=source_version_id,
@@ -166,6 +169,13 @@ class SourceImportService:
                 source_type=source_type,
                 message=_public_error(error),
             )
+        self._record_parse_metrics(
+            knowledge_base_id,
+            source_type=source_type,
+            started=started,
+            success=_parse_result_succeeded(result),
+        )
+        return result
 
     def import_web(
         self,
@@ -207,6 +217,7 @@ class SourceImportService:
         )
         job = self.jobs.create("source.import", source_id)
         self.jobs.update_progress(str(job["id"]), status="running", progress=0.1)
+        started = perf_counter()
 
         try:
             parsed = self.parser.parse_web(clean_url, snapshot_path)
@@ -215,7 +226,7 @@ class SourceImportService:
             duplicate_source_id = self._find_duplicate_original(
                 knowledge_base_id, snapshot_hash, excluding_source_id=source_id
             )
-            return self._complete_parsed_import(
+            result = self._complete_parsed_import(
                 job_id=str(job["id"]),
                 knowledge_base_id=knowledge_base_id,
                 source_id=source_id,
@@ -229,7 +240,7 @@ class SourceImportService:
                 duplicate_action=duplicate_action,
             )
         except Exception as error:
-            return self._fail_import(
+            result = self._fail_import(
                 job_id=str(job["id"]),
                 source_id=source_id,
                 source_version_id=source_version_id,
@@ -237,6 +248,39 @@ class SourceImportService:
                 source_type="web",
                 message=_public_error(error),
             )
+        self._record_parse_metrics(
+            knowledge_base_id,
+            source_type="web",
+            started=started,
+            success=_parse_result_succeeded(result),
+        )
+        return result
+
+    def _record_parse_metrics(
+        self,
+        knowledge_base_id: str,
+        *,
+        source_type: str,
+        started: float,
+        success: bool,
+    ) -> None:
+        labels = {"sourceType": source_type, "status": "success" if success else "failed"}
+        record_metric(
+            self.storage,
+            "parse.success",
+            int(success),
+            "ratio",
+            knowledge_base_id=knowledge_base_id,
+            labels=labels,
+        )
+        record_metric(
+            self.storage,
+            "parse.duration_ms",
+            round((perf_counter() - started) * 1000),
+            "ms",
+            knowledge_base_id=knowledge_base_id,
+            labels=labels,
+        )
 
     def check_web_updates(
         self,
@@ -2114,6 +2158,11 @@ def _stage_checkpoint(
 def _public_error(error: Exception) -> str:
     message = str(error).strip()
     return message or error.__class__.__name__
+
+
+def _parse_result_succeeded(result: dict[str, object]) -> bool:
+    check = result.get("parseCheck")
+    return isinstance(check, dict) and check.get("status") != "failed"
 
 
 def _duplicate_action(value: str) -> str:

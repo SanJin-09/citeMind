@@ -1,0 +1,103 @@
+{
+  "regression-page.pdf": {
+    "sourceType": "pdf",
+    "blocks": [
+      {
+        "text": "数据库采用分层架构，事务日志用于恢复关键业务数据。",
+        "location": {
+          "pageNumber": 7,
+          "boundingBox": {
+            "x": 72,
+            "y": 108,
+            "width": 420,
+            "height": 64
+          },
+          "headingPath": [
+            "数据库架构",
+            "恢复策略"
+          ],
+          "anchor": "pdf-page-7"
+        }
+      }
+    ]
+  },
+  "regression-table.docx": {
+    "sourceType": "docx",
+    "blocks": [
+      {
+        "text": "组件 | 目标延迟\n检索 | 200ms\n回答首 Token | 1200ms",
+        "location": {
+          "headingPath": [
+            "性能基线",
+            "指标表"
+          ],
+          "anchor": "table-1"
+        }
+      }
+    ]
+  },
+  "regression-ocr.png": {
+    "sourceType": "image",
+    "blocks": [
+      {
+        "text": "图片 OCR：索引构建完成后必须验证引用位置。",
+        "location": {
+          "boundingBox": {
+            "x": 12,
+            "y": 18,
+            "width": 260,
+            "height": 48
+          },
+          "anchor": "ocr-region-1",
+          "ocrRegions": [
+            {
+              "text": "索引构建完成后必须验证引用位置",
+              "boundingBox": {
+                "x": 12,
+                "y": 18,
+                "width": 260,
+                "height": 48
+              }
+            }
+          ]
+        }
+      }
+    ]
+  },
+  "web": {
+    "sourceType": "web",
+    "blocks": [
+      {
+        "text": "中文网页资料要求所有可信回答都能够回到原始证据。",
+        "location": {
+          "headingPath": [
+            "可信回答"
+          ],
+          "anchor": "web-section-1"
+        }
+      }
+    ]
+  },
+  "regression-duplicate.pdf": {
+    "sourceType": "pdf",
+    "blocks": [
+      {
+        "text": "数据库采用分层架构，事务日志用于恢复关键业务数据。",
+        "location": {
+          "pageNumber": 7,
+          "boundingBox": {
+            "x": 72,
+            "y": 108,
+            "width": 420,
+            "height": 64
+          },
+          "headingPath": [
+            "数据库架构",
+            "恢复策略"
+          ],
+          "anchor": "pdf-page-7-duplicate"
+        }
+      }
+    ]
+  }
+}

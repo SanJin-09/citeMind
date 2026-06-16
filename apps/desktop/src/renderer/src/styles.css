@@ -2031,12 +2031,13 @@ blockquote {
   display: grid;
   width: min(720px, calc(100vw - 56px));
   max-height: calc(100vh - 56px);
-  grid-template-rows: auto auto auto auto auto minmax(0, 1fr);
+  grid-template-rows: repeat(6, auto);
   border: 1px solid #dfe5df;
   border-radius: 18px;
   background: #fff;
   box-shadow: 0 24px 80px rgb(19 34 25 / 22%);
-  overflow: hidden;
+  overflow-x: hidden;
+  overflow-y: auto;
 }
 
 .settings-modal > .settings-heading {
@@ -2061,6 +2062,7 @@ blockquote {
 
 .settings-modal > .model-validation {
   grid-row: 6;
+  overflow: visible;
 }
 
 .kb-dialog {
@@ -2983,9 +2985,48 @@ blockquote {
 
 .operational-metrics {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr)) auto;
+  grid-template-columns: repeat(5, minmax(0, 1fr)) auto;
   align-items: stretch;
   gap: 8px;
+}
+
+.quality-metric-strip {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin-top: 9px;
+  border: 1px solid #e4e8e4;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.quality-metric-strip span {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+  padding: 8px 10px;
+  border-right: 1px solid #edf0ed;
+  border-bottom: 1px solid #edf0ed;
+}
+
+.quality-metric-strip span:nth-child(3n) {
+  border-right: 0;
+}
+
+.quality-metric-strip span:nth-last-child(-n + 3) {
+  border-bottom: 0;
+}
+
+.quality-metric-strip small {
+  overflow: hidden;
+  color: #7b857f;
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.quality-metric-strip strong {
+  color: #2f4437;
+  font-size: 11px;
 }
 
 .operational-metrics > span {
@@ -3159,6 +3200,21 @@ blockquote {
   .model-card,
   .operational-metrics {
     grid-template-columns: 1fr;
+  }
+
+  .quality-metric-strip {
+    grid-template-columns: 1fr;
+  }
+
+  .quality-metric-strip span,
+  .quality-metric-strip span:nth-child(3n),
+  .quality-metric-strip span:nth-last-child(-n + 3) {
+    border-right: 0;
+    border-bottom: 1px solid #edf0ed;
+  }
+
+  .quality-metric-strip span:last-child {
+    border-bottom: 0;
   }
 
   .source-maintenance-settings {

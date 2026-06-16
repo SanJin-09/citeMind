@@ -4863,6 +4863,12 @@ function SeedSettingsModal({
               <small>可回收索引</small>
               <strong>{maintenanceStatus?.recyclableIndexCount ?? 0}</strong>
             </span>
+            <span>
+              <small>可回收旧版本</small>
+              <strong>
+                {maintenanceStatus?.recyclableSourceVersionCount ?? 0}
+              </strong>
+            </span>
             <button
               className="button ghost"
               disabled={maintenanceBusy}
@@ -4872,6 +4878,60 @@ function SeedSettingsModal({
               <Icon name="trash" size={14} />
               {maintenanceBusy ? "清理中..." : "立即清理"}
             </button>
+          </div>
+          <div className="quality-metric-strip">
+            <span>
+              <small>解析成功率</small>
+              <strong>
+                {formatMetricPercent(
+                  maintenanceStatus?.qualityMetrics.parseSuccessRate,
+                )}
+              </strong>
+            </span>
+            <span>
+              <small>平均索引耗时</small>
+              <strong>
+                {formatMetricDuration(
+                  maintenanceStatus?.qualityMetrics.indexDurationMs,
+                )}
+              </strong>
+            </span>
+            <span>
+              <small>平均检索延迟</small>
+              <strong>
+                {formatMetricDuration(
+                  maintenanceStatus?.qualityMetrics.retrievalLatencyMs,
+                )}
+              </strong>
+            </span>
+            <span>
+              <small>回答首 Token</small>
+              <strong>
+                {formatMetricDuration(
+                  maintenanceStatus?.qualityMetrics.firstTokenLatencyMs,
+                )}
+              </strong>
+            </span>
+            <span>
+              <small>引用失败率</small>
+              <strong>
+                {formatMetricPercent(
+                  maintenanceStatus?.qualityMetrics.citationFailureRate,
+                )}
+              </strong>
+            </span>
+            <span>
+              <small>Embedding 调用 / 重试</small>
+              <strong>
+                {formatNumber(
+                  maintenanceStatus?.qualityMetrics.embeddingCalls ?? 0,
+                )}{" "}
+                /{" "}
+                {formatNumber(
+                  maintenanceStatus?.qualityMetrics.embeddingRetries ?? 0,
+                )}
+              </strong>
+            </span>
           </div>
           {maintenanceNotice && (
             <p className="maintenance-notice">{maintenanceNotice}</p>
@@ -5466,6 +5526,21 @@ function formatBytes(value: number): string {
     unit = units[index];
   }
   return `${amount.toFixed(amount >= 10 ? 0 : 1)} ${unit}`;
+}
+
+function formatMetricPercent(value: number | null | undefined): string {
+  return value === null || value === undefined
+    ? "暂无"
+    : `${(value * 100).toFixed(1)}%`;
+}
+
+function formatMetricDuration(value: number | null | undefined): string {
+  if (value === null || value === undefined) {
+    return "暂无";
+  }
+  return value >= 1000
+    ? `${(value / 1000).toFixed(1)} s`
+    : `${Math.round(value)} ms`;
 }
 
 function emptyParseSummary(): ParseCheckSummary {

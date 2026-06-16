@@ -1,6 +1,7 @@
 from contextlib import suppress
 from pathlib import Path
 
+from citemind_worker.quality_metrics import quality_summary
 from citemind_worker.storage import StorageRuntime
 
 
@@ -29,16 +30,33 @@ class MaintenanceService:
             )
             sources = int(connection.execute("SELECT COUNT(*) FROM sources").fetchone()[0])
             chunks = int(connection.execute("SELECT COUNT(*) FROM chunks").fetchone()[0])
+            source_versions = int(
+                connection.execute(
+                    """
+                    SELECT COUNT(*)
+                    FROM source_versions sv
+                    JOIN sources s ON s.id = sv.source_id
+                    WHERE sv.id != COALESCE(s.current_version_id, '')
+                      AND sv.review_status IN ('rejected', 'superseded')
+                      AND NOT EXISTS (
+                          SELECT 1 FROM chunks c WHERE c.source_version_id = sv.id
+                      )
+                    """
+                ).fetchone()[0]
+            )
         return {
             "rootPath": str(self.storage.paths.root),
             "totalBytes": _directory_size(self.storage.paths.root),
             "sourceCount": sources,
             "chunkCount": chunks,
             "recyclableIndexCount": retired,
+            "recyclableSourceVersionCount": source_versions,
+            "qualityMetrics": quality_summary(self.storage),
         }
 
     def cleanup(self) -> dict[str, object]:
         recycled_indexes = self._recycle_indexes()
+        recycled_source_versions = self._recycle_source_versions()
         referenced_files = self._referenced_files()
         removed_files = 0
         reclaimed_bytes = 0
@@ -64,6 +82,7 @@ class MaintenanceService:
         return {
             **self.status(),
             "recycledIndexCount": recycled_indexes,
+            "recycledSourceVersionCount": recycled_source_versions,
             "removedFileCount": removed_files,
             "removedVectorCount": removed_vectors,
             "reclaimedBytes": reclaimed_bytes,
@@ -104,6 +123,7 @@ class MaintenanceService:
                         DELETE FROM chunks
                         WHERE id IN ({placeholders})
                           AND id NOT IN (SELECT chunk_id FROM answer_citations)
+                          AND id NOT IN (SELECT chunk_id FROM writing_citations)
                         """,
                         tuple(chunk_ids),
                     )
@@ -115,6 +135,30 @@ class MaintenanceService:
             connection.commit()
         self.storage.vector_index.delete_index_versions(index_ids)
         return len(index_ids)
+
+    def _recycle_source_versions(self) -> int:
+        with self.storage.database.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT sv.id
+                FROM source_versions sv
+                JOIN sources s ON s.id = sv.source_id
+                WHERE sv.id != COALESCE(s.current_version_id, '')
+                  AND sv.review_status IN ('rejected', 'superseded')
+                  AND NOT EXISTS (
+                      SELECT 1 FROM chunks c WHERE c.source_version_id = sv.id
+                  )
+                """
+            ).fetchall()
+            version_ids = [str(row["id"]) for row in rows]
+            if version_ids:
+                placeholders = ",".join("?" for _ in version_ids)
+                connection.execute(
+                    f"DELETE FROM source_versions WHERE id IN ({placeholders})",
+                    tuple(version_ids),
+                )
+                connection.commit()
+        return len(version_ids)
 
     def _referenced_files(self) -> set[Path]:
         with self.storage.database.connect() as connection:

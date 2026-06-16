@@ -5,12 +5,14 @@ import threading
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from time import perf_counter
 from typing import Protocol
 from uuid import uuid4
 
 from citemind_worker.ark_gateway import ArkModelGateway
 from citemind_worker.background_job_service import BackgroundJobService
 from citemind_worker.model_catalog import DEFAULT_ARK_BASE_URL, DEFAULT_EMBEDDING_MODEL
+from citemind_worker.quality_metrics import record_metric
 from citemind_worker.source_import_service import artifact_contains_raw_pdf_text
 from citemind_worker.storage import StorageRuntime
 from citemind_worker.storage.full_text import FullTextIndex
@@ -74,6 +76,7 @@ class IndexingService:
         embedding_model: str = DEFAULT_EMBEDDING_MODEL,
         job_id: str | None = None,
     ) -> dict[str, object]:
+        started = perf_counter()
         self._ensure_knowledge_base(knowledge_base_id)
         candidates = self._source_version_candidates(knowledge_base_id)
         if not candidates:
@@ -141,6 +144,12 @@ class IndexingService:
                 status="completed",
                 checkpoint=_stage_checkpoint(parse=1, ocr=1, embedding=1, index=1),
             )
+            self._record_index_duration(
+                knowledge_base_id,
+                embedding_model=embedding_model,
+                started=started,
+                status="completed",
+            )
         except Exception as error:
             self._mark_failed(index_version_id, _public_error(error))
             if self.jobs.get(job_id)["status"] != "cancelled":
@@ -149,6 +158,12 @@ class IndexingService:
                     status="failed",
                     error_message=_public_error(error),
                 )
+            self._record_index_duration(
+                knowledge_base_id,
+                embedding_model=embedding_model,
+                started=started,
+                status="failed",
+            )
             raise
 
         return {
@@ -511,6 +526,7 @@ class IndexingService:
 
     async def _embed_chunks(
         self,
+        knowledge_base_id: str,
         chunks: Sequence[ChunkCandidate],
         *,
         api_key: str | None,
@@ -533,7 +549,14 @@ class IndexingService:
         for start in range(0, total, EMBEDDING_BATCH_SIZE):
             await self._wait_until_runnable(job_id)
             batch = chunks[start : start + EMBEDDING_BATCH_SIZE]
-            vectors.extend(await embedder.embed([chunk.normalized_text for chunk in batch]))
+            texts = [chunk.normalized_text for chunk in batch]
+            vectors.extend(await embedder.embed(texts))
+            self._record_embedding_usage(
+                knowledge_base_id,
+                embedder,
+                texts,
+                purpose="index",
+            )
             embedding_progress = min(1.0, len(vectors) / total)
             self.jobs.update_progress(
                 job_id,
@@ -546,6 +569,50 @@ class IndexingService:
                 ),
             )
         return vectors
+
+    def _record_index_duration(
+        self,
+        knowledge_base_id: str,
+        *,
+        embedding_model: str,
+        started: float,
+        status: str,
+    ) -> None:
+        record_metric(
+            self.storage,
+            "index.duration_ms",
+            round((perf_counter() - started) * 1000),
+            "ms",
+            knowledge_base_id=knowledge_base_id,
+            labels={"status": status, "embeddingModel": embedding_model},
+        )
+
+    def _record_embedding_usage(
+        self,
+        knowledge_base_id: str,
+        embedder: Embedder,
+        texts: Sequence[str],
+        *,
+        purpose: str,
+    ) -> None:
+        stats = getattr(embedder, "last_embedding_stats", {})
+        calls = int(stats.get("calls", 1)) if isinstance(stats, dict) else 1
+        retries = int(stats.get("retries", 0)) if isinstance(stats, dict) else 0
+        labels = {"purpose": purpose}
+        for name, value, unit in (
+            ("embedding.calls", calls, "calls"),
+            ("embedding.texts", len(texts), "texts"),
+            ("embedding.retries", retries, "retries"),
+            ("embedding.input_characters", sum(len(text) for text in texts), "characters"),
+        ):
+            record_metric(
+                self.storage,
+                name,
+                value,
+                unit,
+                knowledge_base_id=knowledge_base_id,
+                labels=labels,
+            )
 
     async def _reuse_or_embed_chunks(
         self,
@@ -564,6 +631,7 @@ class IndexingService:
         )
         missing = [chunk for chunk in chunks if chunk.content_hash not in reusable]
         embedded = await self._embed_chunks(
+            knowledge_base_id,
             missing,
             api_key=api_key,
             base_url=base_url,

@@ -19,8 +19,17 @@ class FakeResponses:
 
 
 class FakeClient:
-    def __init__(self, responses: list[object]) -> None:
+    def __init__(
+        self,
+        responses: list[object],
+        embedding_responses: list[object] | None = None,
+    ) -> None:
         self.responses = FakeResponses(responses)
+        self.multimodal_embeddings = FakeResponses(embedding_responses or [])
+
+
+class RetryableEmbeddingError(RuntimeError):
+    status_code = 429
 
 
 def test_generate_structured_extracts_json_from_markdown() -> None:
@@ -143,3 +152,51 @@ def test_generate_structured_raises_clear_error_when_fallback_is_not_json() -> N
                 {"type": "object"},
             )
         )
+
+
+def test_embedding_uses_controlled_batches_and_records_usage() -> None:
+    client = FakeClient(
+        [],
+        embedding_responses=[
+            {"data": {"embedding": [1, 0, 0]}},
+            {"data": {"embedding": [0, 1, 0]}},
+            {"data": {"embedding": [0, 0, 1]}},
+        ],
+    )
+    gateway = ArkModelGateway(
+        "ark-test",
+        client=client,
+        embedding_batch_size=2,
+        embedding_min_interval_seconds=0,
+    )
+
+    vectors = asyncio.run(gateway.embed(["a", "b", "c"]))
+
+    assert vectors == [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
+    assert gateway.last_embedding_stats == {
+        "batches": 2,
+        "calls": 3,
+        "texts": 3,
+        "retries": 0,
+    }
+
+
+def test_embedding_retries_rate_limit_with_bounded_attempts() -> None:
+    client = FakeClient(
+        [],
+        embedding_responses=[
+            RetryableEmbeddingError("rate limited"),
+            {"data": {"embedding": [1, 0, 0]}},
+        ],
+    )
+    gateway = ArkModelGateway(
+        "ark-test",
+        client=client,
+        embedding_batch_size=1,
+        embedding_min_interval_seconds=0,
+        embedding_max_attempts=2,
+    )
+
+    assert asyncio.run(gateway.embed(["retry"])) == [[1.0, 0.0, 0.0]]
+    assert gateway.last_embedding_stats["calls"] == 2
+    assert gateway.last_embedding_stats["retries"] == 1

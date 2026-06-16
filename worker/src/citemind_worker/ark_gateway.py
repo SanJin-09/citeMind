@@ -1,6 +1,8 @@
+import asyncio
 import json
 from collections.abc import AsyncIterator, Sequence
 from datetime import UTC, datetime
+from time import monotonic
 from typing import Any
 
 from volcenginesdkarkruntime import Ark  # type: ignore[import-untyped]
@@ -29,11 +31,25 @@ class ArkModelGateway:
         embedding_model: str = DEFAULT_EMBEDDING_MODEL,
         timeout: int = 45,
         max_retries: int = 1,
+        embedding_batch_size: int = 4,
+        embedding_min_interval_seconds: float = 0.05,
+        embedding_max_attempts: int = 3,
         client: Any | None = None,
     ) -> None:
         if not api_key.strip():
             raise ValueError("Ark API Key is required")
         self.embedding_model = embedding_model
+        self.embedding_batch_size = max(1, embedding_batch_size)
+        self.embedding_min_interval_seconds = max(0, embedding_min_interval_seconds)
+        self.embedding_max_attempts = max(1, embedding_max_attempts)
+        self.last_embedding_stats: dict[str, int] = {
+            "batches": 0,
+            "calls": 0,
+            "texts": 0,
+            "retries": 0,
+        }
+        self._embedding_rate_lock = asyncio.Lock()
+        self._last_embedding_started_at = 0.0
         self.client = client or Ark(
             api_key=api_key,
             base_url=base_url,
@@ -135,15 +151,59 @@ class ArkModelGateway:
             raise
 
     async def embed(self, texts: Sequence[str]) -> list[list[float]]:
-        result: list[list[float]] = []
-        for text in texts:
-            response = self.client.multimodal_embeddings.create(
-                model=self.embedding_model,
-                encoding_format="float",
-                input=[{"type": "text", "text": text}],
-            )
-            result.append(_extract_embedding(response))
-        return result
+        clean_texts = [text for text in texts if text]
+        if len(clean_texts) != len(texts):
+            raise ValueError("Embedding 文本不能为空")
+        vectors: list[list[float]] = []
+        calls = 0
+        retries = 0
+        batches = 0
+        for start in range(0, len(clean_texts), self.embedding_batch_size):
+            batch = clean_texts[start : start + self.embedding_batch_size]
+            results = await asyncio.gather(*(self._embed_one(text) for text in batch))
+            batches += 1
+            for vector, item_calls, item_retries in results:
+                vectors.append(vector)
+                calls += item_calls
+                retries += item_retries
+        self.last_embedding_stats = {
+            "batches": batches,
+            "calls": calls,
+            "texts": len(clean_texts),
+            "retries": retries,
+        }
+        return vectors
+
+    async def _embed_one(self, text: str) -> tuple[list[float], int, int]:
+        calls = 0
+        retries = 0
+        for attempt in range(self.embedding_max_attempts):
+            await self._wait_for_embedding_slot()
+            calls = attempt + 1
+            try:
+                response = await asyncio.to_thread(
+                    self.client.multimodal_embeddings.create,
+                    model=self.embedding_model,
+                    encoding_format="float",
+                    input=[{"type": "text", "text": text}],
+                )
+                return _extract_embedding(response), calls, retries
+            except Exception as error:
+                if attempt + 1 >= self.embedding_max_attempts or not _retryable_embedding_error(
+                    error
+                ):
+                    raise
+                retries += 1
+                await asyncio.sleep(min(2.0, 0.2 * (2**attempt)))
+        raise RuntimeError("Embedding 重试次数已耗尽")
+
+    async def _wait_for_embedding_slot(self) -> None:
+        async with self._embedding_rate_lock:
+            elapsed = monotonic() - self._last_embedding_started_at
+            remaining = self.embedding_min_interval_seconds - elapsed
+            if remaining > 0:
+                await asyncio.sleep(remaining)
+            self._last_embedding_started_at = monotonic()
 
     def _probe_chat_model(self, model_id: str) -> dict[str, object]:
         response = self.client.responses.create(
@@ -470,6 +530,13 @@ def _status_for_error(error: Exception) -> str:
     if status_code == 429:
         return "rate_limited"
     return "failed"
+
+
+def _retryable_embedding_error(error: Exception) -> bool:
+    if isinstance(error, (ArkRateLimitError, ArkAPITimeoutError, ArkAPIConnectionError)):
+        return True
+    status_code = getattr(error, "status_code", None)
+    return status_code == 429 or isinstance(status_code, int) and status_code >= 500
 
 
 def _public_error_message(error: Exception) -> str:

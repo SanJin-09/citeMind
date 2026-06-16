@@ -13,19 +13,37 @@ def test_cleanup_recycles_expired_index_and_orphan_data(tmp_path: Path) -> None:
     orphan_file = storage.paths.objects / "orphan" / "unused.pdf"
     orphan_file.parent.mkdir(parents=True)
     orphan_file.write_text("orphan", encoding="utf-8")
+    old_original = storage.paths.objects / "source-a" / "old.pdf"
+    old_artifact = storage.paths.artifacts / "source-versions" / "version-old.json"
+    old_original.parent.mkdir(parents=True)
+    old_artifact.parent.mkdir(parents=True)
+    old_original.write_text("old source", encoding="utf-8")
+    old_artifact.write_text("{}", encoding="utf-8")
     with storage.database.connect() as connection:
         connection.execute(
             """
-            INSERT INTO sources(id, knowledge_base_id, source_type, display_name, status)
-            VALUES ('source-a', ?, 'pdf', 'A.pdf', 'ready')
+            INSERT INTO sources(
+                id, knowledge_base_id, source_type, display_name, status, current_version_id
+            )
+            VALUES ('source-a', ?, 'pdf', 'A.pdf', 'ready', 'version-a')
             """,
             (knowledge_base_id,),
         )
         connection.execute(
             """
-            INSERT INTO source_versions(id, source_id, version_number, status)
-            VALUES ('version-a', 'source-a', 1, 'ready')
+            INSERT INTO source_versions(id, source_id, version_number, status, review_status)
+            VALUES ('version-a', 'source-a', 1, 'ready', 'current')
             """
+        )
+        connection.execute(
+            """
+            INSERT INTO source_versions(
+                id, source_id, version_number, original_path, parse_artifact_path,
+                status, review_status
+            )
+            VALUES ('version-old', 'source-a', 2, ?, ?, 'parsed', 'superseded')
+            """,
+            (str(old_original), str(old_artifact)),
         )
         connection.execute(
             """
@@ -71,15 +89,22 @@ def test_cleanup_recycles_expired_index_and_orphan_data(tmp_path: Path) -> None:
         vector=[0.0, 1.0, 0.0],
     )
 
-    result = MaintenanceService(storage).cleanup()
+    service = MaintenanceService(storage)
+    status = service.status()
+    result = service.cleanup()
 
+    assert status["recyclableSourceVersionCount"] == 1
     assert result["recycledIndexCount"] == 1
-    assert result["removedFileCount"] == 1
+    assert result["recycledSourceVersionCount"] == 1
+    assert result["removedFileCount"] == 3
     assert result["removedVectorCount"] == 1
     assert not orphan_file.exists()
+    assert not old_original.exists()
+    assert not old_artifact.exists()
     assert storage.vector_index.count_index_version("index-expired") == 0
     assert storage.vector_index.count_index_version("index-orphan") == 0
     with storage.database.connect() as connection:
         assert connection.execute("SELECT COUNT(*) FROM index_versions").fetchone()[0] == 0
         assert connection.execute("SELECT COUNT(*) FROM chunks").fetchone()[0] == 0
         assert connection.execute("SELECT COUNT(*) FROM chunks_fts").fetchone()[0] == 0
+        assert connection.execute("SELECT COUNT(*) FROM source_versions").fetchone()[0] == 1

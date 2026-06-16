@@ -16,6 +16,7 @@ from citemind_worker.model_catalog import (
     DEFAULT_EMBEDDING_MODEL,
     context_window_for,
 )
+from citemind_worker.quality_metrics import record_metric
 from citemind_worker.retrieval_service import HybridRetrievalService
 from citemind_worker.storage import StorageRuntime
 
@@ -329,6 +330,11 @@ class ConversationService:
                 reason="no_retrieval_candidates",
                 history_context=history_context,
             )
+            self._record_answer_metrics(
+                knowledge_base_id,
+                started=started,
+                citation_failed=True,
+            )
             for event in _delta_events(str(response["content"])):
                 yield event
             yield {"type": "answer.completed", "response": response}
@@ -416,10 +422,37 @@ class ConversationService:
             attempts=attempts,
             history_context=history_context,
         )
+        self._record_answer_metrics(
+            knowledge_base_id,
+            started=started,
+            citation_failed=final_validation["valid"] is not True,
+        )
         yield {"type": "citation.validated", "validation": response["citationValidation"]}
         for event in _delta_events(str(response["content"])):
             yield event
         yield {"type": "answer.completed", "response": response}
+
+    def _record_answer_metrics(
+        self,
+        knowledge_base_id: str,
+        *,
+        started: float,
+        citation_failed: bool,
+    ) -> None:
+        record_metric(
+            self.storage,
+            "answer.first_token_latency_ms",
+            _elapsed_ms(started),
+            "ms",
+            knowledge_base_id=knowledge_base_id,
+        )
+        record_metric(
+            self.storage,
+            "citation.validation_failure",
+            int(citation_failed),
+            "ratio",
+            knowledge_base_id=knowledge_base_id,
+        )
 
     def _persist_answer(
         self,

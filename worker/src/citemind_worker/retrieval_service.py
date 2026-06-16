@@ -1,10 +1,12 @@
 import json
 from collections.abc import Sequence
 from dataclasses import dataclass, field
+from time import perf_counter
 from typing import Protocol
 
 from citemind_worker.ark_gateway import ArkModelGateway
 from citemind_worker.model_catalog import DEFAULT_ARK_BASE_URL, DEFAULT_EMBEDDING_MODEL
+from citemind_worker.quality_metrics import record_metric
 from citemind_worker.storage import StorageRuntime
 from citemind_worker.storage.full_text import FullTextIndex, FullTextResult, tokenize_for_search
 from citemind_worker.storage.vector_index import VectorResult
@@ -84,6 +86,7 @@ class HybridRetrievalService:
         candidate_limit: int = DEFAULT_CANDIDATE_LIMIT,
         rerank_model_version: str | None = None,
     ) -> dict[str, object]:
+        started = perf_counter()
         normalized_query = _normalize_query(query)
         if limit <= 0 or limit > 50:
             raise ValueError("limit 必须在 1 到 50 之间")
@@ -132,7 +135,7 @@ class HybridRetrievalService:
             if item.chunk_id in chunks
         ]
 
-        return {
+        response: dict[str, object] = {
             "knowledgeBaseId": knowledge_base_id,
             "query": normalized_query,
             "indexVersion": _index_payload(current_index),
@@ -155,6 +158,15 @@ class HybridRetrievalService:
             "results": results,
             "context": _context_payload(results),
         }
+        record_metric(
+            self.storage,
+            "retrieval.latency_ms",
+            round((perf_counter() - started) * 1000),
+            "ms",
+            knowledge_base_id=knowledge_base_id,
+            labels={"resultCount": len(results), "candidateLimit": candidate_limit},
+        )
+        return response
 
     def _current_index(self, knowledge_base_id: str) -> CurrentIndex:
         with self.storage.database.connect() as connection:
@@ -216,6 +228,7 @@ class HybridRetrievalService:
                 embedding_model=embedding_model,
             )
         vectors = await embedder.embed([query])
+        self._record_embedding_usage(knowledge_base_id, embedder, query)
         if len(vectors) != 1:
             raise ValueError("Embedding 返回数量与查询数量不一致")
         return self.storage.vector_index.search(
@@ -224,6 +237,30 @@ class HybridRetrievalService:
             vector=vectors[0],
             limit=limit,
         )
+
+    def _record_embedding_usage(
+        self,
+        knowledge_base_id: str,
+        embedder: Embedder,
+        query: str,
+    ) -> None:
+        stats = getattr(embedder, "last_embedding_stats", {})
+        calls = int(stats.get("calls", 1)) if isinstance(stats, dict) else 1
+        retries = int(stats.get("retries", 0)) if isinstance(stats, dict) else 0
+        for name, value, unit in (
+            ("embedding.calls", calls, "calls"),
+            ("embedding.texts", 1, "texts"),
+            ("embedding.retries", retries, "retries"),
+            ("embedding.input_characters", len(query), "characters"),
+        ):
+            record_metric(
+                self.storage,
+                name,
+                value,
+                unit,
+                knowledge_base_id=knowledge_base_id,
+                labels={"purpose": "query"},
+            )
 
     def _chunks_by_id(
         self,
