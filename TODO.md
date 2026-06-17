@@ -254,17 +254,17 @@
 
 ### 8.3 Agent Run Trace 与执行可观测性
 
-- [ ] `P2` 为 AgentRun 建立事件流模型，覆盖 `run.created`、`plan.updated`、`stage.started`、`stage.completed`、`tool_call.started`、`tool_call.output`、`tool_call.completed`、`skill.loaded`、`confirmation.requested`、`run.completed`、`run.failed` 和 `run.cancelled`。
-- [ ] `P2` 每条 Trace Event 记录 `runId`、`sequence`、`stage`、`status`、`title`、`summary`、`startedAt`、`completedAt`、`durationMs`、关联 `toolCallId` 或 `stepId`，保证断点恢复后可按顺序重放。
-- [ ] `P2` 在 Agent Runtime 中维护当前阶段快照，至少包含规划、检索证据、读取来源、调用 Tool、生成草稿、引用校验、冲突审计、等待用户确认、整理最终结果。
-- [ ] `P2` 通过本地 JSON-RPC 事件订阅将 Trace Event 流式推送给 Renderer；应用重启或页面刷新后，Renderer 可从 SQLite 读取最近快照并继续订阅增量事件。
-- [ ] `P2` 前端使用 `startedAt` 和本地计时器展示 AgentRun 总耗时；完成、失败或取消后以 `completedAt - startedAt` 固定最终耗时。
-- [ ] `P2` Tool Call Trace 展示可审计操作轨迹：Tool 名称、Skill 名称与版本、命令或动作摘要、工作目录、脱敏参数、开始时间、耗时、退出码、stdout/stderr 摘要和错误原因。
-- [ ] `P2` 明确区分“执行轨迹”和“模型内部推理”：Trace 只展示计划、操作、证据和结果摘要，不展示隐藏推理链、完整 Prompt、API Key、敏感文件内容或未脱敏外部返回。
-- [ ] `P2` AgentRun 执行中默认展开 Trace 面板，实时展示当前阶段、进度、耗时、Tool 调用和等待确认事项；完成后自动折叠 Trace，只保留正式交付结果和“查看执行记录”入口。
-- [ ] `P2` Trace 面板支持展开单个 Tool 调用查看详细输出摘要，支持按阶段筛选事件，并在错误事件中提供可重试或可恢复的下一步动作。
-- [ ] `P2` 将用户确认、外部资料导入决策、引用校验失败、预算耗尽和取消操作写入 Trace，保证最终研究简报可追溯到执行过程。
-- [ ] `P2` 为 Agent Run Trace 建立单元测试和集成测试，覆盖事件顺序、断点恢复、工具失败、敏感信息脱敏、完成后折叠展示和异常退出后的 Trace 重放。
+- [x] `P2` 为 AgentRun 建立事件流模型，覆盖 `run.created`、`plan.updated`、`stage.started`、`stage.completed`、`tool_call.started`、`tool_call.output`、`tool_call.completed`、`skill.loaded`、`confirmation.requested`、`run.completed`、`run.failed` 和 `run.cancelled`。
+- [x] `P2` 每条 Trace Event 记录 `runId`、`sequence`、`stage`、`status`、`title`、`summary`、`startedAt`、`completedAt`、`durationMs`、关联 `toolCallId` 或 `stepId`，保证断点恢复后可按顺序重放。
+- [x] `P2` 在 Agent Runtime 中维护当前阶段快照，至少包含规划、检索证据、读取来源、调用 Tool、生成草稿、引用校验、冲突审计、等待用户确认、整理最终结果。
+- [x] `P2` 通过本地 JSON-RPC 事件订阅将 Trace Event 流式推送给 Renderer；应用重启或页面刷新后，Renderer 可从 SQLite 读取最近快照并继续订阅增量事件。
+- [x] `P2` 前端使用 `startedAt` 和本地计时器展示 AgentRun 总耗时；完成、失败或取消后以 `completedAt - startedAt` 固定最终耗时。
+- [x] `P2` Tool Call Trace 展示可审计操作轨迹：Tool 名称、Skill 名称与版本、命令或动作摘要、工作目录、脱敏参数、开始时间、耗时、退出码、stdout/stderr 摘要和错误原因。
+- [x] `P2` 明确区分“执行轨迹”和“模型内部推理”：Trace 只展示计划、操作、证据和结果摘要，不展示隐藏推理链、完整 Prompt、API Key、敏感文件内容或未脱敏外部返回。
+- [x] `P2` AgentRun 执行中默认展开 Trace 面板，实时展示当前阶段、进度、耗时、Tool 调用和等待确认事项；完成后自动折叠 Trace，只保留正式交付结果和“查看执行记录”入口。
+- [x] `P2` Trace 面板支持展开单个 Tool 调用查看详细输出摘要，支持按阶段筛选事件，并在错误事件中提供可重试或可恢复的下一步动作。
+- [x] `P2` 将用户确认、外部资料导入决策、引用校验失败、预算耗尽和取消操作写入 Trace，保证最终研究简报可追溯到执行过程。
+- [x] `P2` 为 Agent Run Trace 建立单元测试和集成测试，覆盖事件顺序、断点恢复、工具失败、敏感信息脱敏、完成后折叠展示和异常退出后的 Trace 重放。
 
 ```text
 运行中
@@ -288,12 +288,12 @@
 
 ### 8.4 原生 Tool 与内置 Skill
 
-- [ ] `P2` 将混合检索、来源读取、来源状态检查、引用校验和成果保存封装为受控原生 Tool。
-- [ ] `P2` 定义版本化 Skill 格式，包含输入、允许调用的 Tool、执行约束、预算策略和输出结构。
-- [ ] `P2` 实现“证据研究简报”Skill：规划研究问题、检索证据、识别缺口与冲突、生成简报并执行引用校验。
-- [ ] `P2` 实现“多来源观点对比”Skill：按议题展示共识、分歧、来源依据和证据强弱。
-- [ ] `P2` 实现“引用与冲突审计”Skill：识别无证据结论、无效引用、证据不足和来源冲突。
-- [ ] `P2` 所有事实性结论必须区分已验证证据、来源冲突、模型推断和证据不足，不得将推断伪装为来源事实。
+- [x] `P2` 将混合检索、来源读取、来源状态检查、引用校验和成果保存封装为受控原生 Tool。
+- [x] `P2` 定义版本化 Skill 格式，包含输入、允许调用的 Tool、执行约束、预算策略和输出结构。
+- [x] `P2` 实现“证据研究简报”Skill：规划研究问题、检索证据、识别缺口与冲突、生成简报并执行引用校验。
+- [x] `P2` 实现“多来源观点对比”Skill：按议题展示共识、分歧、来源依据和证据强弱。
+- [x] `P2` 实现“引用与冲突审计”Skill：识别无证据结论、无效引用、证据不足和来源冲突。
+- [x] `P2` 所有事实性结论必须区分已验证证据、来源冲突、模型推断和证据不足，不得将推断伪装为来源事实。
 
 ### 8.5 MCP 外部资料闭环
 

@@ -1,6 +1,7 @@
 import json
+import re
 import sqlite3
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import Literal, cast
 from uuid import uuid4
 
@@ -47,10 +48,48 @@ DEFAULT_USAGE: dict[str, object] = {
     "estimatedCostCny": None,
 }
 
+TRACE_PHASES: tuple[dict[str, str], ...] = (
+    {"id": "planning", "label": "规划"},
+    {"id": "evidence_retrieval", "label": "检索证据"},
+    {"id": "source_reading", "label": "读取来源"},
+    {"id": "tool_calling", "label": "调用 Tool"},
+    {"id": "drafting", "label": "生成草稿"},
+    {"id": "citation_validation", "label": "引用校验"},
+    {"id": "conflict_audit", "label": "冲突审计"},
+    {"id": "waiting_confirmation", "label": "等待用户确认"},
+    {"id": "finalizing", "label": "整理最终结果"},
+)
+
+TRACE_SENSITIVE_KEYS = {
+    "apikey",
+    "api_key",
+    "authorization",
+    "credential",
+    "documenttext",
+    "fullprompt",
+    "password",
+    "prompt",
+    "rawcontent",
+    "secret",
+    "token",
+}
+TRACE_TEXT_LIMIT = 800
+TRACE_SUMMARY_LIMIT = 240
+TraceEventSink = Callable[[dict[str, object]], None]
+
 
 class AgentRunService:
-    def __init__(self, storage: StorageRuntime) -> None:
+    def __init__(
+        self,
+        storage: StorageRuntime,
+        *,
+        event_sink: TraceEventSink | None = None,
+    ) -> None:
         self.storage = storage
+        self._event_sink = event_sink
+
+    def set_event_sink(self, event_sink: TraceEventSink | None) -> None:
+        self._event_sink = event_sink
 
     def create(
         self,
@@ -110,7 +149,7 @@ class AgentRunService:
                     _json(DEFAULT_USAGE),
                 ),
             )
-            self._insert_event(
+            event = self._insert_event(
                 connection,
                 run_id,
                 event_type="run.created",
@@ -129,6 +168,7 @@ class AgentRunService:
                 },
             )
             connection.commit()
+        self._emit_event(event)
         return self.get(run_id)
 
     def list_runs(
@@ -247,7 +287,7 @@ class AgentRunService:
                 """,
                 (_json(plan), run_id),
             )
-            self._insert_event(
+            event = self._insert_event(
                 connection,
                 run_id,
                 event_type="plan.updated",
@@ -258,6 +298,64 @@ class AgentRunService:
                 payload={"plan": dict(plan)},
             )
             connection.commit()
+        self._emit_event(event)
+        return self.get(run_id)
+
+    def record_stage(
+        self,
+        run_id: str,
+        *,
+        stage: str,
+        status: Literal["started", "completed"],
+        title: str | None = None,
+        summary: str | None = None,
+        step_id: str | None = None,
+        duration_ms: int | None = None,
+    ) -> dict[str, object]:
+        self._ensure_active_or_failed(run_id)
+        event_type = f"stage.{status}"
+        with self.storage.database.connect() as connection:
+            event = self._insert_event(
+                connection,
+                run_id,
+                event_type=event_type,
+                stage=stage,
+                status=self._status_in_connection(connection, run_id),
+                title=title or _stage_label(stage, status),
+                summary=summary,
+                payload={"stepId": step_id} if step_id is not None else {},
+                step_id=step_id,
+                duration_ms=duration_ms if status == "completed" else None,
+                completed_at="now" if status == "completed" else None,
+            )
+            connection.commit()
+        self._emit_event(event)
+        return self.get(run_id)
+
+    def record_skill_loaded(
+        self,
+        run_id: str,
+        *,
+        skill_id: str,
+        skill_version: str,
+        summary: str | None = None,
+    ) -> dict[str, object]:
+        self._ensure_active_or_failed(run_id)
+        clean_skill_id = _required_text(skill_id, "skillId")
+        clean_skill_version = _required_text(skill_version, "skillVersion")
+        with self.storage.database.connect() as connection:
+            event = self._insert_event(
+                connection,
+                run_id,
+                event_type="skill.loaded",
+                stage="planning",
+                status=self._status_in_connection(connection, run_id),
+                title=f"Skill 已加载：{clean_skill_id}",
+                summary=summary or clean_skill_version,
+                payload={"skillId": clean_skill_id, "skillVersion": clean_skill_version},
+            )
+            connection.commit()
+        self._emit_event(event)
         return self.get(run_id)
 
     def transition(
@@ -292,7 +390,7 @@ class AgentRunService:
                 """,
                 (status, error_message, stop_reason, run_id),
             )
-            self._insert_event(
+            event = self._insert_event(
                 connection,
                 run_id,
                 event_type=event_type,
@@ -306,8 +404,10 @@ class AgentRunService:
                     "errorMessage": error_message,
                     "stopReason": stop_reason,
                 },
+                completed_at="now" if status in TERMINAL_STATUSES or status == "failed" else None,
             )
             connection.commit()
+        self._emit_event(event)
         return self.get(run_id)
 
     def pause(self, run_id: str) -> dict[str, object]:
@@ -357,7 +457,7 @@ class AgentRunService:
                 """,
                 (run_id,),
             )
-            self._insert_event(
+            event = self._insert_event(
                 connection,
                 run_id,
                 event_type="run.retrying",
@@ -368,6 +468,7 @@ class AgentRunService:
                 payload={"fromStatus": "failed", "toStatus": "executing"},
             )
             connection.commit()
+        self._emit_event(event)
         return self.get(run_id)
 
     def recover_unfinished(self) -> dict[str, object]:
@@ -381,7 +482,9 @@ class AgentRunService:
                 """
             ).fetchall()
             run_ids = [str(row["id"]) for row in rows]
-            for run_id in run_ids:
+            events: list[dict[str, object]] = []
+            for row in rows:
+                run_id = str(row["id"])
                 connection.execute(
                     """
                     UPDATE agent_runs
@@ -392,18 +495,67 @@ class AgentRunService:
                     """,
                     (run_id,),
                 )
-                self._insert_event(
-                    connection,
-                    run_id,
-                    event_type="run.recovered",
-                    stage="paused",
-                    status="paused",
-                    title="AgentRun 已恢复为暂停状态",
-                    summary="应用异常退出后恢复，等待用户继续执行",
-                    payload={"fromStatus": "executing", "toStatus": "paused"},
+                events.append(
+                    self._insert_event(
+                        connection,
+                        run_id,
+                        event_type="run.recovered",
+                        stage="paused",
+                        status="paused",
+                        title="AgentRun 已恢复为暂停状态",
+                        summary="应用异常退出后恢复，等待用户继续执行",
+                        payload={"fromStatus": str(row["status"]), "toStatus": "paused"},
+                    )
                 )
             connection.commit()
+        for event in events:
+            self._emit_event(event)
         return {"runs": [self.get(run_id)["run"] for run_id in run_ids]}
+
+    def record_tool_output(
+        self,
+        tool_call_id: str,
+        *,
+        stdout_summary: str | None = None,
+        stderr_summary: str | None = None,
+        payload: Mapping[str, object] | None = None,
+    ) -> dict[str, object]:
+        tool_call = self._tool_call_row(tool_call_id)
+        run_id = str(tool_call["run_id"])
+        with self.storage.database.connect() as connection:
+            connection.execute(
+                """
+                UPDATE agent_run_tool_calls
+                SET stdout_summary = COALESCE(?, stdout_summary),
+                    stderr_summary = COALESCE(?, stderr_summary)
+                WHERE id = ?
+                """,
+                (
+                    _safe_trace_text(stdout_summary, TRACE_SUMMARY_LIMIT),
+                    _safe_trace_text(stderr_summary, TRACE_SUMMARY_LIMIT),
+                    tool_call_id,
+                ),
+            )
+            event = self._insert_event(
+                connection,
+                run_id,
+                event_type="tool_call.output",
+                stage="tool_calling",
+                status=self._status_in_connection(connection, run_id),
+                title=f"Tool 输出：{tool_call['tool_name']}",
+                summary=stdout_summary or stderr_summary,
+                payload={
+                    "toolCallId": tool_call_id,
+                    "stdoutSummary": stdout_summary,
+                    "stderrSummary": stderr_summary,
+                    **dict(payload or {}),
+                },
+                tool_call_id=tool_call_id,
+                step_id=tool_call["step_id"],
+            )
+            connection.commit()
+        self._emit_event(event)
+        return self.get(run_id)
 
     def start_tool_call(
         self,
@@ -439,20 +591,31 @@ class AgentRunService:
                     skill_version,
                     clean_summary,
                     working_directory,
-                    _json(sanitized_params or {}),
+                    _json(_sanitize_trace_payload(sanitized_params or {})),
                 ),
             )
-            self._insert_event(
+            event = self._insert_event(
                 connection,
                 run_id,
                 event_type="tool_call.started",
-                stage="executing",
+                stage="tool_calling",
                 status=self._status_in_connection(connection, run_id),
                 title=f"Tool 调用开始：{clean_tool_name}",
                 summary=clean_summary,
-                payload={"toolCallId": tool_call_id, "stepId": step_id},
+                payload={
+                    "toolCallId": tool_call_id,
+                    "stepId": step_id,
+                    "toolName": clean_tool_name,
+                    "skillId": skill_id,
+                    "skillVersion": skill_version,
+                    "workingDirectory": working_directory,
+                    "sanitizedParams": dict(sanitized_params or {}),
+                },
+                tool_call_id=tool_call_id,
+                step_id=step_id,
             )
             connection.commit()
+        self._emit_event(event)
         return self.get(run_id)
 
     def finish_tool_call(
@@ -499,17 +662,17 @@ class AgentRunService:
                     status,
                     max(0, duration_ms),
                     exit_code,
-                    stdout_summary,
-                    stderr_summary,
-                    error_message,
+                    _safe_trace_text(stdout_summary, TRACE_SUMMARY_LIMIT),
+                    _safe_trace_text(stderr_summary, TRACE_SUMMARY_LIMIT),
+                    _safe_trace_text(error_message, TRACE_SUMMARY_LIMIT),
                     tool_call_id,
                 ),
             )
-            self._insert_event(
+            event = self._insert_event(
                 connection,
                 run_id,
                 event_type=f"tool_call.{status}",
-                stage="executing",
+                stage="tool_calling",
                 status=self._status_in_connection(connection, run_id),
                 title=f"Tool 调用{_tool_status_label(status)}：{tool_call['tool_name']}",
                 summary=error_message or stdout_summary,
@@ -518,8 +681,13 @@ class AgentRunService:
                     "exitCode": exit_code,
                     "durationMs": max(0, duration_ms),
                 },
+                tool_call_id=tool_call_id,
+                step_id=tool_call["step_id"],
+                completed_at="now",
+                duration_ms=max(0, duration_ms),
             )
             connection.commit()
+        self._emit_event(event)
         return self.get(run_id)
 
     def request_confirmation(
@@ -551,7 +719,7 @@ class AgentRunService:
                 """,
                 (run_id,),
             )
-            self._insert_event(
+            event = self._insert_event(
                 connection,
                 run_id,
                 event_type="confirmation.requested",
@@ -562,6 +730,7 @@ class AgentRunService:
                 payload={"confirmationId": confirmation_id, "options": list(options or [])},
             )
             connection.commit()
+        self._emit_event(event)
         return self.get(run_id)
 
     def resolve_confirmation(
@@ -604,7 +773,7 @@ class AgentRunService:
                 """,
                 (next_status, next_status, next_status, run_id),
             )
-            self._insert_event(
+            event = self._insert_event(
                 connection,
                 run_id,
                 event_type=f"confirmation.{status}",
@@ -613,8 +782,10 @@ class AgentRunService:
                 title="用户确认已处理",
                 summary=str(row["prompt"]),
                 payload={"confirmationId": confirmation_id, "decision": dict(decision)},
+                completed_at="now" if next_status == "cancelled" else None,
             )
             connection.commit()
+        self._emit_event(event)
         return self.get(run_id)
 
     def record_delegation(
@@ -645,7 +816,7 @@ class AgentRunService:
                     _json(input_scope or {}),
                 ),
             )
-            self._insert_event(
+            event = self._insert_event(
                 connection,
                 run_id,
                 event_type="delegation.created",
@@ -656,6 +827,7 @@ class AgentRunService:
                 payload={"delegationId": delegation_id, "childRunId": child_run_id},
             )
             connection.commit()
+        self._emit_event(event)
         return self.get(run_id)
 
     def save_output(
@@ -723,17 +895,18 @@ class AgentRunService:
                         chunk_id,
                     ),
                 )
-            self._insert_event(
+            event = self._insert_event(
                 connection,
                 run_id,
                 event_type=f"output.{output_type}.saved",
-                stage="executing",
+                stage="drafting" if output_type == "draft" else "finalizing",
                 status=self._status_in_connection(connection, run_id),
                 title=f"{_output_type_label(output_type)}已保存",
                 summary=title,
                 payload={"outputId": output_id, "citationCount": len(citations or [])},
             )
             connection.commit()
+        self._emit_event(event)
         return self.get(run_id)
 
     def _ensure_knowledge_base(self, knowledge_base_id: str) -> None:
@@ -883,33 +1056,124 @@ class AgentRunService:
         title: str,
         summary: str | None,
         payload: Mapping[str, object],
-    ) -> None:
+        started_at: str | None = None,
+        completed_at: str | None = None,
+        duration_ms: int | None = None,
+        tool_call_id: object | None = None,
+        step_id: object | None = None,
+    ) -> dict[str, object]:
         sequence = int(
             connection.execute(
                 "SELECT COALESCE(MAX(sequence), 0) + 1 FROM agent_run_events WHERE run_id = ?",
                 (run_id,),
             ).fetchone()[0]
         )
+        event_id = f"agent-event-{uuid4().hex}"
+        started_at_sql = "strftime('%Y-%m-%dT%H:%M:%fZ', 'now')" if started_at is None else "?"
+        completed_at_sql = "strftime('%Y-%m-%dT%H:%M:%fZ', 'now')" if completed_at == "now" else "?"
+        values: list[object | None] = [
+            event_id,
+            run_id,
+            sequence,
+            event_type,
+            stage,
+            status,
+            _safe_trace_text(title, TRACE_SUMMARY_LIMIT) or "Trace Event",
+            _safe_trace_text(summary, TRACE_SUMMARY_LIMIT),
+            _json(_sanitize_trace_payload(payload)),
+        ]
+        if started_at is not None:
+            values.append(started_at)
+        if completed_at != "now":
+            values.append(completed_at)
+        values.extend(
+            [
+                duration_ms if duration_ms is None else max(0, duration_ms),
+                tool_call_id if isinstance(tool_call_id, str) else None,
+                step_id if isinstance(step_id, str) else None,
+            ]
+        )
         connection.execute(
-            """
+            f"""
             INSERT INTO agent_run_events(
                 id, run_id, sequence, event_type, stage, status,
-                title, summary, payload_json
+                title, summary, payload_json, started_at, completed_at,
+                duration_ms, tool_call_id, step_id
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, {started_at_sql}, {completed_at_sql}, ?, ?, ?
+            )
             """,
-            (
-                f"agent-event-{uuid4().hex}",
-                run_id,
-                sequence,
-                event_type,
-                stage,
-                status,
-                title,
-                summary,
-                _json(payload),
-            ),
+            values,
         )
+        row = connection.execute(
+            "SELECT * FROM agent_run_events WHERE id = ?",
+            (event_id,),
+        ).fetchone()
+        if row is None:
+            raise ValueError("AgentRun event insert failed")
+        event = self._event_record(row)
+        self._update_trace_snapshot(connection, run_id, event)
+        return event
+
+    def _update_trace_snapshot(
+        self,
+        connection: sqlite3.Connection,
+        run_id: str,
+        event: Mapping[str, object],
+    ) -> None:
+        row = connection.execute(
+            "SELECT trace_snapshot_json FROM agent_runs WHERE id = ?",
+            (run_id,),
+        ).fetchone()
+        existing = _json_object(row["trace_snapshot_json"]) if row is not None else {}
+        phase_statuses = _phase_statuses(existing.get("phases"))
+        phase_id = _phase_id(str(event.get("stage") or ""), str(event.get("eventType") or ""))
+        event_type = str(event.get("eventType") or "")
+        if event_type in {"run.completed", "run.cancelled", "run.failed"}:
+            for phase in phase_statuses:
+                if phase["status"] == "active":
+                    phase["status"] = "failed" if event_type == "run.failed" else "completed"
+            phase_statuses[-1]["status"] = "failed" if event_type == "run.failed" else "completed"
+        else:
+            for phase in phase_statuses:
+                if phase["id"] == phase_id:
+                    if event_type.endswith(".completed") or event_type in {
+                        "tool_call.completed",
+                        "confirmation.confirmed",
+                        "confirmation.rejected",
+                    }:
+                        phase["status"] = "completed"
+                    else:
+                        phase["status"] = "active"
+                elif phase["status"] == "active":
+                    phase["status"] = "completed"
+        snapshot = {
+            "currentStage": phase_id,
+            "currentStageLabel": _phase_label(phase_id),
+            "currentEventType": event_type,
+            "status": event.get("status"),
+            "title": event.get("title"),
+            "summary": event.get("summary"),
+            "toolCallId": event.get("toolCallId"),
+            "stepId": event.get("stepId"),
+            "lastSequence": event.get("sequence"),
+            "lastEventAt": event.get("createdAt"),
+            "phases": phase_statuses,
+        }
+        connection.execute(
+            """
+            UPDATE agent_runs
+            SET trace_snapshot_json = ?,
+                updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+            WHERE id = ?
+            """,
+            (_json(snapshot), run_id),
+        )
+
+    def _emit_event(self, event: dict[str, object]) -> None:
+        if self._event_sink is not None:
+            self._event_sink(event)
 
     def _run_record(self, row: sqlite3.Row) -> dict[str, object]:
         return {
@@ -928,6 +1192,7 @@ class AgentRunService:
             "plan": _json_object(row["plan_json"]),
             "draft": _json_object(row["draft_json"]),
             "finalOutput": _json_object(row["final_output_json"]),
+            "traceSnapshot": _json_object(row["trace_snapshot_json"]),
             "errorMessage": row["error_message"],
             "stopReason": row["stop_reason"],
             "retryCount": int(row["retry_count"]),
@@ -948,6 +1213,11 @@ class AgentRunService:
             "title": str(row["title"]),
             "summary": row["summary"],
             "payload": _json_object(row["payload_json"]),
+            "startedAt": row["started_at"],
+            "completedAt": row["completed_at"],
+            "durationMs": row["duration_ms"],
+            "toolCallId": row["tool_call_id"],
+            "stepId": row["step_id"],
             "createdAt": str(row["created_at"]),
         }
 
@@ -1055,10 +1325,13 @@ def _title_for_status(status: str) -> str:
 
 def _normalize_budgets(value: Mapping[str, object] | None) -> dict[str, object]:
     budgets = {**DEFAULT_BUDGETS, **dict(value or {})}
-    for key in ("maxSteps", "maxModelCalls", "maxInputTokens", "maxOutputTokens"):
+    for key in ("maxSteps", "maxInputTokens", "maxOutputTokens"):
         raw = budgets.get(key)
         if not isinstance(raw, int) or raw <= 0:
             raise ValueError(f"{key} must be a positive integer")
+    max_model_calls = budgets.get("maxModelCalls")
+    if not isinstance(max_model_calls, int) or max_model_calls < 0:
+        raise ValueError("maxModelCalls must be a non-negative integer")
     duration = budgets.get("maxDurationSeconds")
     if not isinstance(duration, int) or duration <= 0:
         raise ValueError("maxDurationSeconds must be a positive integer")
@@ -1111,3 +1384,110 @@ def _tool_status_label(status: str) -> str:
 
 def _output_type_label(output_type: str) -> str:
     return {"draft": "草稿", "final": "最终成果", "intermediate": "中间成果"}[output_type]
+
+
+def _stage_label(stage: str, status: str) -> str:
+    label = _phase_label(_phase_id(stage, "stage.started"))
+    return f"{label}已完成" if status == "completed" else f"开始{label}"
+
+
+def _phase_id(stage: str, event_type: str) -> str:
+    normalized = stage.lower().replace("-", "_").replace(".", "_")
+    if event_type == "run.created" or "plan" in normalized:
+        return "planning"
+    if "retrieval" in normalized or "search" in normalized or "evidence" in normalized:
+        return "evidence_retrieval"
+    if "source" in normalized or "read" in normalized:
+        return "source_reading"
+    if event_type.startswith("tool_call") or "tool" in normalized:
+        return "tool_calling"
+    if "draft" in normalized or "write" in normalized:
+        return "drafting"
+    if "citation" in normalized or "validate" in normalized:
+        return "citation_validation"
+    if "conflict" in normalized or "audit" in normalized:
+        return "conflict_audit"
+    if "confirmation" in normalized or event_type.startswith("confirmation"):
+        return "waiting_confirmation"
+    if event_type.startswith("output.final") or "final" in normalized:
+        return "finalizing"
+    if event_type in {"run.completed", "run.cancelled", "run.failed"}:
+        return "finalizing"
+    return normalized if normalized in {phase["id"] for phase in TRACE_PHASES} else "planning"
+
+
+def _phase_label(phase_id: str) -> str:
+    for phase in TRACE_PHASES:
+        if phase["id"] == phase_id:
+            return phase["label"]
+    return phase_id
+
+
+def _phase_statuses(value: object) -> list[dict[str, str]]:
+    by_id: dict[str, str] = {}
+    if isinstance(value, list):
+        for item in value:
+            if not isinstance(item, dict):
+                continue
+            phase_id = item.get("id")
+            status = item.get("status")
+            if isinstance(phase_id, str) and isinstance(status, str):
+                by_id[phase_id] = status
+    return [
+        {
+            "id": phase["id"],
+            "label": phase["label"],
+            "status": by_id.get(phase["id"], "pending"),
+        }
+        for phase in TRACE_PHASES
+    ]
+
+
+def _sanitize_trace_payload(payload: Mapping[str, object]) -> dict[str, object]:
+    sanitized = _sanitize_trace_value(payload, key=None)
+    return sanitized if isinstance(sanitized, dict) else {}
+
+
+def _sanitize_trace_value(value: object, *, key: str | None) -> object:
+    if key is not None and _is_sensitive_trace_key(key):
+        return "***"
+    if isinstance(value, str):
+        return _safe_trace_text(value, TRACE_TEXT_LIMIT) or ""
+    if isinstance(value, Mapping):
+        return {
+            str(item_key): _sanitize_trace_value(item_value, key=str(item_key))
+            for item_key, item_value in value.items()
+        }
+    if isinstance(value, Sequence) and not isinstance(value, bytes | bytearray | str):
+        return [_sanitize_trace_value(item, key=key) for item in list(value)[:20]]
+    if isinstance(value, bool | int | float) or value is None:
+        return value
+    return str(value)
+
+
+def _is_sensitive_trace_key(key: str) -> bool:
+    normalized = re.sub(r"[^a-z0-9]", "", key.lower())
+    return normalized in TRACE_SENSITIVE_KEYS or any(
+        token in normalized
+        for token in (
+            "apikey",
+            "authorization",
+            "credential",
+            "fullprompt",
+            "password",
+            "rawcontent",
+            "secret",
+            "token",
+        )
+    )
+
+
+def _safe_trace_text(value: str | None, limit: int) -> str | None:
+    if value is None:
+        return None
+    clean = re.sub(r"(?i)(bearer|api[_-]?key|token|secret)\s*[:=]\s*\S+", r"\1=***", value)
+    clean = re.sub(r"(?i)(sk|ak|rk)-[a-z0-9_\-]{12,}", "***", clean)
+    clean = " ".join(clean.split())
+    if len(clean) <= limit:
+        return clean
+    return f"{clean[:limit].rstrip()}..."

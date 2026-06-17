@@ -2,12 +2,13 @@ import json
 import math
 import re
 import sqlite3
-from collections.abc import AsyncIterator, Callable, Sequence
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from datetime import UTC, datetime
 from time import perf_counter
-from typing import Protocol
+from typing import Literal, Protocol
 from uuid import uuid4
 
+from citemind_worker.agent_run_service import AgentRunService
 from citemind_worker.ark_gateway import ArkModelGateway
 from citemind_worker.citation_validator import CitationValidator
 from citemind_worker.model_catalog import (
@@ -74,11 +75,13 @@ class ConversationService:
         retrieval: HybridRetrievalService | None = None,
         validator: CitationValidator | None = None,
         gateway_factory: GatewayFactory | None = None,
+        agent_runs: AgentRunService | None = None,
     ) -> None:
         self.storage = storage
         self.retrieval = retrieval or HybridRetrievalService(storage)
         self.validator = validator or CitationValidator(storage)
         self.gateway_factory = gateway_factory or _ark_gateway_factory
+        self.agent_runs = agent_runs
 
     def list_conversations(self, knowledge_base_id: str) -> dict[str, object]:
         self._ensure_knowledge_base(knowledge_base_id)
@@ -270,6 +273,8 @@ class ConversationService:
     ) -> AsyncIterator[dict[str, object]]:
         clean_query = _clean_query(query)
         started = perf_counter()
+        trace_run_id: str | None = None
+        trace_finished = False
         conversation = self._ensure_conversation(
             knowledge_base_id=knowledge_base_id,
             conversation_id=conversation_id,
@@ -286,151 +291,482 @@ class ConversationService:
             model_id=effective_chat_model,
             max_output_tokens=max_output_tokens,
         )
-        user_message = self._insert_message(
+        trace_run_id = self._start_answer_trace(
+            knowledge_base_id=knowledge_base_id,
+            query=clean_query,
             conversation_id=str(conversation["id"]),
-            role="user",
-            content=clean_query,
-            model_id=None,
-            model_params={},
-            index_version_id=None,
-        )
-        yield {
-            "type": "conversation.ready",
-            "conversation": conversation,
-            "message": user_message,
-        }
-
-        retrieval = await self.retrieval.retrieve(
-            knowledge_base_id,
-            clean_query,
-            api_key=api_key,
-            base_url=base_url,
+            chat_model=effective_chat_model,
             embedding_model=embedding_model,
-            limit=limit,
-            candidate_limit=candidate_limit,
+            max_output_tokens=max_output_tokens,
         )
-        index_version_id = _index_version_id(retrieval)
-        self._update_message_index(str(user_message["id"]), index_version_id)
-        user_message = self._message_record(str(user_message["id"]))
-        candidate_chunk_ids = _candidate_chunk_ids(retrieval)
-        yield {
-            "type": "retrieval.completed",
-            "indexVersionId": index_version_id,
-            "candidateChunkIds": candidate_chunk_ids,
-            "candidateCount": len(candidate_chunk_ids),
-        }
-
-        if not candidate_chunk_ids:
-            response = self._persist_refusal(
-                conversation=conversation,
-                user_message=user_message,
-                retrieval=retrieval,
-                chat_model=effective_chat_model,
-                generation_time_ms=_elapsed_ms(started),
-                reason="no_retrieval_candidates",
-                history_context=history_context,
+        try:
+            user_message = self._insert_message(
+                conversation_id=str(conversation["id"]),
+                role="user",
+                content=clean_query,
+                model_id=None,
+                model_params={},
+                index_version_id=None,
             )
-            self._record_answer_metrics(
+            yield {
+                "type": "conversation.ready",
+                "conversation": conversation,
+                "message": user_message,
+            }
+
+            self._record_trace_stage(
+                trace_run_id,
+                stage="evidence_retrieval",
+                status="started",
+                title="检索知识库证据",
+                step_id="conversation-retrieval",
+            )
+            retrieval_tool_id = self._start_trace_tool(
+                trace_run_id,
+                tool_name="hybrid_retrieval.search",
+                action_summary="检索当前知识库候选证据",
+                step_id="conversation-retrieval",
+                sanitized_params={
+                    "query": clean_query,
+                    "limit": limit,
+                    "candidateLimit": candidate_limit,
+                    "apiKey": "***" if api_key else None,
+                },
+            )
+            retrieval = await self.retrieval.retrieve(
                 knowledge_base_id,
-                started=started,
-                citation_failed=True,
+                clean_query,
+                api_key=api_key,
+                base_url=base_url,
+                embedding_model=embedding_model,
+                limit=limit,
+                candidate_limit=candidate_limit,
             )
-            for event in _delta_events(str(response["content"])):
-                yield event
-            yield {"type": "answer.completed", "response": response}
-            return
+            index_version_id = _index_version_id(retrieval)
+            self._record_trace_tool_output(
+                retrieval_tool_id,
+                stdout_summary=f"找到 {len(_candidate_chunk_ids(retrieval))} 个候选片段",
+                payload={
+                    "indexVersionId": index_version_id,
+                    "candidateCount": len(_candidate_chunk_ids(retrieval)),
+                },
+            )
+            self._finish_trace_tool(
+                retrieval_tool_id,
+                status="completed",
+                stdout_summary=f"检索完成：{len(_candidate_chunk_ids(retrieval))} 个候选",
+            )
+            self._update_message_index(str(user_message["id"]), index_version_id)
+            user_message = self._message_record(str(user_message["id"]))
+            candidate_chunk_ids = _candidate_chunk_ids(retrieval)
+            self._record_trace_stage(
+                trace_run_id,
+                stage="evidence_retrieval",
+                status="completed",
+                summary=f"检索到 {len(candidate_chunk_ids)} 个候选片段",
+                step_id="conversation-retrieval",
+            )
+            yield {
+                "type": "retrieval.completed",
+                "indexVersionId": index_version_id,
+                "candidateChunkIds": candidate_chunk_ids,
+                "candidateCount": len(candidate_chunk_ids),
+            }
 
-        if api_key is None or not api_key.strip():
-            raise ValueError("尚未配置 Ark API Key，无法生成回答")
-        gateway = self.gateway_factory(api_key, base_url, embedding_model)
-        prompt = _answer_prompt(
-            query=clean_query,
-            retrieval=retrieval,
-            retry_feedback=None,
-            history_context=history_context,
-        )
-        plain_prompt = _plain_answer_prompt(
-            query=clean_query,
-            retrieval=retrieval,
-            retry_feedback=None,
-            history_context=history_context,
-        )
-        attempts: list[dict[str, object]] = []
-        retry_count = 0
-        final_answer: dict[str, object] | None = None
-        final_validation: dict[str, object] | None = None
-        yield {"type": "generation.started", "modelId": effective_chat_model}
+            if not candidate_chunk_ids:
+                response = self._persist_refusal(
+                    conversation=conversation,
+                    user_message=user_message,
+                    retrieval=retrieval,
+                    chat_model=effective_chat_model,
+                    generation_time_ms=_elapsed_ms(started),
+                    reason="no_retrieval_candidates",
+                    history_context=history_context,
+                )
+                self._record_answer_metrics(
+                    knowledge_base_id,
+                    started=started,
+                    citation_failed=True,
+                )
+                self._save_answer_trace_output(trace_run_id, response)
+                self._complete_answer_trace(
+                    trace_run_id,
+                    summary="没有足够证据，已保存拒答结果",
+                )
+                trace_finished = True
+                for event in _delta_events(str(response["content"])):
+                    yield event
+                yield {"type": "answer.completed", "response": response}
+                return
 
-        for attempt_index in range(2):
-            raw_answer, generation_meta = await _generate_answer_candidate(
-                gateway,
-                model=effective_chat_model,
-                structured_prompt=prompt,
-                plain_prompt=plain_prompt,
-                candidate_chunk_ids=candidate_chunk_ids,
-                max_output_tokens=max_output_tokens,
-            )
-            answer = _normalize_answer(raw_answer)
-            validation = self.validator.validate(
-                paragraphs=_paragraphs_for_validation(answer),
-                candidate_chunk_ids=candidate_chunk_ids,
-                index_version_id=index_version_id,
-            )
-            attempts.append(
-                {
-                    "attempt": attempt_index + 1,
-                    "generationMode": generation_meta["mode"],
-                    "modelEvidenceSufficient": answer["evidenceSufficient"],
-                    "validationValid": validation["valid"],
-                    "invalidCitations": validation["invalidCitations"],
-                    "structuredError": generation_meta.get("structuredError"),
-                    "plainFallbackError": generation_meta.get("plainFallbackError"),
-                }
-            )
-            final_answer = answer
-            final_validation = validation
-            if answer["evidenceSufficient"] is True and validation["valid"] is True:
-                break
-            if answer["evidenceSufficient"] is False or attempt_index == 1:
-                break
-            retry_count = 1
+            if api_key is None or not api_key.strip():
+                raise ValueError("尚未配置 Ark API Key，无法生成回答")
+            gateway = self.gateway_factory(api_key, base_url, embedding_model)
             prompt = _answer_prompt(
                 query=clean_query,
                 retrieval=retrieval,
-                retry_feedback=validation,
+                retry_feedback=None,
                 history_context=history_context,
             )
             plain_prompt = _plain_answer_prompt(
                 query=clean_query,
                 retrieval=retrieval,
-                retry_feedback=validation,
+                retry_feedback=None,
                 history_context=history_context,
             )
+            attempts: list[dict[str, object]] = []
+            retry_count = 0
+            final_answer: dict[str, object] | None = None
+            final_validation: dict[str, object] | None = None
+            self._record_trace_stage(
+                trace_run_id,
+                stage="drafting",
+                status="started",
+                title="生成回答",
+                step_id="conversation-generation",
+            )
+            yield {"type": "generation.started", "modelId": effective_chat_model}
 
-        assert final_answer is not None
-        assert final_validation is not None
-        response = self._persist_answer(
-            conversation=conversation,
-            user_message=user_message,
-            retrieval=retrieval,
-            answer=final_answer,
-            validation=final_validation,
-            chat_model=effective_chat_model,
-            max_output_tokens=max_output_tokens,
-            generation_time_ms=_elapsed_ms(started),
-            retry_count=retry_count,
-            attempts=attempts,
-            history_context=history_context,
-        )
-        self._record_answer_metrics(
+            for attempt_index in range(2):
+                attempt_number = attempt_index + 1
+                generation_tool_id = self._start_trace_tool(
+                    trace_run_id,
+                    tool_name="model.generate_structured_answer",
+                    action_summary=f"生成结构化回答候选，第 {attempt_number} 次",
+                    step_id="conversation-generation",
+                    sanitized_params={
+                        "model": effective_chat_model,
+                        "candidateCount": len(candidate_chunk_ids),
+                        "maxOutputTokens": max_output_tokens,
+                    },
+                )
+                raw_answer, generation_meta = await _generate_answer_candidate(
+                    gateway,
+                    model=effective_chat_model,
+                    structured_prompt=prompt,
+                    plain_prompt=plain_prompt,
+                    candidate_chunk_ids=candidate_chunk_ids,
+                    max_output_tokens=max_output_tokens,
+                )
+                self._record_trace_tool_output(
+                    generation_tool_id,
+                    stdout_summary=f"模型返回候选，模式：{generation_meta['mode']}",
+                    payload={
+                        "attempt": attempt_number,
+                        "generationMode": generation_meta["mode"],
+                        "structuredError": generation_meta.get("structuredError"),
+                        "plainFallbackError": generation_meta.get("plainFallbackError"),
+                    },
+                )
+                self._finish_trace_tool(
+                    generation_tool_id,
+                    status="completed",
+                    stdout_summary=f"生成候选完成：{generation_meta['mode']}",
+                )
+                answer = _normalize_answer(raw_answer)
+                self._record_trace_stage(
+                    trace_run_id,
+                    stage="citation_validation",
+                    status="started",
+                    title="校验回答引用",
+                    step_id="conversation-citation-validation",
+                )
+                citation_tool_id = self._start_trace_tool(
+                    trace_run_id,
+                    tool_name="citation.validate",
+                    action_summary=f"校验第 {attempt_number} 次候选引用",
+                    step_id="conversation-citation-validation",
+                    sanitized_params={
+                        "candidateChunkIds": candidate_chunk_ids,
+                        "indexVersionId": index_version_id,
+                    },
+                )
+                validation = self.validator.validate(
+                    paragraphs=_paragraphs_for_validation(answer),
+                    candidate_chunk_ids=candidate_chunk_ids,
+                    index_version_id=index_version_id,
+                )
+                self._record_trace_tool_output(
+                    citation_tool_id,
+                    stdout_summary=_trace_validation_summary(validation),
+                    payload={
+                        "attempt": attempt_number,
+                        "valid": validation["valid"],
+                        "invalidCitations": validation["invalidCitations"],
+                    },
+                )
+                self._finish_trace_tool(
+                    citation_tool_id,
+                    status="completed",
+                    stdout_summary=_trace_validation_summary(validation),
+                )
+                self._record_trace_stage(
+                    trace_run_id,
+                    stage="citation_validation",
+                    status="completed",
+                    summary=_trace_validation_summary(validation),
+                    step_id="conversation-citation-validation",
+                )
+                attempts.append(
+                    {
+                        "attempt": attempt_number,
+                        "generationMode": generation_meta["mode"],
+                        "modelEvidenceSufficient": answer["evidenceSufficient"],
+                        "validationValid": validation["valid"],
+                        "invalidCitations": validation["invalidCitations"],
+                        "structuredError": generation_meta.get("structuredError"),
+                        "plainFallbackError": generation_meta.get("plainFallbackError"),
+                    }
+                )
+                final_answer = answer
+                final_validation = validation
+                if answer["evidenceSufficient"] is True and validation["valid"] is True:
+                    break
+                if answer["evidenceSufficient"] is False or attempt_index == 1:
+                    break
+                retry_count = 1
+                prompt = _answer_prompt(
+                    query=clean_query,
+                    retrieval=retrieval,
+                    retry_feedback=validation,
+                    history_context=history_context,
+                )
+                plain_prompt = _plain_answer_prompt(
+                    query=clean_query,
+                    retrieval=retrieval,
+                    retry_feedback=validation,
+                    history_context=history_context,
+                )
+
+            assert final_answer is not None
+            assert final_validation is not None
+            self._record_trace_stage(
+                trace_run_id,
+                stage="drafting",
+                status="completed",
+                summary=f"生成完成，重试 {retry_count} 次",
+                step_id="conversation-generation",
+            )
+            response = self._persist_answer(
+                conversation=conversation,
+                user_message=user_message,
+                retrieval=retrieval,
+                answer=final_answer,
+                validation=final_validation,
+                chat_model=effective_chat_model,
+                max_output_tokens=max_output_tokens,
+                generation_time_ms=_elapsed_ms(started),
+                retry_count=retry_count,
+                attempts=attempts,
+                history_context=history_context,
+            )
+            self._record_answer_metrics(
+                knowledge_base_id,
+                started=started,
+                citation_failed=final_validation["valid"] is not True,
+            )
+            self._save_answer_trace_output(trace_run_id, response)
+            self._complete_answer_trace(
+                trace_run_id,
+                summary="回答已生成并完成引用校验",
+            )
+            trace_finished = True
+            yield {"type": "citation.validated", "validation": response["citationValidation"]}
+            for event in _delta_events(str(response["content"])):
+                yield event
+            yield {"type": "answer.completed", "response": response}
+        except Exception as error:
+            if trace_run_id is not None and not trace_finished:
+                self._fail_answer_trace(trace_run_id, error)
+            raise
+
+    def _start_answer_trace(
+        self,
+        *,
+        knowledge_base_id: str,
+        query: str,
+        conversation_id: str,
+        chat_model: str,
+        embedding_model: str,
+        max_output_tokens: int,
+    ) -> str | None:
+        if self.agent_runs is None:
+            return None
+        created = self.agent_runs.create(
             knowledge_base_id,
-            started=started,
-            citation_failed=final_validation["valid"] is not True,
+            goal=query,
+            skill_id="conversation_answer",
+            skill_version="1.0.0",
+            title="对话回答",
+            models={"chat": chat_model, "embedding": embedding_model},
+            budgets={
+                "maxSteps": 8,
+                "maxModelCalls": 2,
+                "maxOutputTokens": max_output_tokens,
+                "maxDurationSeconds": 300,
+            },
         )
-        yield {"type": "citation.validated", "validation": response["citationValidation"]}
-        for event in _delta_events(str(response["content"])):
-            yield event
-        yield {"type": "answer.completed", "response": response}
+        run_id = _agent_run_id(created)
+        self.agent_runs.record_skill_loaded(
+            run_id,
+            skill_id="conversation_answer",
+            skill_version="1.0.0",
+            summary="普通对话回答 Trace",
+        )
+        self.agent_runs.update_plan(
+            run_id,
+            {
+                "conversationId": conversation_id,
+                "steps": [
+                    {"id": "conversation-retrieval", "title": "检索当前知识库证据"},
+                    {"id": "conversation-generation", "title": "生成结构化回答"},
+                    {"id": "conversation-citation-validation", "title": "校验引用"},
+                    {"id": "conversation-output", "title": "保存回答结果"},
+                ],
+            },
+            summary="已建立普通对话回答执行计划",
+        )
+        self.agent_runs.transition(
+            run_id,
+            "executing",
+            stage="planning",
+            summary="开始执行普通对话回答",
+        )
+        return run_id
+
+    def _record_trace_stage(
+        self,
+        run_id: str | None,
+        *,
+        stage: str,
+        status: Literal["started", "completed"],
+        title: str | None = None,
+        summary: str | None = None,
+        step_id: str | None = None,
+    ) -> None:
+        if self.agent_runs is None or run_id is None:
+            return
+        self.agent_runs.record_stage(
+            run_id,
+            stage=stage,
+            status=status,
+            title=title,
+            summary=summary,
+            step_id=step_id,
+        )
+
+    def _start_trace_tool(
+        self,
+        run_id: str | None,
+        *,
+        tool_name: str,
+        action_summary: str,
+        step_id: str,
+        sanitized_params: Mapping[str, object],
+    ) -> str | None:
+        if self.agent_runs is None or run_id is None:
+            return None
+        response = self.agent_runs.start_tool_call(
+            run_id,
+            tool_name=tool_name,
+            action_summary=action_summary,
+            step_id=step_id,
+            skill_id="conversation_answer",
+            skill_version="1.0.0",
+            sanitized_params=sanitized_params,
+        )
+        return _agent_tool_call_id(response)
+
+    def _record_trace_tool_output(
+        self,
+        tool_call_id: str | None,
+        *,
+        stdout_summary: str,
+        payload: Mapping[str, object] | None = None,
+    ) -> None:
+        if self.agent_runs is None or tool_call_id is None:
+            return
+        self.agent_runs.record_tool_output(
+            tool_call_id,
+            stdout_summary=stdout_summary,
+            payload=payload,
+        )
+
+    def _finish_trace_tool(
+        self,
+        tool_call_id: str | None,
+        *,
+        status: str,
+        stdout_summary: str | None = None,
+        stderr_summary: str | None = None,
+        error_message: str | None = None,
+    ) -> None:
+        if self.agent_runs is None or tool_call_id is None:
+            return
+        self.agent_runs.finish_tool_call(
+            tool_call_id,
+            status=status,
+            exit_code=0 if status == "completed" else 1,
+            stdout_summary=stdout_summary,
+            stderr_summary=stderr_summary,
+            error_message=error_message,
+        )
+
+    def _save_answer_trace_output(
+        self,
+        run_id: str | None,
+        response: Mapping[str, object],
+    ) -> None:
+        if self.agent_runs is None or run_id is None:
+            return
+        self._record_trace_stage(
+            run_id,
+            stage="finalizing",
+            status="started",
+            title="保存对话回答",
+            step_id="conversation-output",
+        )
+        content = str(response.get("content", ""))
+        self.agent_runs.save_output(
+            run_id,
+            output_type="final",
+            title="对话回答",
+            content=content,
+            payload={
+                "conversationId": _nested_string(response, "conversation", "id"),
+                "assistantMessageId": _nested_string(response, "assistantMessage", "id"),
+                "evidenceSufficient": _nested_bool(response, "answer", "evidenceSufficient"),
+                "citationValidation": response.get("citationValidation"),
+            },
+            citations=_trace_response_citations(response.get("citations")),
+        )
+        self._record_trace_stage(
+            run_id,
+            stage="finalizing",
+            status="completed",
+            summary="对话回答已保存",
+            step_id="conversation-output",
+        )
+
+    def _complete_answer_trace(self, run_id: str | None, *, summary: str) -> None:
+        if self.agent_runs is None or run_id is None:
+            return
+        self.agent_runs.transition(
+            run_id,
+            "completed",
+            stage="finalizing",
+            summary=summary,
+            stop_reason="done",
+        )
+
+    def _fail_answer_trace(self, run_id: str, error: Exception) -> None:
+        if self.agent_runs is None:
+            return
+        self.agent_runs.fail(
+            run_id,
+            error_message=str(error),
+            stage="finalizing",
+        )
 
     def _record_answer_metrics(
         self,
@@ -1150,6 +1486,66 @@ def _validated_paragraphs(validation: dict[str, object]) -> list[dict[str, objec
             }
         )
     return result
+
+
+def _agent_run_id(response: Mapping[str, object]) -> str:
+    run = response.get("run")
+    if not isinstance(run, dict) or not isinstance(run.get("id"), str):
+        raise ValueError("AgentRun response is missing run id")
+    return str(run["id"])
+
+
+def _agent_tool_call_id(response: Mapping[str, object]) -> str:
+    tool_calls = response.get("toolCalls")
+    if not isinstance(tool_calls, list):
+        raise ValueError("AgentRun response is missing tool call id")
+    for tool_call in tool_calls:
+        if isinstance(tool_call, dict) and isinstance(tool_call.get("id"), str):
+            return str(tool_call["id"])
+    raise ValueError("AgentRun response is missing tool call id")
+
+
+def _trace_validation_summary(validation: Mapping[str, object]) -> str:
+    valid_count = len(_valid_citations(dict(validation)))
+    invalid = validation.get("invalidCitations")
+    invalid_count = len(invalid) if isinstance(invalid, list) else 0
+    return f"有效引用 {valid_count}，无效引用 {invalid_count}"
+
+
+def _trace_response_citations(value: object) -> list[dict[str, object]]:
+    if not isinstance(value, list):
+        return []
+    citations: list[dict[str, object]] = []
+    for citation in value:
+        if not isinstance(citation, dict):
+            continue
+        paragraph_index = citation.get("paragraphIndex")
+        chunk_id = citation.get("chunkId")
+        if isinstance(paragraph_index, int) and isinstance(chunk_id, str):
+            citations.append({"paragraphIndex": paragraph_index, "chunkId": chunk_id})
+    return citations
+
+
+def _nested_string(
+    payload: Mapping[str, object],
+    object_key: str,
+    value_key: str,
+) -> str | None:
+    nested = payload.get(object_key)
+    if isinstance(nested, dict) and isinstance(nested.get(value_key), str):
+        return str(nested[value_key])
+    return None
+
+
+def _nested_bool(
+    payload: Mapping[str, object],
+    object_key: str,
+    value_key: str,
+) -> bool | None:
+    nested = payload.get(object_key)
+    if isinstance(nested, dict) and isinstance(nested.get(value_key), bool):
+        return bool(nested[value_key])
+    return None
 
 
 def _valid_citations(validation: dict[str, object]) -> list[dict[str, object]]:

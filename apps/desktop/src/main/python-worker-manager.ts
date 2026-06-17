@@ -8,6 +8,7 @@ import { JsonRpcClient } from "./json-rpc-client";
 import { logger } from "./logger";
 
 const MAX_RESTART_ATTEMPTS = 3;
+type WorkerNotificationListener = (params: unknown) => void;
 
 export class PythonWorkerManager {
   private workerProcess?: ChildProcessWithoutNullStreams;
@@ -15,6 +16,11 @@ export class PythonWorkerManager {
   private startPromise?: Promise<WorkerHealth>;
   private restartAttempts = 0;
   private restartTimer?: NodeJS.Timeout;
+  private readonly notificationListeners = new Map<
+    string,
+    Set<WorkerNotificationListener>
+  >();
+  private notificationDisposers: Array<() => void> = [];
 
   async start(): Promise<WorkerHealth> {
     if (this.startPromise) {
@@ -61,6 +67,25 @@ export class PythonWorkerManager {
     return this.rpc.call<T>(method, params, timeoutMs);
   }
 
+  onNotification(
+    method: string,
+    listener: WorkerNotificationListener,
+  ): () => void {
+    const listeners = this.notificationListeners.get(method) ?? new Set();
+    listeners.add(listener);
+    this.notificationListeners.set(method, listeners);
+    if (this.rpc) {
+      this.bindNotificationListeners(this.rpc);
+    }
+    return () => {
+      listeners.delete(listener);
+      if (listeners.size === 0) {
+        this.notificationListeners.delete(method);
+      }
+      this.bindNotificationListeners(this.rpc);
+    };
+  }
+
   async stop(): Promise<void> {
     if (this.restartTimer) {
       clearTimeout(this.restartTimer);
@@ -71,6 +96,7 @@ export class PythonWorkerManager {
     const currentRpc = this.rpc;
     this.workerProcess = undefined;
     this.rpc = undefined;
+    this.clearNotificationDisposers();
 
     if (!currentProcess || currentProcess.exitCode !== null) {
       currentRpc?.dispose();
@@ -107,6 +133,7 @@ export class PythonWorkerManager {
 
     this.workerProcess = child;
     this.rpc = new JsonRpcClient(child);
+    this.bindNotificationListeners(this.rpc);
     this.pipeWorkerLogs(child);
     child.once("exit", (code, signal) =>
       this.handleUnexpectedExit(child, code, signal),
@@ -121,8 +148,30 @@ export class PythonWorkerManager {
       this.rpc?.dispose();
       this.rpc = undefined;
       this.workerProcess = undefined;
+      this.clearNotificationDisposers();
       throw error;
     }
+  }
+
+  private bindNotificationListeners(rpc: JsonRpcClient | undefined): void {
+    this.clearNotificationDisposers();
+    if (!rpc) {
+      return;
+    }
+    for (const [method, listeners] of this.notificationListeners.entries()) {
+      for (const listener of listeners) {
+        this.notificationDisposers.push(
+          rpc.onNotification(method, (params) => listener(params)),
+        );
+      }
+    }
+  }
+
+  private clearNotificationDisposers(): void {
+    for (const dispose of this.notificationDisposers) {
+      dispose();
+    }
+    this.notificationDisposers = [];
   }
 
   private async waitForHealth(): Promise<WorkerHealth> {

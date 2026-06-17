@@ -1,6 +1,11 @@
 import { useCallback, useEffect, useState } from "react";
 import type {
   AnswerCitation,
+  AgentRunConfirmationRecord,
+  AgentRunEventRecord,
+  AgentRunRecord,
+  AgentRunResponse,
+  AgentRunToolCallRecord,
   BackgroundJobRecord,
   BackgroundJobStatus,
   BuildIndexResponse,
@@ -433,6 +438,15 @@ function App(): React.JSX.Element {
   const [answerResponses, setAnswerResponses] = useState<
     Record<string, ConversationAnswerResponse>
   >({});
+  const [agentRuns, setAgentRuns] = useState<AgentRunRecord[]>([]);
+  const [agentRunTrace, setAgentRunTrace] = useState<AgentRunResponse | null>(
+    null,
+  );
+  const [agentTraceExpanded, setAgentTraceExpanded] = useState(true);
+  const [agentTraceStageFilter, setAgentTraceStageFilter] = useState("all");
+  const [expandedTraceToolId, setExpandedTraceToolId] = useState("");
+  const [agentTraceBusyId, setAgentTraceBusyId] = useState("");
+  const [agentTraceError, setAgentTraceError] = useState("");
   const [chatBusy, setChatBusy] = useState(false);
   const [chatError, setChatError] = useState("");
   const [exportBusyId, setExportBusyId] = useState("");
@@ -701,6 +715,72 @@ function App(): React.JSX.Element {
     }
   }, []);
 
+  const openAgentRunTrace = useCallback(
+    async (
+      runId: string,
+      expand?: boolean,
+      expectedKnowledgeBaseId?: string,
+    ) => {
+      try {
+        const response = await getDesktopApi().agentRuns.get(runId);
+        if (
+          expectedKnowledgeBaseId &&
+          response.run.knowledgeBaseId !== expectedKnowledgeBaseId
+        ) {
+          return;
+        }
+        setAgentRunTrace(response);
+        setAgentRuns((items) => upsertAgentRun(items, response.run));
+        setAgentTraceError("");
+        if (expand !== undefined) {
+          setAgentTraceExpanded(expand);
+        } else {
+          setAgentTraceExpanded(!isAgentRunFinished(response.run.status));
+        }
+      } catch (error) {
+        const message =
+          error instanceof Error ? error.message : "AgentRun Trace 读取失败";
+        if (!message.includes("Preload IPC")) {
+          setAgentTraceError(message);
+        }
+      }
+    },
+    [],
+  );
+
+  const loadAgentRuns = useCallback(
+    async (knowledgeBaseId: string) => {
+      if (!knowledgeBaseId) {
+        setAgentRuns([]);
+        setAgentRunTrace(null);
+        return;
+      }
+      try {
+        const result = await getDesktopApi().agentRuns.list(knowledgeBaseId, {
+          includeTerminal: true,
+          limit: 8,
+        });
+        setAgentRuns(result.runs);
+        setAgentTraceError("");
+        const active =
+          result.runs.find((run) => !isAgentRunFinished(run.status)) ??
+          result.runs[0];
+        if (active) {
+          await openAgentRunTrace(active.id, undefined, knowledgeBaseId);
+        } else {
+          setAgentRunTrace(null);
+        }
+      } catch (error) {
+        const message =
+          error instanceof Error ? error.message : "AgentRun 列表读取失败";
+        if (!message.includes("Preload IPC")) {
+          setAgentTraceError(message);
+        }
+      }
+    },
+    [openAgentRunTrace],
+  );
+
   useEffect(() => {
     void checkHealth();
     void loadSeedStatus();
@@ -716,8 +796,10 @@ function App(): React.JSX.Element {
     void loadParseChecks(activeKnowledgeBaseId);
     void loadIndexStatus(activeKnowledgeBaseId);
     void loadIndexLifecycle(activeKnowledgeBaseId);
+    void loadAgentRuns(activeKnowledgeBaseId);
   }, [
     activeKnowledgeBaseId,
+    loadAgentRuns,
     loadConversations,
     loadIndexStatus,
     loadIndexLifecycle,
@@ -760,6 +842,24 @@ function App(): React.JSX.Element {
     online,
     chatBusy,
   ]);
+
+  useEffect(() => {
+    if (!activeKnowledgeBaseId) {
+      return;
+    }
+    try {
+      return getDesktopApi().agentRuns.onTraceEvent((event) => {
+        setAgentRunTrace((current) =>
+          current?.run.id === event.runId
+            ? { ...current, events: upsertAgentRunEvent(current.events, event) }
+            : current,
+        );
+        void openAgentRunTrace(event.runId, undefined, activeKnowledgeBaseId);
+      });
+    } catch {
+      return undefined;
+    }
+  }, [activeKnowledgeBaseId, openAgentRunTrace]);
 
   useEffect(() => {
     if (!online || !activeKnowledgeBaseId) {
@@ -1194,6 +1294,34 @@ function App(): React.JSX.Element {
       setJobError(error instanceof Error ? error.message : "任务操作失败");
     } finally {
       setJobBusyId("");
+    }
+  };
+
+  const handleAgentRunAction = async (
+    runId: string,
+    action: "resume" | "cancel" | "retry",
+  ): Promise<void> => {
+    setAgentTraceBusyId(`${action}:${runId}`);
+    setAgentTraceError("");
+    try {
+      const response =
+        action === "resume"
+          ? await getDesktopApi().agentRuns.resume(runId)
+          : action === "retry"
+            ? await getDesktopApi().agentRuns.retry(runId)
+            : await getDesktopApi().agentRuns.cancel(
+                runId,
+                "user_cancelled_from_trace",
+              );
+      setAgentRunTrace(response);
+      setAgentRuns((items) => upsertAgentRun(items, response.run));
+      setAgentTraceExpanded(!isAgentRunFinished(response.run.status));
+    } catch (error) {
+      setAgentTraceError(
+        error instanceof Error ? error.message : "AgentRun 操作失败",
+      );
+    } finally {
+      setAgentTraceBusyId("");
     }
   };
 
@@ -2346,6 +2474,29 @@ function App(): React.JSX.Element {
                 />
               )}
 
+            {agentRunTrace && (
+              <AgentRunTracePanel
+                busyAction={agentTraceBusyId}
+                error={agentTraceError}
+                expanded={agentTraceExpanded}
+                expandedToolCallId={expandedTraceToolId}
+                filter={agentTraceStageFilter}
+                response={agentRunTrace}
+                runs={agentRuns}
+                onAction={(runId, action) =>
+                  void handleAgentRunAction(runId, action)
+                }
+                onExpandTool={setExpandedTraceToolId}
+                onFilterChange={setAgentTraceStageFilter}
+                onOpenRun={(runId) =>
+                  void openAgentRunTrace(runId, true, activeKnowledgeBaseId)
+                }
+                onToggleExpanded={() =>
+                  setAgentTraceExpanded((value) => !value)
+                }
+              />
+            )}
+
             {chatError && (
               <div className="message-flow">
                 <div className="inline-error">{chatError}</div>
@@ -2730,6 +2881,280 @@ function App(): React.JSX.Element {
         />
       )}
     </main>
+  );
+}
+
+function AgentRunTracePanel({
+  busyAction,
+  error,
+  expanded,
+  expandedToolCallId,
+  filter,
+  response,
+  runs,
+  onAction,
+  onExpandTool,
+  onFilterChange,
+  onOpenRun,
+  onToggleExpanded,
+}: {
+  busyAction: string;
+  error: string;
+  expanded: boolean;
+  expandedToolCallId: string;
+  filter: string;
+  response: AgentRunResponse;
+  runs: AgentRunRecord[];
+  onAction: (runId: string, action: "resume" | "cancel" | "retry") => void;
+  onExpandTool: (toolCallId: string) => void;
+  onFilterChange: (filter: string) => void;
+  onOpenRun: (runId: string) => void;
+  onToggleExpanded: () => void;
+}): React.JSX.Element {
+  const [now, setNow] = useState(Date.now());
+  const { run, events, toolCalls, confirmations } = response;
+  const finished = isAgentRunFinished(run.status);
+  const snapshot = run.traceSnapshot ?? {};
+  const phases = snapshot.phases ?? [];
+  const currentStage =
+    snapshot.currentStageLabel ?? agentRunStatusLabel(run.status);
+  const elapsedMs = agentRunElapsedMs(run, now);
+  const visibleEvents =
+    filter === "all"
+      ? events
+      : events.filter((event) => eventStageId(event) === filter);
+
+  useEffect(() => {
+    if (finished) {
+      return;
+    }
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [finished]);
+
+  return (
+    <section className={`agent-trace-panel ${expanded ? "expanded" : ""}`}>
+      <header className="agent-trace-heading">
+        <button
+          className="agent-trace-title"
+          type="button"
+          onClick={onToggleExpanded}
+        >
+          <span className={`agent-trace-dot ${run.status}`} />
+          <span>
+            <strong>{finished ? "任务执行记录" : "任务进行中"}</strong>
+            <small>
+              {formatDurationMs(elapsedMs)} · {currentStage}
+            </small>
+          </span>
+          <Icon name="chevron" size={15} />
+        </button>
+        <div className="agent-trace-actions">
+          {runs.length > 1 && (
+            <label className="agent-run-select">
+              <select
+                aria-label="切换 AgentRun"
+                value={run.id}
+                onChange={(event) => onOpenRun(event.target.value)}
+              >
+                {runs.map((item) => (
+                  <option key={item.id} value={item.id}>
+                    {item.title}
+                  </option>
+                ))}
+              </select>
+              <Icon name="chevron" size={12} />
+            </label>
+          )}
+          {run.status === "paused" && (
+            <button
+              className="text-button"
+              disabled={Boolean(busyAction)}
+              type="button"
+              onClick={() => onAction(run.id, "resume")}
+            >
+              {busyAction ? "处理中" : "继续"}
+            </button>
+          )}
+          {run.status === "failed" && (
+            <button
+              className="text-button"
+              disabled={Boolean(busyAction)}
+              type="button"
+              onClick={() => onAction(run.id, "retry")}
+            >
+              {busyAction ? "处理中" : "重试"}
+            </button>
+          )}
+          {!finished && run.status !== "paused" && (
+            <button
+              className="text-button danger-text"
+              disabled={Boolean(busyAction)}
+              type="button"
+              onClick={() => onAction(run.id, "cancel")}
+            >
+              取消
+            </button>
+          )}
+        </div>
+      </header>
+
+      {!expanded ? (
+        <div className="agent-trace-collapsed">
+          <span>{events.length} 条记录</span>
+          <button
+            className="text-button"
+            type="button"
+            onClick={onToggleExpanded}
+          >
+            查看执行记录
+          </button>
+        </div>
+      ) : (
+        <div className="agent-trace-body">
+          {error && <div className="inline-error">{error}</div>}
+          <div className="agent-trace-progress">
+            {phases.map((phase) => (
+              <span className={phase.status} key={phase.id}>
+                {phase.label}
+              </span>
+            ))}
+          </div>
+          <div className="agent-trace-toolbar">
+            <label>
+              <span>阶段</span>
+              <select
+                aria-label="筛选 Trace 阶段"
+                value={filter}
+                onChange={(event) => onFilterChange(event.target.value)}
+              >
+                <option value="all">全部</option>
+                {phases.map((phase) => (
+                  <option key={phase.id} value={phase.id}>
+                    {phase.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <span>
+              {events.length} 条事件 · {toolCalls.length} 个 Tool ·{" "}
+              {pendingConfirmations(confirmations)} 个待确认
+            </span>
+          </div>
+          <div className="agent-trace-list">
+            {visibleEvents.map((event) => {
+              const toolCall = event.toolCallId
+                ? toolCalls.find((item) => item.id === event.toolCallId)
+                : undefined;
+              const expandedTool = Boolean(
+                toolCall && expandedToolCallId === toolCall.id,
+              );
+              return (
+                <article
+                  className={`agent-trace-event ${traceEventTone(event)}`}
+                  key={event.id}
+                >
+                  <button
+                    className="agent-trace-event-main"
+                    type="button"
+                    onClick={() => {
+                      if (toolCall) {
+                        onExpandTool(expandedTool ? "" : toolCall.id);
+                      }
+                    }}
+                  >
+                    <span className="agent-trace-event-icon">
+                      {traceEventSymbol(event)}
+                    </span>
+                    <span>
+                      <strong>{event.title}</strong>
+                      <small>
+                        {traceEventMeta(event)}
+                        {event.summary ? ` · ${event.summary}` : ""}
+                      </small>
+                    </span>
+                    {toolCall && <Icon name="chevron" size={13} />}
+                  </button>
+                  {toolCall && expandedTool && (
+                    <ToolTraceDetail toolCall={toolCall} />
+                  )}
+                  {event.eventType === "run.failed" && (
+                    <div className="agent-trace-recovery">
+                      <span>{event.summary ?? "执行失败"}</span>
+                      <button
+                        className="text-button"
+                        disabled={Boolean(busyAction)}
+                        type="button"
+                        onClick={() => onAction(run.id, "retry")}
+                      >
+                        重新执行
+                      </button>
+                    </div>
+                  )}
+                </article>
+              );
+            })}
+          </div>
+        </div>
+      )}
+    </section>
+  );
+}
+
+function ToolTraceDetail({
+  toolCall,
+}: {
+  toolCall: AgentRunToolCallRecord;
+}): React.JSX.Element {
+  return (
+    <div className="tool-trace-detail">
+      <span>
+        <strong>Tool</strong>
+        {toolCall.toolName}
+      </span>
+      <span>
+        <strong>Skill</strong>
+        {toolCall.skillId
+          ? `${toolCall.skillId}${toolCall.skillVersion ? `@${toolCall.skillVersion}` : ""}`
+          : "未绑定"}
+      </span>
+      <span>
+        <strong>动作</strong>
+        {toolCall.actionSummary}
+      </span>
+      {toolCall.workingDirectory && (
+        <span>
+          <strong>目录</strong>
+          {toolCall.workingDirectory}
+        </span>
+      )}
+      <span>
+        <strong>状态</strong>
+        {toolCall.status}
+        {toolCall.durationMs !== null
+          ? ` · ${formatDurationMs(toolCall.durationMs)}`
+          : ""}
+        {toolCall.exitCode !== null ? ` · exit ${toolCall.exitCode}` : ""}
+      </span>
+      <span>
+        <strong>参数</strong>
+        {JSON.stringify(toolCall.sanitizedParams)}
+      </span>
+      {(toolCall.stdoutSummary ||
+        toolCall.stderrSummary ||
+        toolCall.errorMessage) && (
+        <span>
+          <strong>输出</strong>
+          {[
+            toolCall.stdoutSummary,
+            toolCall.stderrSummary,
+            toolCall.errorMessage,
+          ]
+            .filter(Boolean)
+            .join(" · ")}
+        </span>
+      )}
+    </div>
   );
 }
 
@@ -5036,6 +5461,136 @@ function StatusRow({
   );
 }
 
+function upsertAgentRun(
+  runs: AgentRunRecord[],
+  run: AgentRunRecord,
+): AgentRunRecord[] {
+  return [run, ...runs.filter((item) => item.id !== run.id)];
+}
+
+function upsertAgentRunEvent(
+  events: AgentRunEventRecord[],
+  event: AgentRunEventRecord,
+): AgentRunEventRecord[] {
+  return [...events.filter((item) => item.id !== event.id), event].sort(
+    (left, right) => left.sequence - right.sequence,
+  );
+}
+
+function isAgentRunFinished(status: AgentRunRecord["status"]): boolean {
+  return (
+    status === "completed" || status === "cancelled" || status === "failed"
+  );
+}
+
+function agentRunStatusLabel(status: AgentRunRecord["status"]): string {
+  return {
+    planning: "规划",
+    waiting_confirmation: "等待确认",
+    executing: "执行中",
+    paused: "已暂停",
+    completed: "已完成",
+    cancelled: "已取消",
+    failed: "失败",
+  }[status];
+}
+
+function agentRunElapsedMs(run: AgentRunRecord, now: number): number {
+  const startedAt = run.startedAt ? new Date(run.startedAt).getTime() : now;
+  const completedAt = run.completedAt
+    ? new Date(run.completedAt).getTime()
+    : now;
+  if (Number.isNaN(startedAt) || Number.isNaN(completedAt)) {
+    return 0;
+  }
+  return Math.max(0, completedAt - startedAt);
+}
+
+function eventStageId(event: AgentRunEventRecord): string {
+  const stage = event.stage?.toLowerCase().replace(/[.-]/g, "_") ?? "";
+  if (event.eventType === "run.created" || stage.includes("plan")) {
+    return "planning";
+  }
+  if (
+    stage.includes("retrieval") ||
+    stage.includes("search") ||
+    stage.includes("evidence")
+  ) {
+    return "evidence_retrieval";
+  }
+  if (stage.includes("source") || stage.includes("read")) {
+    return "source_reading";
+  }
+  if (event.eventType.startsWith("tool_call") || stage.includes("tool")) {
+    return "tool_calling";
+  }
+  if (stage.includes("draft") || stage.includes("write")) {
+    return "drafting";
+  }
+  if (stage.includes("citation") || stage.includes("validate")) {
+    return "citation_validation";
+  }
+  if (stage.includes("conflict") || stage.includes("audit")) {
+    return "conflict_audit";
+  }
+  if (
+    stage.includes("confirmation") ||
+    event.eventType.startsWith("confirmation")
+  ) {
+    return "waiting_confirmation";
+  }
+  if (event.eventType.startsWith("output.final") || stage.includes("final")) {
+    return "finalizing";
+  }
+  return stage || "planning";
+}
+
+function pendingConfirmations(
+  confirmations: AgentRunConfirmationRecord[],
+): number {
+  return confirmations.filter((item) => item.status === "pending").length;
+}
+
+function traceEventTone(event: AgentRunEventRecord): string {
+  if (event.eventType.includes("failed") || event.status === "failed") {
+    return "failed";
+  }
+  if (event.eventType.includes("cancelled") || event.status === "cancelled") {
+    return "cancelled";
+  }
+  if (
+    event.eventType.includes("completed") ||
+    event.eventType.includes("confirmed") ||
+    event.eventType.includes("rejected")
+  ) {
+    return "completed";
+  }
+  if (event.eventType.includes("requested")) {
+    return "waiting";
+  }
+  return "running";
+}
+
+function traceEventSymbol(event: AgentRunEventRecord): string {
+  const tone = traceEventTone(event);
+  if (tone === "completed") {
+    return "✓";
+  }
+  if (tone === "failed") {
+    return "!";
+  }
+  if (tone === "waiting") {
+    return "?";
+  }
+  return "›";
+}
+
+function traceEventMeta(event: AgentRunEventRecord): string {
+  const duration =
+    event.durationMs !== null ? ` · ${formatDurationMs(event.durationMs)}` : "";
+  return `#${event.sequence} · ${event.eventType}${duration}`;
+}
+
 function upsertConversation(
   conversations: ConversationRecord[],
   conversation: ConversationRecord,
@@ -5442,6 +5997,15 @@ function parseStatusLabel(status: ParseCheckItem["status"]): string {
 
 function formatNumber(value: number): string {
   return new Intl.NumberFormat("zh-CN").format(value);
+}
+
+function formatDurationMs(value: number): string {
+  const seconds = Math.max(0, Math.floor(value / 1000));
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  const rest = seconds % 60;
+  const parts = hours > 0 ? [hours, minutes, rest] : [minutes, rest];
+  return parts.map((part) => String(part).padStart(2, "0")).join(":");
 }
 
 function formatDateTime(value: string): string {

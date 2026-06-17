@@ -14,11 +14,19 @@ interface JsonRpcResponse {
   error?: JsonRpcErrorPayload;
 }
 
+interface JsonRpcNotification {
+  jsonrpc: "2.0";
+  method: string;
+  params?: unknown;
+}
+
 interface PendingRequest {
   resolve: (value: unknown) => void;
   reject: (reason: Error) => void;
   timeout: NodeJS.Timeout;
 }
+
+type NotificationListener = (params: unknown) => void;
 
 export class JsonRpcRemoteError extends Error {
   constructor(
@@ -33,6 +41,10 @@ export class JsonRpcRemoteError extends Error {
 
 export class JsonRpcClient {
   private readonly pending = new Map<string, PendingRequest>();
+  private readonly notificationListeners = new Map<
+    string,
+    Set<NotificationListener>
+  >();
   private nextId = 1;
   private disposed = false;
 
@@ -78,45 +90,82 @@ export class JsonRpcClient {
     }
   }
 
+  onNotification(method: string, listener: NotificationListener): () => void {
+    const listeners = this.notificationListeners.get(method) ?? new Set();
+    listeners.add(listener);
+    this.notificationListeners.set(method, listeners);
+    return () => {
+      listeners.delete(listener);
+      if (listeners.size === 0) {
+        this.notificationListeners.delete(method);
+      }
+    };
+  }
+
   dispose(): void {
     this.disposed = true;
     this.rejectAll(new Error("JSON-RPC client disposed"));
   }
 
   private handleLine(line: string): void {
-    let response: JsonRpcResponse;
+    let response: JsonRpcResponse | JsonRpcNotification;
 
     try {
-      response = JSON.parse(line) as JsonRpcResponse;
+      response = JSON.parse(line) as JsonRpcResponse | JsonRpcNotification;
     } catch {
       this.rejectAll(new Error("Python Worker wrote invalid JSON to stdout"));
       return;
     }
 
-    if (response.jsonrpc !== "2.0" || typeof response.id !== "string") {
+    if (
+      response.jsonrpc === "2.0" &&
+      "method" in response &&
+      typeof response.method === "string" &&
+      !("id" in response)
+    ) {
+      this.handleNotification(response.method, response.params);
       return;
     }
 
-    const pending = this.pending.get(response.id);
+    if (
+      response.jsonrpc !== "2.0" ||
+      !("id" in response) ||
+      typeof response.id !== "string"
+    ) {
+      return;
+    }
+
+    const rpcResponse = response;
+    const pending = this.pending.get(rpcResponse.id);
     if (!pending) {
       return;
     }
 
     clearTimeout(pending.timeout);
-    this.pending.delete(response.id);
+    this.pending.delete(rpcResponse.id);
 
-    if (response.error) {
+    if (rpcResponse.error) {
       pending.reject(
         new JsonRpcRemoteError(
-          response.error.code,
-          response.error.message,
-          response.error.data,
+          rpcResponse.error.code,
+          rpcResponse.error.message,
+          rpcResponse.error.data,
         ),
       );
       return;
     }
 
-    pending.resolve(response.result);
+    pending.resolve(rpcResponse.result);
+  }
+
+  private handleNotification(method: string, params: unknown): void {
+    const listeners = this.notificationListeners.get(method);
+    if (!listeners) {
+      return;
+    }
+    for (const listener of listeners) {
+      listener(params);
+    }
   }
 
   private rejectAll(error: Error): void {

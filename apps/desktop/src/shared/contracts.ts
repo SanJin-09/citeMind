@@ -753,6 +753,7 @@ export interface AgentRunRecord {
   plan: Record<string, unknown>;
   draft: Record<string, unknown>;
   finalOutput: Record<string, unknown>;
+  traceSnapshot: AgentRunTraceSnapshot;
   errorMessage: string | null;
   stopReason: string | null;
   retryCount: number;
@@ -760,6 +761,26 @@ export interface AgentRunRecord {
   completedAt: string | null;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface AgentRunTracePhase {
+  id: string;
+  label: string;
+  status: "pending" | "active" | "completed" | "failed" | string;
+}
+
+export interface AgentRunTraceSnapshot {
+  currentStage?: string;
+  currentStageLabel?: string;
+  currentEventType?: string;
+  status?: string | null;
+  title?: string | null;
+  summary?: string | null;
+  toolCallId?: string | null;
+  stepId?: string | null;
+  lastSequence?: number;
+  lastEventAt?: string;
+  phases?: AgentRunTracePhase[];
 }
 
 export interface AgentRunEventRecord {
@@ -772,6 +793,11 @@ export interface AgentRunEventRecord {
   title: string;
   summary: string | null;
   payload: Record<string, unknown>;
+  startedAt: string | null;
+  completedAt: string | null;
+  durationMs: number | null;
+  toolCallId: string | null;
+  stepId: string | null;
   createdAt: string;
 }
 
@@ -880,6 +906,23 @@ export interface AgentRunTransitionRequest {
   stopReason?: string | null;
 }
 
+export interface AgentRunStageRequest {
+  runId: string;
+  stage: string;
+  status?: "started" | "completed";
+  title?: string | null;
+  summary?: string | null;
+  stepId?: string | null;
+  durationMs?: number | null;
+}
+
+export interface AgentRunSkillLoadedRequest {
+  runId: string;
+  skillId: string;
+  skillVersion: string;
+  summary?: string | null;
+}
+
 export interface AgentRunToolCallStartRequest {
   runId: string;
   toolName: string;
@@ -889,6 +932,13 @@ export interface AgentRunToolCallStartRequest {
   skillVersion?: string | null;
   workingDirectory?: string | null;
   sanitizedParams?: Record<string, unknown>;
+}
+
+export interface AgentRunToolOutputRequest {
+  toolCallId: string;
+  stdoutSummary?: string | null;
+  stderrSummary?: string | null;
+  payload?: Record<string, unknown>;
 }
 
 export interface AgentRunToolCallFinishRequest {
@@ -930,6 +980,61 @@ export interface AgentRunOutputRequest {
     paragraphIndex: number;
     chunkId: string;
   }>;
+}
+
+export interface AgentFactClass {
+  id: string;
+  label: string;
+  description: string;
+}
+
+export interface AgentNativeToolDescriptor {
+  name: string;
+  title: string;
+  description: string;
+  inputSchema: Record<string, unknown>;
+}
+
+export interface AgentSkillDescriptor {
+  id: string;
+  version: string;
+  title: string;
+  description: string;
+  inputSchema: Record<string, unknown>;
+  allowedTools: string[];
+  executionConstraints: Record<string, unknown>;
+  budgetPolicy: Record<string, unknown>;
+  outputSchema: Record<string, unknown>;
+  factClasses: AgentFactClass[];
+}
+
+export interface AgentSkillListResponse {
+  version: string;
+  nativeTools: AgentNativeToolDescriptor[];
+  factClasses: AgentFactClass[];
+  skills: AgentSkillDescriptor[];
+}
+
+export interface RunAgentSkillRequest {
+  knowledgeBaseId: string;
+  skillId: string;
+  goal: string;
+  sourceIds?: string[];
+  inputs?: Record<string, unknown>;
+  limit?: number;
+  candidateLimit?: number;
+}
+
+export interface AgentToolInvocationRequest {
+  runId: string;
+  toolName: string;
+  params?: Record<string, unknown>;
+}
+
+export interface AgentToolInvocationResponse {
+  toolName: string;
+  result: Record<string, unknown>;
+  agentRun: AgentRunResponse;
 }
 
 export interface CreateWritingProjectRequest {
@@ -1053,6 +1158,10 @@ export interface DesktopApi {
       plan: Record<string, unknown>,
       summary?: string | null,
     ) => Promise<AgentRunResponse>;
+    recordStage: (request: AgentRunStageRequest) => Promise<AgentRunResponse>;
+    recordSkillLoaded: (
+      request: AgentRunSkillLoadedRequest,
+    ) => Promise<AgentRunResponse>;
     transition: (
       request: AgentRunTransitionRequest,
     ) => Promise<AgentRunResponse>;
@@ -1067,6 +1176,9 @@ export interface DesktopApi {
     startToolCall: (
       request: AgentRunToolCallStartRequest,
     ) => Promise<AgentRunResponse>;
+    recordToolOutput: (
+      request: AgentRunToolOutputRequest,
+    ) => Promise<AgentRunResponse>;
     finishToolCall: (
       request: AgentRunToolCallFinishRequest,
     ) => Promise<AgentRunResponse>;
@@ -1080,6 +1192,20 @@ export interface DesktopApi {
       request: AgentRunDelegationRequest,
     ) => Promise<AgentRunResponse>;
     saveOutput: (request: AgentRunOutputRequest) => Promise<AgentRunResponse>;
+    onTraceEvent: (
+      listener: (event: AgentRunEventRecord) => void,
+    ) => () => void;
+  };
+  agentSkills: {
+    list: () => Promise<AgentSkillListResponse>;
+    get: (
+      skillId: string,
+      version?: string | null,
+    ) => Promise<AgentSkillDescriptor>;
+    run: (request: RunAgentSkillRequest) => Promise<AgentRunResponse>;
+    invokeTool: (
+      request: AgentToolInvocationRequest,
+    ) => Promise<AgentToolInvocationResponse>;
   };
   sources: {
     importFiles: (knowledgeBaseId: string) => Promise<ImportFilesResponse>;
@@ -1203,6 +1329,8 @@ export const IPC_CHANNELS = {
   listAgentRuns: "citemind:agent-runs:list",
   getAgentRun: "citemind:agent-runs:get",
   updateAgentRunPlan: "citemind:agent-runs:update-plan",
+  recordAgentRunStage: "citemind:agent-runs:record-stage",
+  recordAgentRunSkillLoaded: "citemind:agent-runs:record-skill-loaded",
   transitionAgentRun: "citemind:agent-runs:transition",
   pauseAgentRun: "citemind:agent-runs:pause",
   resumeAgentRun: "citemind:agent-runs:resume",
@@ -1210,11 +1338,17 @@ export const IPC_CHANNELS = {
   retryAgentRun: "citemind:agent-runs:retry",
   recoverAgentRuns: "citemind:agent-runs:recover",
   startAgentRunToolCall: "citemind:agent-runs:start-tool-call",
+  recordAgentRunToolOutput: "citemind:agent-runs:record-tool-output",
   finishAgentRunToolCall: "citemind:agent-runs:finish-tool-call",
   requestAgentRunConfirmation: "citemind:agent-runs:request-confirmation",
   resolveAgentRunConfirmation: "citemind:agent-runs:resolve-confirmation",
   recordAgentRunDelegation: "citemind:agent-runs:record-delegation",
   saveAgentRunOutput: "citemind:agent-runs:save-output",
+  agentRunTraceEvent: "citemind:agent-runs:trace-event",
+  listAgentSkills: "citemind:agent-skills:list",
+  getAgentSkill: "citemind:agent-skills:get",
+  runAgentSkill: "citemind:agent-skills:run",
+  invokeAgentTool: "citemind:agent-tools:invoke",
   importSourceFiles: "citemind:sources:import-files",
   importWebSource: "citemind:sources:import-web",
   listParseChecks: "citemind:sources:parse-checks",

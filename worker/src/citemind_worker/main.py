@@ -4,6 +4,7 @@ import sys
 from pathlib import Path
 
 from citemind_worker.agent_run_service import AgentRunService
+from citemind_worker.agent_skill_service import AgentSkillService
 from citemind_worker.background_job_service import BackgroundJobService
 from citemind_worker.conversation_service import ConversationService
 from citemind_worker.indexing_service import IndexingService
@@ -38,6 +39,7 @@ def create_server(
     maintenance_service: MaintenanceService | None = None,
     writing_workflow_service: WritingWorkflowService | None = None,
     agent_run_service: AgentRunService | None = None,
+    agent_skill_service: AgentSkillService | None = None,
 ) -> RpcServer:
     server = RpcServer()
     seed_models = model_service or (SeedModelService(storage) if storage is not None else None)
@@ -59,8 +61,11 @@ def create_server(
     retrievals = retrieval_service or (
         HybridRetrievalService(storage) if storage is not None else None
     )
+    agent_runs = agent_run_service or (AgentRunService(storage) if storage is not None else None)
     conversations = conversation_service or (
-        ConversationService(storage, retrieval=retrievals) if storage is not None else None
+        ConversationService(storage, retrieval=retrievals, agent_runs=agent_runs)
+        if storage is not None
+        else None
     )
     maintenance = maintenance_service or (
         MaintenanceService(storage) if storage is not None else None
@@ -68,7 +73,15 @@ def create_server(
     writing = writing_workflow_service or (
         WritingWorkflowService(storage) if storage is not None else None
     )
-    agent_runs = agent_run_service or (AgentRunService(storage) if storage is not None else None)
+    agent_skills = agent_skill_service or (
+        AgentSkillService(storage, retrieval=retrievals, agent_runs=agent_runs)
+        if storage is not None and retrievals is not None and agent_runs is not None
+        else None
+    )
+    if agent_runs is not None:
+        agent_runs.set_event_sink(
+            lambda event: server.notify("agent_runs.trace_event", event)  # type: ignore[arg-type]
+        )
 
     def health(params: JsonValue) -> JsonValue:
         require_object_params(params)
@@ -333,6 +346,65 @@ def create_server(
         except ValueError as error:
             raise RpcError(-32602, str(error)) from error
 
+    def record_agent_stage(params: JsonValue) -> JsonValue:
+        values = require_object_params(params)
+        service = _require_agent_run_service(agent_runs)
+        run_id = _required_str(values, "runId")
+        stage = _required_str(values, "stage")
+        status = _optional_str(values, "status", "started")
+        if status not in {"started", "completed"}:
+            raise RpcError(-32602, "status must be started or completed")
+        title = _optional_nullable_str(values, "title")
+        summary = _optional_nullable_str(values, "summary")
+        step_id = _optional_nullable_str(values, "stepId")
+        duration_ms = _optional_nullable_int(values, "durationMs")
+        try:
+            return service.record_stage(
+                run_id,
+                stage=stage,
+                status=status,  # type: ignore[arg-type]
+                title=title,
+                summary=summary,
+                step_id=step_id,
+                duration_ms=duration_ms,
+            )  # type: ignore[return-value]
+        except ValueError as error:
+            raise RpcError(-32602, str(error)) from error
+
+    def record_agent_skill_loaded(params: JsonValue) -> JsonValue:
+        values = require_object_params(params)
+        service = _require_agent_run_service(agent_runs)
+        run_id = _required_str(values, "runId")
+        skill_id = _required_str(values, "skillId")
+        skill_version = _required_str(values, "skillVersion")
+        summary = _optional_nullable_str(values, "summary")
+        try:
+            return service.record_skill_loaded(
+                run_id,
+                skill_id=skill_id,
+                skill_version=skill_version,
+                summary=summary,
+            )  # type: ignore[return-value]
+        except ValueError as error:
+            raise RpcError(-32602, str(error)) from error
+
+    def record_agent_tool_output(params: JsonValue) -> JsonValue:
+        values = require_object_params(params)
+        service = _require_agent_run_service(agent_runs)
+        tool_call_id = _required_str(values, "toolCallId")
+        stdout_summary = _optional_nullable_str(values, "stdoutSummary")
+        stderr_summary = _optional_nullable_str(values, "stderrSummary")
+        payload = _optional_dict(values, "payload")
+        try:
+            return service.record_tool_output(
+                tool_call_id,
+                stdout_summary=stdout_summary,
+                stderr_summary=stderr_summary,
+                payload=payload,
+            )  # type: ignore[return-value]
+        except ValueError as error:
+            raise RpcError(-32602, str(error)) from error
+
     def transition_agent_run(params: JsonValue) -> JsonValue:
         values = require_object_params(params)
         service = _require_agent_run_service(agent_runs)
@@ -392,6 +464,67 @@ def create_server(
         require_object_params(params)
         service = _require_agent_run_service(agent_runs)
         return service.recover_unfinished()  # type: ignore[return-value]
+
+    def list_agent_skills(params: JsonValue) -> JsonValue:
+        require_object_params(params)
+        service = _require_agent_skill_service(agent_skills)
+        return service.list_skills()  # type: ignore[return-value]
+
+    def get_agent_skill(params: JsonValue) -> JsonValue:
+        values = require_object_params(params)
+        service = _require_agent_skill_service(agent_skills)
+        skill_id = _required_str(values, "skillId")
+        version = _optional_nullable_str(values, "version")
+        try:
+            return service.get_skill(skill_id, version=version)  # type: ignore[return-value]
+        except ValueError as error:
+            raise RpcError(-32602, str(error)) from error
+
+    async def run_agent_skill(params: JsonValue) -> JsonValue:
+        values = require_object_params(params)
+        service = _require_agent_skill_service(agent_skills)
+        knowledge_base_id = _required_str(values, "knowledgeBaseId")
+        skill_id = _required_str(values, "skillId")
+        goal = _required_str(values, "goal")
+        source_ids = _optional_string_list(values, "sourceIds")
+        inputs = _optional_dict(values, "inputs") or {}
+        api_key = _optional_nullable_str(values, "apiKey")
+        base_url = _optional_str(values, "baseUrl", DEFAULT_ARK_BASE_URL)
+        chat_model = _optional_str(values, "chatModel", DEFAULT_CHAT_MODEL)
+        embedding_model = _optional_str(values, "embeddingModel", DEFAULT_EMBEDDING_MODEL)
+        limit = _optional_int(values, "limit", 8)
+        candidate_limit = _optional_int(values, "candidateLimit", 24)
+        try:
+            return await service.run_skill(
+                knowledge_base_id=knowledge_base_id,
+                skill_id=skill_id,
+                goal=goal,
+                source_ids=source_ids,
+                inputs=inputs,
+                api_key=api_key,
+                base_url=base_url,
+                chat_model=chat_model,
+                embedding_model=embedding_model,
+                limit=limit,
+                candidate_limit=candidate_limit,
+            )  # type: ignore[return-value]
+        except ValueError as error:
+            raise RpcError(-32602, str(error)) from error
+
+    async def invoke_agent_tool(params: JsonValue) -> JsonValue:
+        values = require_object_params(params)
+        service = _require_agent_skill_service(agent_skills)
+        run_id = _required_str(values, "runId")
+        tool_name = _required_str(values, "toolName")
+        tool_params = _optional_dict(values, "params") or {}
+        try:
+            return await service.invoke_tool(
+                run_id,
+                tool_name=tool_name,
+                params=tool_params,
+            )  # type: ignore[return-value]
+        except ValueError as error:
+            raise RpcError(-32602, str(error)) from error
 
     def start_agent_tool_call(params: JsonValue) -> JsonValue:
         values = require_object_params(params)
@@ -1083,13 +1216,20 @@ def create_server(
     server.register("agent_runs.list", list_agent_runs)
     server.register("agent_runs.get", get_agent_run)
     server.register("agent_runs.update_plan", update_agent_run_plan)
+    server.register("agent_runs.record_stage", record_agent_stage)
+    server.register("agent_runs.record_skill_loaded", record_agent_skill_loaded)
     server.register("agent_runs.transition", transition_agent_run)
     server.register("agent_runs.pause", pause_agent_run)
     server.register("agent_runs.resume", resume_agent_run)
     server.register("agent_runs.cancel", cancel_agent_run)
     server.register("agent_runs.retry", retry_agent_run)
     server.register("agent_runs.recover", recover_agent_runs)
+    server.register("agent_skills.list", list_agent_skills)
+    server.register("agent_skills.get", get_agent_skill)
+    server.register("agent_skills.run", run_agent_skill)
+    server.register("agent_tools.invoke", invoke_agent_tool)
     server.register("agent_runs.start_tool_call", start_agent_tool_call)
+    server.register("agent_runs.record_tool_output", record_agent_tool_output)
     server.register("agent_runs.finish_tool_call", finish_agent_tool_call)
     server.register("agent_runs.request_confirmation", request_agent_confirmation)
     server.register("agent_runs.resolve_confirmation", resolve_agent_confirmation)
@@ -1189,6 +1329,14 @@ def _require_agent_run_service(
 ) -> AgentRunService:
     if service is None:
         raise RpcError(-32020, "AgentRun service is not available")
+    return service
+
+
+def _require_agent_skill_service(
+    service: AgentSkillService | None,
+) -> AgentSkillService:
+    if service is None:
+        raise RpcError(-32021, "Agent Skill service is not available")
     return service
 
 

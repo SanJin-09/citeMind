@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import pytest
@@ -225,6 +226,110 @@ def test_agent_run_recovery_pause_cancel_and_retry(tmp_path: Path) -> None:
     assert cancelled["run"]["status"] == "cancelled"
     with pytest.raises(ValueError, match="Invalid AgentRun status transition"):
         service.resume(run_id)
+
+
+def test_agent_run_trace_events_snapshot_sanitization_and_sink(tmp_path: Path) -> None:
+    emitted: list[dict[str, object]] = []
+    storage, knowledge_base_id = _seed_agent_storage(tmp_path)
+    service = AgentRunService(storage, event_sink=emitted.append)
+
+    created = service.create(
+        knowledge_base_id,
+        goal="Trace 审计测试",
+        skill_id="research_brief",
+        skill_version="v1",
+        source_ids=["source-a"],
+    )
+    run_id = str(created["run"]["id"])
+    service.record_skill_loaded(
+        run_id,
+        skill_id="research_brief",
+        skill_version="v1",
+        summary="加载研究简报 Skill",
+    )
+    service.update_plan(
+        run_id,
+        {
+            "steps": [{"id": "s1", "title": "检索证据"}],
+            "fullPrompt": "hidden chain prompt",
+            "apiKey": "secret-key",
+        },
+        summary="计划含敏感字段",
+    )
+    service.transition(run_id, "executing", stage="retrieval", summary="开始检索")
+    service.record_stage(
+        run_id,
+        stage="retrieval",
+        status="started",
+        title="检索证据",
+        step_id="s1",
+    )
+    service.record_stage(
+        run_id,
+        stage="retrieval",
+        status="completed",
+        summary="找到候选证据",
+        step_id="s1",
+        duration_ms=42,
+    )
+    tool_started = service.start_tool_call(
+        run_id,
+        tool_name="hybrid_retrieval.search",
+        action_summary="检索 Alpha",
+        step_id="s1",
+        skill_id="research_brief",
+        skill_version="v1",
+        working_directory="/tmp/citemind",
+        sanitized_params={"query": "Alpha", "apiKey": "secret-key"},
+    )
+    tool_call_id = str(tool_started["toolCalls"][0]["id"])
+    service.record_tool_output(
+        tool_call_id,
+        stdout_summary="找到 Alpha 候选",
+        payload={"rawContent": "完整外部返回", "token": "secret-token"},
+    )
+    service.finish_tool_call(
+        tool_call_id,
+        status="failed",
+        exit_code=1,
+        stderr_summary="api_key=secret-key 请求失败",
+    )
+    failed = service.fail(run_id, error_message="token=secret-token model timeout")
+
+    event_types = [event["eventType"] for event in failed["events"]]
+    assert {
+        "run.created",
+        "skill.loaded",
+        "plan.updated",
+        "stage.started",
+        "stage.completed",
+        "tool_call.started",
+        "tool_call.output",
+        "tool_call.failed",
+        "run.failed",
+    } <= set(event_types)
+    assert [event["sequence"] for event in failed["events"]] == list(
+        range(1, len(failed["events"]) + 1)
+    )
+    completed_stage = next(
+        event for event in failed["events"] if event["eventType"] == "stage.completed"
+    )
+    assert completed_stage["durationMs"] == 42
+    assert completed_stage["stepId"] == "s1"
+    tool_output = next(
+        event for event in failed["events"] if event["eventType"] == "tool_call.output"
+    )
+    assert tool_output["toolCallId"] == tool_call_id
+    assert tool_output["startedAt"] is not None
+    assert failed["run"]["traceSnapshot"]["currentStage"] == "finalizing"
+    assert failed["run"]["traceSnapshot"]["lastSequence"] == len(failed["events"])
+    assert emitted[-1]["eventType"] == "run.failed"
+    serialized_trace = json.dumps(failed["events"], ensure_ascii=False)
+    assert "secret-key" not in serialized_trace
+    assert "secret-token" not in serialized_trace
+    assert "hidden chain prompt" not in serialized_trace
+    assert "完整外部返回" not in serialized_trace
+    assert tool_started["toolCalls"][0]["sanitizedParams"]["apiKey"] == "***"
 
 
 def _seed_agent_storage(tmp_path: Path) -> tuple[StorageRuntime, str]:

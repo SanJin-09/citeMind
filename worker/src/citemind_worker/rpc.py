@@ -28,6 +28,7 @@ def require_object_params(params: JsonValue) -> dict[str, JsonValue]:
 class RpcServer:
     def __init__(self) -> None:
         self._methods: dict[str, RpcMethod] = {}
+        self._output_stream: TextIO | None = None
         self.stopped = False
 
     def register(self, method: str, handler: RpcMethod) -> None:
@@ -35,7 +36,21 @@ class RpcServer:
             raise ValueError(f"RPC method is already registered: {method}")
         self._methods[method] = handler
 
+    def notify(self, method: str, params: JsonValue) -> None:
+        if self._output_stream is None:
+            return
+        self._output_stream.write(
+            json.dumps(
+                {"jsonrpc": "2.0", "method": method, "params": params},
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+        )
+        self._output_stream.write("\n")
+        self._output_stream.flush()
+
     async def serve(self, input_stream: TextIO, output_stream: TextIO) -> None:
+        self._output_stream = output_stream
         for line in input_stream:
             response = await self.handle_line(line)
             if response is not None:
@@ -44,6 +59,7 @@ class RpcServer:
                 output_stream.flush()
             if self.stopped:
                 break
+        self._output_stream = None
 
     async def handle_line(self, line: str) -> dict[str, JsonValue] | None:
         try:

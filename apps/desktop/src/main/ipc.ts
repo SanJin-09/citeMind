@@ -1,4 +1,4 @@
-import { dialog, ipcMain } from "electron";
+import { BrowserWindow, dialog, ipcMain } from "electron";
 import { writeFile } from "node:fs/promises";
 import {
   type AgentRunConfirmationRequest,
@@ -8,9 +8,16 @@ import {
   type AgentRunOutputRequest,
   type AgentRunRecoveryResponse,
   type AgentRunResponse,
+  type AgentRunSkillLoadedRequest,
+  type AgentRunStageRequest,
+  type AgentRunToolOutputRequest,
   type AgentRunToolCallFinishRequest,
   type AgentRunToolCallStartRequest,
   type AgentRunTransitionRequest,
+  type AgentSkillDescriptor,
+  type AgentSkillListResponse,
+  type AgentToolInvocationRequest,
+  type AgentToolInvocationResponse,
   type BackgroundJobListResponse,
   type BackgroundJobRecord,
   type BackgroundJobStatus,
@@ -42,6 +49,7 @@ import {
   type ParseChecksResponse,
   type RenameKnowledgeBaseRequest,
   type ResolveDuplicateRequest,
+  type RunAgentSkillRequest,
   type SaveSeedCredentialRequest,
   type SaveKnowledgeBaseRequest,
   SEED_DEFAULTS,
@@ -90,6 +98,12 @@ export function registerIpcHandlers(workerManager: PythonWorkerManager): void {
   for (const channel of Object.values(IPC_CHANNELS)) {
     ipcMain.removeHandler(channel);
   }
+
+  workerManager.onNotification("agent_runs.trace_event", (params) => {
+    for (const window of BrowserWindow.getAllWindows()) {
+      window.webContents.send(IPC_CHANNELS.agentRunTraceEvent, params);
+    }
+  });
 
   ipcMain.handle(IPC_CHANNELS.checkWorkerHealth, () => workerManager.health());
   ipcMain.handle(IPC_CHANNELS.restartWorker, () => workerManager.restart());
@@ -258,6 +272,20 @@ export function registerIpcHandlers(workerManager: PythonWorkerManager): void {
       request,
     );
   });
+  ipcMain.handle(IPC_CHANNELS.recordAgentRunStage, (_event, payload) => {
+    const request = normalizeAgentRunStageRequest(payload);
+    return workerManager.call<AgentRunResponse>(
+      "agent_runs.record_stage",
+      request,
+    );
+  });
+  ipcMain.handle(IPC_CHANNELS.recordAgentRunSkillLoaded, (_event, payload) => {
+    const request = normalizeAgentRunSkillLoadedRequest(payload);
+    return workerManager.call<AgentRunResponse>(
+      "agent_runs.record_skill_loaded",
+      request,
+    );
+  });
   ipcMain.handle(IPC_CHANNELS.transitionAgentRun, (_event, payload) => {
     const request = normalizeAgentRunTransitionRequest(payload);
     return workerManager.call<AgentRunResponse>(
@@ -287,10 +315,61 @@ export function registerIpcHandlers(workerManager: PythonWorkerManager): void {
   ipcMain.handle(IPC_CHANNELS.recoverAgentRuns, () =>
     workerManager.call<AgentRunRecoveryResponse>("agent_runs.recover"),
   );
+  ipcMain.handle(IPC_CHANNELS.listAgentSkills, () =>
+    workerManager.call<AgentSkillListResponse>("agent_skills.list"),
+  );
+  ipcMain.handle(IPC_CHANNELS.getAgentSkill, (_event, payload) => {
+    const request = normalizeAgentSkillLookupRequest(payload);
+    return workerManager.call<AgentSkillDescriptor>(
+      "agent_skills.get",
+      request,
+    );
+  });
+  ipcMain.handle(IPC_CHANNELS.runAgentSkill, async (_event, payload) => {
+    const request = normalizeRunAgentSkillRequest(payload);
+    const summary = await seedStore.summary();
+    const apiKey = await seedStore.readApiKey();
+    return workerManager.call<AgentRunResponse>(
+      "agent_skills.run",
+      {
+        ...request,
+        apiKey,
+        baseUrl: summary.baseUrl,
+        chatModel: summary.defaultChatModel,
+        embeddingModel: summary.defaultEmbeddingModel,
+      },
+      180_000,
+    );
+  });
+  ipcMain.handle(IPC_CHANNELS.invokeAgentTool, async (_event, payload) => {
+    const request = normalizeAgentToolInvocationRequest(payload);
+    const params: Record<string, unknown> = { ...(request.params ?? {}) };
+    if (request.toolName === "hybrid_retrieval.search") {
+      const summary = await seedStore.summary();
+      params.apiKey = await seedStore.readApiKey();
+      params.baseUrl = summary.baseUrl;
+      params.embeddingModel = summary.defaultEmbeddingModel;
+    }
+    return workerManager.call<AgentToolInvocationResponse>(
+      "agent_tools.invoke",
+      {
+        ...request,
+        params,
+      },
+      180_000,
+    );
+  });
   ipcMain.handle(IPC_CHANNELS.startAgentRunToolCall, (_event, payload) => {
     const request = normalizeAgentRunToolCallStartRequest(payload);
     return workerManager.call<AgentRunResponse>(
       "agent_runs.start_tool_call",
+      request,
+    );
+  });
+  ipcMain.handle(IPC_CHANNELS.recordAgentRunToolOutput, (_event, payload) => {
+    const request = normalizeAgentRunToolOutputRequest(payload);
+    return workerManager.call<AgentRunResponse>(
+      "agent_runs.record_tool_output",
       request,
     );
   });
@@ -1403,6 +1482,55 @@ function normalizeListAgentRunsRequest(
   return request;
 }
 
+function normalizeAgentSkillLookupRequest(payload: unknown): {
+  skillId: string;
+  version?: string | null;
+} {
+  if (!isRecord(payload)) {
+    throw new Error("Agent Skill 查询参数无效");
+  }
+  return {
+    skillId: normalizeNonEmptyString(payload.skillId, "Skill ID"),
+    version: normalizeOptionalNullableString(payload.version, "Skill 版本"),
+  };
+}
+
+function normalizeRunAgentSkillRequest(payload: unknown): RunAgentSkillRequest {
+  if (!isRecord(payload)) {
+    throw new Error("Agent Skill 运行参数无效");
+  }
+  const request: RunAgentSkillRequest = {
+    knowledgeBaseId: normalizeKnowledgeBaseId(payload.knowledgeBaseId),
+    skillId: normalizeNonEmptyString(payload.skillId, "Skill ID"),
+    goal: normalizeNonEmptyString(payload.goal, "Skill 目标"),
+    sourceIds: normalizeOptionalStringArray(payload.sourceIds, "来源范围"),
+    inputs: normalizeOptionalRecord(payload.inputs, "Skill 输入"),
+  };
+  if (payload.limit !== undefined) {
+    request.limit = normalizePositiveInteger(payload.limit, "检索结果数");
+  }
+  if (payload.candidateLimit !== undefined) {
+    request.candidateLimit = normalizePositiveInteger(
+      payload.candidateLimit,
+      "检索候选数",
+    );
+  }
+  return request;
+}
+
+function normalizeAgentToolInvocationRequest(
+  payload: unknown,
+): AgentToolInvocationRequest {
+  if (!isRecord(payload)) {
+    throw new Error("Agent Tool 调用参数无效");
+  }
+  return {
+    runId: normalizeAgentRunId(payload.runId),
+    toolName: normalizeNonEmptyString(payload.toolName, "Tool 名称"),
+    params: normalizeOptionalRecord(payload.params, "Tool 参数"),
+  };
+}
+
 function normalizeAgentRunPlanRequest(payload: unknown): {
   runId: string;
   plan: Record<string, unknown>;
@@ -1419,6 +1547,42 @@ function normalizeAgentRunPlanRequest(payload: unknown): {
     runId: normalizeAgentRunId(payload.runId),
     plan,
     summary: normalizeOptionalNullableString(payload.summary, "计划摘要"),
+  };
+}
+
+function normalizeAgentRunStageRequest(payload: unknown): AgentRunStageRequest {
+  if (!isRecord(payload)) {
+    throw new Error("AgentRun 阶段 Trace 参数无效");
+  }
+  const status = payload.status;
+  if (status !== undefined && status !== "started" && status !== "completed") {
+    throw new Error("AgentRun 阶段状态无效");
+  }
+  return {
+    runId: normalizeAgentRunId(payload.runId),
+    stage: normalizeNonEmptyString(payload.stage, "阶段"),
+    status,
+    title: normalizeOptionalNullableString(payload.title, "阶段标题"),
+    summary: normalizeOptionalNullableString(payload.summary, "阶段摘要"),
+    stepId: normalizeOptionalNullableString(payload.stepId, "步骤 ID"),
+    durationMs: normalizeOptionalNullableInteger(
+      payload.durationMs,
+      "阶段耗时",
+    ),
+  };
+}
+
+function normalizeAgentRunSkillLoadedRequest(
+  payload: unknown,
+): AgentRunSkillLoadedRequest {
+  if (!isRecord(payload)) {
+    throw new Error("AgentRun Skill Trace 参数无效");
+  }
+  return {
+    runId: normalizeAgentRunId(payload.runId),
+    skillId: normalizeNonEmptyString(payload.skillId, "Skill ID"),
+    skillVersion: normalizeNonEmptyString(payload.skillVersion, "Skill 版本"),
+    summary: normalizeOptionalNullableString(payload.summary, "Skill 摘要"),
   };
 }
 
@@ -1482,6 +1646,26 @@ function normalizeAgentRunToolCallStartRequest(
       payload.sanitizedParams,
       "脱敏参数",
     ),
+  };
+}
+
+function normalizeAgentRunToolOutputRequest(
+  payload: unknown,
+): AgentRunToolOutputRequest {
+  if (!isRecord(payload)) {
+    throw new Error("AgentRun Tool 输出参数无效");
+  }
+  return {
+    toolCallId: normalizeNonEmptyString(payload.toolCallId, "Tool 调用 ID"),
+    stdoutSummary: normalizeOptionalNullableString(
+      payload.stdoutSummary,
+      "标准输出摘要",
+    ),
+    stderrSummary: normalizeOptionalNullableString(
+      payload.stderrSummary,
+      "错误输出摘要",
+    ),
+    payload: normalizeOptionalRecord(payload.payload, "Tool 输出元数据"),
   };
 }
 
@@ -1687,6 +1871,13 @@ function normalizeOptionalNullableInteger(
   }
   if (typeof value !== "number" || !Number.isInteger(value)) {
     throw new Error(`${label}必须是整数`);
+  }
+  return value;
+}
+
+function normalizePositiveInteger(value: unknown, label: string): number {
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 1) {
+    throw new Error(`${label}必须是正整数`);
   }
   return value;
 }

@@ -8,7 +8,7 @@ from citemind_worker.conversation_service import ConversationService
 from citemind_worker.indexing_service import IndexingService
 from citemind_worker.main import create_server
 from citemind_worker.retrieval_service import HybridRetrievalService
-from citemind_worker.rpc import JsonValue
+from citemind_worker.rpc import JsonValue, RpcServer
 from citemind_worker.storage import StorageRuntime
 
 
@@ -102,6 +102,38 @@ def test_notification_has_no_response() -> None:
     assert responses == []
 
 
+def test_server_can_emit_json_rpc_notifications_during_request() -> None:
+    server = RpcServer()
+    output = StringIO()
+
+    def emit_trace(params: JsonValue) -> JsonValue:
+        server.notify(
+            "agent_runs.trace_event",
+            {"runId": "agent-run-1", "sequence": 1, "eventType": "run.created"},
+        )
+        return {"ok": True}
+
+    server.register("test.emit_trace", emit_trace)
+    asyncio.run(
+        server.serve(
+            StringIO('{"jsonrpc":"2.0","id":"1","method":"test.emit_trace","params":{}}\n'),
+            output,
+        )
+    )
+    lines = [json.loads(line) for line in output.getvalue().splitlines()]
+
+    assert lines[0] == {
+        "jsonrpc": "2.0",
+        "method": "agent_runs.trace_event",
+        "params": {
+            "runId": "agent-run-1",
+            "sequence": 1,
+            "eventType": "run.created",
+        },
+    }
+    assert lines[1]["result"] == {"ok": True}
+
+
 def test_method_not_found() -> None:
     responses = run_server('{"jsonrpc":"2.0","id":2,"method":"unknown","params":{}}\n')
     error = responses[0]["error"]
@@ -131,10 +163,27 @@ def test_health_reports_initialized_storage(tmp_path: Path) -> None:
 
     assert response["result"]["storage"] == {
         "ready": True,
-        "schemaVersion": 7,
+        "schemaVersion": 8,
         "fts5Enabled": True,
         "vectorDimension": 3,
     }
+
+
+def test_agent_skill_rpc_lists_registered_skills(tmp_path: Path) -> None:
+    storage = StorageRuntime(tmp_path, vector_dimension=3)
+    storage.initialize()
+    server = create_server(storage)
+    output = StringIO()
+    asyncio.run(
+        server.serve(
+            StringIO('{"jsonrpc":"2.0","id":"1","method":"agent_skills.list","params":{}}\n'),
+            output,
+        )
+    )
+    response = json.loads(output.getvalue())["result"]
+
+    assert "research_brief" in {skill["id"] for skill in response["skills"]}
+    assert "hybrid_retrieval.search" in {tool["name"] for tool in response["nativeTools"]}
 
 
 def test_writing_rpc_lists_projects_for_knowledge_base(tmp_path: Path) -> None:

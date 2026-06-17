@@ -1,5 +1,9 @@
 import { contextBridge, ipcRenderer } from "electron";
-import { IPC_CHANNELS, type DesktopApi } from "../shared/contracts";
+import {
+  IPC_CHANNELS,
+  type AgentRunEventRecord,
+  type DesktopApi,
+} from "../shared/contracts";
 
 const api: DesktopApi = {
   system: {
@@ -59,6 +63,10 @@ const api: DesktopApi = {
         plan,
         summary,
       }),
+    recordStage: (request) =>
+      ipcRenderer.invoke(IPC_CHANNELS.recordAgentRunStage, request),
+    recordSkillLoaded: (request) =>
+      ipcRenderer.invoke(IPC_CHANNELS.recordAgentRunSkillLoaded, request),
     transition: (request) =>
       ipcRenderer.invoke(IPC_CHANNELS.transitionAgentRun, request),
     pause: (runId) => ipcRenderer.invoke(IPC_CHANNELS.pauseAgentRun, runId),
@@ -69,6 +77,8 @@ const api: DesktopApi = {
     recover: () => ipcRenderer.invoke(IPC_CHANNELS.recoverAgentRuns),
     startToolCall: (request) =>
       ipcRenderer.invoke(IPC_CHANNELS.startAgentRunToolCall, request),
+    recordToolOutput: (request) =>
+      ipcRenderer.invoke(IPC_CHANNELS.recordAgentRunToolOutput, request),
     finishToolCall: (request) =>
       ipcRenderer.invoke(IPC_CHANNELS.finishAgentRunToolCall, request),
     requestConfirmation: (request) =>
@@ -79,6 +89,23 @@ const api: DesktopApi = {
       ipcRenderer.invoke(IPC_CHANNELS.recordAgentRunDelegation, request),
     saveOutput: (request) =>
       ipcRenderer.invoke(IPC_CHANNELS.saveAgentRunOutput, request),
+    onTraceEvent: (listener) => {
+      const handler = (_event: unknown, payload: AgentRunEventRecord): void => {
+        listener(payload);
+      };
+      ipcRenderer.on(IPC_CHANNELS.agentRunTraceEvent, handler);
+      return () => {
+        ipcRenderer.removeListener(IPC_CHANNELS.agentRunTraceEvent, handler);
+      };
+    },
+  },
+  agentSkills: {
+    list: () => ipcRenderer.invoke(IPC_CHANNELS.listAgentSkills),
+    get: (skillId, version) =>
+      ipcRenderer.invoke(IPC_CHANNELS.getAgentSkill, { skillId, version }),
+    run: (request) => ipcRenderer.invoke(IPC_CHANNELS.runAgentSkill, request),
+    invokeTool: (request) =>
+      ipcRenderer.invoke(IPC_CHANNELS.invokeAgentTool, request),
   },
   sources: {
     importFiles: (knowledgeBaseId) =>

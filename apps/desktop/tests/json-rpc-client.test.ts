@@ -79,4 +79,28 @@ describe("JsonRpcClient", () => {
       '{"jsonrpc":"2.0","method":"jobs.progress","params":{"progress":50}}\n',
     );
   });
+
+  it("dispatches server notifications without resolving a request", async () => {
+    const child = createFakeChild();
+    const client = new JsonRpcClient(child);
+    const received: unknown[] = [];
+    client.onNotification("agent_runs.trace_event", (params) => {
+      received.push(params);
+    });
+    const requestLine = nextRequest(child);
+    const resultPromise = client.call<{ status: string }>("system.health");
+    const request = JSON.parse(await requestLine) as { id: string };
+
+    writeResponse(
+      child,
+      '{"jsonrpc":"2.0","method":"agent_runs.trace_event","params":{"runId":"run-1","sequence":1}}',
+    );
+    writeResponse(
+      child,
+      `{"jsonrpc":"2.0","id":"${request.id}","result":{"status":"ok"}}`,
+    );
+
+    await expect(resultPromise).resolves.toEqual({ status: "ok" });
+    expect(received).toEqual([{ runId: "run-1", sequence: 1 }]);
+  });
 });

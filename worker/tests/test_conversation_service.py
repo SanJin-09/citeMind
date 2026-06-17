@@ -3,6 +3,7 @@ import json
 from collections.abc import AsyncIterator, Sequence
 from pathlib import Path
 
+from citemind_worker.agent_run_service import AgentRunService
 from citemind_worker.citation_validator import CitationValidator
 from citemind_worker.conversation_service import (
     DEFAULT_REFUSAL,
@@ -167,6 +168,68 @@ def test_conversation_answer_persists_messages_and_valid_citations(tmp_path: Pat
     messages = ConversationService(storage).messages(str(response["conversation"]["id"]))
     assert [message["role"] for message in messages["messages"]] == ["user", "assistant"]
     assert messages["messages"][1]["citations"][0]["chunkId"] == "chunk-pdf-valid"
+
+
+def test_conversation_answer_emits_agent_run_trace_events(tmp_path: Path) -> None:
+    emitted: list[dict[str, object]] = []
+    storage = StorageRuntime(tmp_path, vector_dimension=3)
+    storage.initialize()
+    knowledge_base_id = _seed_answer_fixture(storage)
+    gateway = FakeAnswerGateway(
+        [
+            {
+                "evidence_sufficient": True,
+                "refusal_reason": None,
+                "paragraphs": [
+                    {
+                        "text": "Alpha 结论来自当前 PDF 证据。",
+                        "evidence_chunk_ids": ["chunk-pdf-valid"],
+                    }
+                ],
+            }
+        ]
+    )
+    agent_runs = AgentRunService(storage, event_sink=emitted.append)
+
+    response = asyncio.run(
+        ConversationService(
+            storage,
+            retrieval=HybridRetrievalService(storage, embedder=QueryEmbedder()),
+            gateway_factory=lambda _key, _base, _embedding: gateway,
+            agent_runs=agent_runs,
+        ).answer(
+            knowledge_base_id=knowledge_base_id,
+            query="Alpha 怎么解释？",
+            api_key="ark-test",
+            chat_model="doubao-test-chat",
+            embedding_model="doubao-test-embedding",
+        )
+    )
+
+    runs = agent_runs.list_runs(knowledge_base_id)["runs"]
+    run_id = str(runs[0]["id"])
+    trace = agent_runs.get(run_id)
+    event_types = {event["eventType"] for event in emitted}
+    tool_names = {tool["toolName"] for tool in trace["toolCalls"]}
+
+    assert runs[0]["skillId"] == "conversation_answer"
+    assert runs[0]["status"] == "completed"
+    assert {
+        "run.created",
+        "skill.loaded",
+        "tool_call.started",
+        "tool_call.output",
+        "tool_call.completed",
+        "output.final.saved",
+        "run.completed",
+    } <= event_types
+    assert {
+        "hybrid_retrieval.search",
+        "model.generate_structured_answer",
+        "citation.validate",
+    } <= tool_names
+    assert trace["outputs"][0]["content"] == response["content"]
+    assert trace["citations"][0]["chunkId"] == "chunk-pdf-valid"
 
 
 def test_conversation_exports_markdown_with_citations_and_usage(tmp_path: Path) -> None:
