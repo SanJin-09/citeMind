@@ -76,6 +76,7 @@ type EvidenceSelection =
   | {
       kind: "citation";
       citation: AnswerCitation;
+      citationNumber?: number;
       retrievalResult?: HybridSearchResult;
       response?: ConversationAnswerResponse;
     }
@@ -89,6 +90,10 @@ const SUGGESTIONS = [
   "为什么回答必须经过引用校验？",
   "比较关键词检索与向量检索的用途",
 ];
+
+const PENDING_CONVERSATION_ID = "pending-conversation";
+const PENDING_USER_MESSAGE_PREFIX = "pending-user:";
+const PENDING_ASSISTANT_MESSAGE_PREFIX = "pending-assistant:";
 
 const FALLBACK_SEED_MODELS: SeedModelDescriptor[] = [
   {
@@ -1068,10 +1073,12 @@ function App(): React.JSX.Element {
   const selectCitation = (
     citation: AnswerCitation,
     response?: ConversationAnswerResponse,
+    citationNumber?: number,
   ): void => {
     setSelectedEvidence({
       kind: "citation",
       citation,
+      citationNumber,
       response,
       retrievalResult: response
         ? retrievalResultForCitation(response, citation)
@@ -1127,6 +1134,36 @@ function App(): React.JSX.Element {
     setSearchError("");
     setSelectedEvidence(null);
     setSourceJumpNotice("");
+    const pendingRequestId = createPendingMessageId();
+    const pendingConversationId = conversationId ?? PENDING_CONVERSATION_ID;
+    const createdAt = new Date().toISOString();
+    const pendingUserMessage: ConversationMessageRecord = {
+      id: `${PENDING_USER_MESSAGE_PREFIX}${pendingRequestId}`,
+      conversationId: pendingConversationId,
+      role: "user",
+      content: value,
+      modelId: null,
+      modelParams: {},
+      indexVersionId: null,
+      createdAt,
+      citations: [],
+    };
+    const pendingAssistantMessage: ConversationMessageRecord = {
+      id: `${PENDING_ASSISTANT_MESSAGE_PREFIX}${pendingRequestId}`,
+      conversationId: pendingConversationId,
+      role: "assistant",
+      content: "",
+      modelId: chatModel,
+      modelParams: {},
+      indexVersionId: null,
+      createdAt,
+      citations: [],
+    };
+    setMessages((items) => [
+      ...items,
+      pendingUserMessage,
+      pendingAssistantMessage,
+    ]);
     try {
       const response = await getDesktopApi().conversations.answer({
         knowledgeBaseId: activeKnowledgeBaseId,
@@ -1141,23 +1178,32 @@ function App(): React.JSX.Element {
         upsertConversation(items, response.conversation),
       );
       setMessages((items) =>
-        uniqueMessages([
-          ...items,
-          response.userMessage,
-          response.assistantMessage,
-        ]),
+        uniqueMessages(
+          items.map((message) => {
+            if (message.id === pendingUserMessage.id) {
+              return response.userMessage;
+            }
+            if (message.id === pendingAssistantMessage.id) {
+              return response.assistantMessage;
+            }
+            return message;
+          }),
+        ),
       );
       setAnswerResponses((items) => ({
         ...items,
         [response.assistantMessage.id]: response,
       }));
       if (response.citations[0]) {
-        selectCitation(response.citations[0], response);
+        selectCitation(response.citations[0], response, 1);
       } else {
         setSelectedEvidence(null);
         setSourceJumpNotice("");
       }
     } catch (error) {
+      setMessages((items) =>
+        items.filter((message) => message.id !== pendingAssistantMessage.id),
+      );
       setQuery(value);
       setChatError(error instanceof Error ? error.message : "回答生成失败");
     } finally {
@@ -2532,20 +2578,6 @@ function App(): React.JSX.Element {
               </div>
             )}
 
-            {chatBusy && (
-              <div className="message-flow">
-                <article className="assistant-message loading-message">
-                  <div className="assistant-heading">
-                    <span className="mini-mark">
-                      <Icon name="sparkle" size={15} />
-                    </span>
-                    <strong>citeMind</strong>
-                  </div>
-                  <p>正在检索当前知识库并校验引用...</p>
-                </article>
-              </div>
-            )}
-
             {!hasStartedConversation && (
               <div className="suggestion-block">
                 <span className="section-label">建议提问</span>
@@ -3676,8 +3708,13 @@ function AssistantAnswerMessage({
   onSelectCitation: (
     citation: AnswerCitation,
     response?: ConversationAnswerResponse,
+    citationNumber?: number,
   ) => void;
 }): React.JSX.Element {
+  if (isPendingAssistantMessage(message)) {
+    return <p className="assistant-thinking">思考回复中...</p>;
+  }
+
   const citations = response?.citations ?? message.citations;
   const paragraphs = response
     ? response.answer.paragraphs
@@ -3694,6 +3731,7 @@ function AssistantAnswerMessage({
   const evidenceSufficient = response
     ? response.answer.evidenceSufficient
     : citations.length > 0;
+  const citationNumbers = citationNumberMap(citations);
 
   return (
     <article className="assistant-message">
@@ -3719,38 +3757,37 @@ function AssistantAnswerMessage({
         </div>
       )}
       <div className="answer-paragraphs">
-        {paragraphs.map((paragraph, paragraphIndex) => {
+        {paragraphs.map((paragraph) => {
           const paragraphCitations = citationsForParagraph(
             citations,
             paragraph.index,
             paragraph.evidenceChunkIds,
           );
+          const citationTail = splitCitationTail(paragraph.text);
           return (
             <section className="answer-paragraph" key={paragraph.index}>
-              <p>{paragraph.text}</p>
-              {paragraphCitations.length > 0 ? (
-                <div className="paragraph-evidence-list">
-                  {paragraphCitations.map((citation, citationIndex) => (
-                    <CitationEvidenceButton
-                      citation={citation}
-                      citationNumber={citationIndex + 1}
-                      key={`${paragraph.index}:${citation.chunkId}`}
-                      response={response}
-                      selected={selectedChunkId === citation.chunkId}
-                      onSelect={onSelectCitation}
-                    />
-                  ))}
-                </div>
-              ) : (
-                <span className="no-citation-note">
-                  {evidenceSufficient
-                    ? "此段没有可展示引用。"
-                    : "此段已按证据不足处理，不展示引用。"}
-                </span>
-              )}
-              <small className="paragraph-index">
-                段落 {paragraphIndex + 1}
-              </small>
+              <p>
+                {citationTail.body}
+                {paragraphCitations.length > 0 ? (
+                  <span className="inline-citation-list">
+                    {paragraphCitations.map((citation) => {
+                      const citationNumber =
+                        citationNumbers.get(citationKey(citation)) ?? 1;
+                      return (
+                        <InlineCitationButton
+                          citation={citation}
+                          citationNumber={citationNumber}
+                          key={`${paragraph.index}:${citationKey(citation)}`}
+                          response={response}
+                          selected={selectedChunkId === citation.chunkId}
+                          onSelect={onSelectCitation}
+                        />
+                      );
+                    })}
+                  </span>
+                ) : null}
+                {citationTail.tail}
+              </p>
             </section>
           );
         })}
@@ -3774,7 +3811,7 @@ function AssistantAnswerMessage({
   );
 }
 
-function CitationEvidenceButton({
+function InlineCitationButton({
   citation,
   citationNumber,
   response,
@@ -3788,28 +3825,21 @@ function CitationEvidenceButton({
   onSelect: (
     citation: AnswerCitation,
     response?: ConversationAnswerResponse,
+    citationNumber?: number,
   ) => void;
 }): React.JSX.Element {
-  const retrievalResult = response
-    ? retrievalResultForCitation(response, citation)
-    : undefined;
   return (
     <button
-      className={`citation-evidence-card ${selected ? "selected" : ""}`}
+      aria-label={`查看引用 ${citationNumber}：${citation.source.displayName}`}
+      className={`inline-citation-ref ${selected ? "selected" : ""}`}
+      title={`${citation.source.displayName} · ${formatLocation(
+        citation.source.type,
+        citation.location,
+      )}`}
       type="button"
-      onClick={() => onSelect(citation, response)}
+      onClick={() => onSelect(citation, response, citationNumber)}
     >
-      <span className="citation-evidence-heading">
-        <strong>
-          [{citationNumber}] {citation.source.displayName}
-        </strong>
-        <small>{formatLocation(citation.source.type, citation.location)}</small>
-      </span>
-      <span className="citation-quote">{citationQuote(citation)}</span>
-      <span className="citation-evidence-meta">
-        <small>证据强度：{evidenceStrength(retrievalResult)}</small>
-        <small>{retrievalLabel(retrievalResult)}</small>
-      </span>
+      {citationNumber}
     </button>
   );
 }
@@ -3859,6 +3889,11 @@ function EvidenceDetail({
           <span className={`source-icon ${sourceToneFromType(source.type)}`}>
             <Icon name="document" size={16} />
           </span>
+          {selection.kind === "citation" && selection.citationNumber ? (
+            <span className="evidence-citation-number">
+              [{selection.citationNumber}]
+            </span>
+          ) : null}
           <div>
             <strong>{source.displayName}</strong>
             <small>
@@ -5614,17 +5649,72 @@ function uniqueMessages(
   });
 }
 
+function createPendingMessageId(): string {
+  return (
+    globalThis.crypto?.randomUUID?.() ??
+    `${Date.now()}-${Math.random().toString(36).slice(2)}`
+  );
+}
+
+function isPendingAssistantMessage(
+  message: ConversationMessageRecord,
+): boolean {
+  return message.id.startsWith(PENDING_ASSISTANT_MESSAGE_PREFIX);
+}
+
 function citationsForParagraph(
   citations: AnswerCitation[],
   paragraphIndex: number,
   evidenceChunkIds: string[],
 ): AnswerCitation[] {
   const evidenceIds = new Set(evidenceChunkIds);
-  return citations.filter(
-    (citation) =>
-      citation.paragraphIndex === paragraphIndex ||
-      evidenceIds.has(citation.chunkId),
+  return uniqueCitations(
+    citations.filter(
+      (citation) =>
+        citation.paragraphIndex === paragraphIndex ||
+        evidenceIds.has(citation.chunkId),
+    ),
   );
+}
+
+function citationNumberMap(citations: AnswerCitation[]): Map<string, number> {
+  const numbers = new Map<string, number>();
+  uniqueCitations(citations).forEach((citation, index) => {
+    numbers.set(citationKey(citation), index + 1);
+  });
+  return numbers;
+}
+
+function uniqueCitations(citations: AnswerCitation[]): AnswerCitation[] {
+  const seen = new Set<string>();
+  return citations.filter((citation) => {
+    const key = citationKey(citation);
+    if (seen.has(key)) {
+      return false;
+    }
+    seen.add(key);
+    return true;
+  });
+}
+
+function citationKey(citation: AnswerCitation): string {
+  return citation.chunkId;
+}
+
+function splitCitationTail(text: string): { body: string; tail: string } {
+  const trimmedLength = text.trimEnd().length;
+  let body = text.slice(0, trimmedLength);
+  const trailingWhitespace = text.slice(trimmedLength);
+  let tail = "";
+  while (body && isCitationTailMark(body.charAt(body.length - 1))) {
+    tail = `${body.charAt(body.length - 1)}${tail}`;
+    body = body.slice(0, -1);
+  }
+  return { body, tail: `${tail}${trailingWhitespace}` };
+}
+
+function isCitationTailMark(value: string): boolean {
+  return "。！？!?；;：:，,、.\"'”’)]）】".includes(value);
 }
 
 function retrievalResultForCitation(
