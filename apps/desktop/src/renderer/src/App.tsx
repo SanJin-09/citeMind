@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type {
   AnswerCitation,
   AgentRunConfirmationRecord,
@@ -6,23 +6,15 @@ import type {
   AgentRunRecord,
   AgentRunResponse,
   AgentRunToolCallRecord,
-  BackgroundJobRecord,
-  BackgroundJobStatus,
-  BuildIndexResponse,
   ConversationAnswerResponse,
   ConversationMessageRecord,
   ConversationRecord,
-  DuplicateAction,
   HybridSearchResult,
-  IndexBuildEstimate,
-  IndexVersionRecord,
   KnowledgeBaseRecord,
   KnowledgeBaseSource,
   MaintenanceStatus,
   ModelCapabilityStatus,
   ModelValidationStatus,
-  ParseCheckItem,
-  ParseCheckSummary,
   SeedCredentialStatus,
   SeedModelDescriptor,
   SourceOrganizationResponse,
@@ -68,9 +60,7 @@ type KnowledgeBaseDialogMode = "create" | "rename" | "delete";
 
 type ConfirmAction =
   | { kind: "delete-source"; source: KnowledgeBaseSource }
-  | { kind: "delete-conversation"; conversation: ConversationRecord }
-  | { kind: "delete-index" }
-  | { kind: "rebuild-index" };
+  | { kind: "delete-conversation"; conversation: ConversationRecord };
 
 type EvidenceSelection =
   | {
@@ -221,86 +211,6 @@ const FALLBACK_SOURCES: KnowledgeBaseSource[] = [
   },
 ];
 
-const FALLBACK_JOBS: BackgroundJobRecord[] = [
-  {
-    id: "demo-job-1",
-    jobType: "source.import",
-    targetId: "demo-source-4",
-    status: "running",
-    progress: 0.42,
-    checkpoint: {
-      stages: [
-        { id: "parse", label: "解析", status: "completed", progress: 1 },
-        { id: "ocr", label: "OCR", status: "running", progress: 0.68 },
-        {
-          id: "embedding",
-          label: "Embedding",
-          status: "pending",
-          progress: 0,
-        },
-        { id: "index", label: "索引", status: "pending", progress: 0 },
-      ],
-    },
-    retryCount: 0,
-    errorMessage: null,
-    createdAt: "",
-    updatedAt: "",
-  },
-];
-
-const FALLBACK_PARSE_CHECKS: ParseCheckItem[] = [
-  {
-    sourceId: "demo-source-1",
-    sourceVersionId: "demo-source-version-1",
-    sourceType: "pdf",
-    displayName: "RAG 产品与架构方案",
-    uri: null,
-    status: "success",
-    sourceStatus: "processing",
-    versionStatus: "parsed",
-    jobStatus: "completed",
-    errorMessage: null,
-    duplicateOfSourceId: null,
-    duplicateKind: null,
-    duplicateResolution: null,
-    duplicateActions: [],
-    originalHash: "demo",
-    contentHash: "demo-content",
-    originalPath: null,
-    snapshotPath: null,
-    parseArtifactPath: null,
-    preview: "模型只能引用本次检索得到且经过后端校验的文本块。",
-    chunkCount: 3,
-    createdAt: "",
-    updatedAt: "",
-  },
-  {
-    sourceId: "demo-source-4",
-    sourceVersionId: "demo-source-version-4",
-    sourceType: "docx",
-    displayName: "混合检索实验记录",
-    uri: null,
-    status: "processing",
-    sourceStatus: "processing",
-    versionStatus: "processing",
-    jobStatus: "running",
-    errorMessage: null,
-    duplicateOfSourceId: null,
-    duplicateKind: null,
-    duplicateResolution: null,
-    duplicateActions: [],
-    originalHash: "demo-2",
-    contentHash: null,
-    originalPath: null,
-    snapshotPath: null,
-    parseArtifactPath: null,
-    preview: "正在解析文档结构，索引完成前不会进入检索结果。",
-    chunkCount: 0,
-    createdAt: "",
-    updatedAt: "",
-  },
-];
-
 function getDesktopApi(): Window["citeMind"] {
   if (!window.citeMind) {
     throw new Error("Preload IPC 未加载，请检查桌面端启动日志");
@@ -380,26 +290,6 @@ function App(): React.JSX.Element {
   const [selectedSourceIds, setSelectedSourceIds] = useState(
     FALLBACK_SOURCES.map((source) => source.id),
   );
-  const [jobs, setJobs] = useState<BackgroundJobRecord[]>(FALLBACK_JOBS);
-  const [jobsPanelOpen, setJobsPanelOpen] = useState(true);
-  const [jobBusyId, setJobBusyId] = useState("");
-  const [jobError, setJobError] = useState("");
-  const [parseChecks, setParseChecks] = useState<ParseCheckItem[]>(
-    FALLBACK_PARSE_CHECKS,
-  );
-  const [parseSummary, setParseSummary] = useState<ParseCheckSummary>(
-    summarizeParseChecks(FALLBACK_PARSE_CHECKS),
-  );
-  const [parsePanelOpen, setParsePanelOpen] = useState(true);
-  const [indexStatus, setIndexStatus] = useState<BuildIndexResponse | null>(
-    null,
-  );
-  const [indexBusy, setIndexBusy] = useState(false);
-  const [indexError, setIndexError] = useState("");
-  const [indexVersions, setIndexVersions] = useState<IndexVersionRecord[]>([]);
-  const [indexEstimate, setIndexEstimate] = useState<IndexBuildEstimate | null>(
-    null,
-  );
   const [sourceDeleteBusyId, setSourceDeleteBusyId] = useState("");
   const [sourceMaintenance, setSourceMaintenance] =
     useState<SourceVersionsResponse | null>(null);
@@ -417,7 +307,6 @@ function App(): React.JSX.Element {
     reviewAt: "",
     expiryStatus: "active" as KnowledgeBaseSource["expiryStatus"],
   });
-  const [duplicateBusyId, setDuplicateBusyId] = useState("");
   const [confirmAction, setConfirmAction] = useState<ConfirmAction | null>(
     null,
   );
@@ -443,13 +332,10 @@ function App(): React.JSX.Element {
   const [answerResponses, setAnswerResponses] = useState<
     Record<string, ConversationAnswerResponse>
   >({});
-  const [agentRuns, setAgentRuns] = useState<AgentRunRecord[]>([]);
-  const [agentRunTrace, setAgentRunTrace] = useState<AgentRunResponse | null>(
-    null,
-  );
-  const [agentTraceExpanded, setAgentTraceExpanded] = useState(true);
-  const [agentTraceStageFilter, setAgentTraceStageFilter] = useState("all");
-  const [expandedTraceToolId, setExpandedTraceToolId] = useState("");
+  const [agentRunTraces, setAgentRunTraces] = useState<
+    Record<string, AgentRunResponse>
+  >({});
+  const pendingTraceMessageIdRef = useRef("");
   const [agentTraceBusyId, setAgentTraceBusyId] = useState("");
   const [agentTraceError, setAgentTraceError] = useState("");
   const [chatBusy, setChatBusy] = useState(false);
@@ -626,82 +512,6 @@ function App(): React.JSX.Element {
     [loadSources],
   );
 
-  const loadJobs = useCallback(async () => {
-    try {
-      const result = await getDesktopApi().jobs.list({
-        includeTerminal: false,
-        limit: 20,
-      });
-      setJobs(result.jobs);
-      setJobError("");
-    } catch (error) {
-      const message =
-        error instanceof Error ? error.message : "任务状态读取失败";
-      if (!message.includes("Preload IPC")) {
-        setJobError(message);
-      }
-    }
-  }, []);
-
-  const loadParseChecks = useCallback(async (knowledgeBaseId: string) => {
-    if (!knowledgeBaseId) {
-      setParseChecks([]);
-      setParseSummary(emptyParseSummary());
-      return;
-    }
-    try {
-      const result = await getDesktopApi().sources.parseChecks(knowledgeBaseId);
-      setParseChecks(result.items);
-      setParseSummary(result.summary);
-      setImportError("");
-    } catch (error) {
-      const message =
-        error instanceof Error ? error.message : "解析检查状态读取失败";
-      if (!message.includes("Preload IPC")) {
-        setImportError(message);
-      }
-    }
-  }, []);
-
-  const loadIndexStatus = useCallback(async (knowledgeBaseId: string) => {
-    if (!knowledgeBaseId) {
-      setIndexStatus(null);
-      return;
-    }
-    try {
-      setIndexStatus(await getDesktopApi().indexes.status(knowledgeBaseId));
-      setIndexError("");
-    } catch (error) {
-      const message =
-        error instanceof Error ? error.message : "索引状态读取失败";
-      if (!message.includes("Preload IPC")) {
-        setIndexError(message);
-      }
-    }
-  }, []);
-
-  const loadIndexLifecycle = useCallback(async (knowledgeBaseId: string) => {
-    if (!knowledgeBaseId) {
-      setIndexVersions([]);
-      setIndexEstimate(null);
-      return;
-    }
-    try {
-      const [versions, estimate] = await Promise.all([
-        getDesktopApi().indexes.list(knowledgeBaseId),
-        getDesktopApi().indexes.estimate(knowledgeBaseId),
-      ]);
-      setIndexVersions(versions.versions);
-      setIndexEstimate(estimate);
-    } catch (error) {
-      const message =
-        error instanceof Error ? error.message : "索引版本状态读取失败";
-      if (!message.includes("Preload IPC")) {
-        setIndexError(message);
-      }
-    }
-  }, []);
-
   const loadConversations = useCallback(async (knowledgeBaseId: string) => {
     if (!knowledgeBaseId) {
       setConversations([]);
@@ -720,10 +530,28 @@ function App(): React.JSX.Element {
     }
   }, []);
 
+  const storeAgentRunTrace = useCallback(
+    (response: AgentRunResponse, preferredMessageId?: string) => {
+      if (response.run.skillId !== "conversation_answer") {
+        return;
+      }
+      const messageId =
+        preferredMessageId || traceAssistantMessageId(response) || "";
+      if (!messageId) {
+        return;
+      }
+      setAgentRunTraces((items) => ({
+        ...items,
+        [messageId]: mergeAgentRunResponse(items[messageId], response),
+      }));
+    },
+    [],
+  );
+
   const openAgentRunTrace = useCallback(
     async (
       runId: string,
-      expand?: boolean,
+      preferredMessageId?: string,
       expectedKnowledgeBaseId?: string,
     ) => {
       try {
@@ -734,14 +562,8 @@ function App(): React.JSX.Element {
         ) {
           return;
         }
-        setAgentRunTrace(response);
-        setAgentRuns((items) => upsertAgentRun(items, response.run));
+        storeAgentRunTrace(response, preferredMessageId);
         setAgentTraceError("");
-        if (expand !== undefined) {
-          setAgentTraceExpanded(expand);
-        } else {
-          setAgentTraceExpanded(!isAgentRunFinished(response.run.status));
-        }
       } catch (error) {
         const message =
           error instanceof Error ? error.message : "AgentRun Trace 读取失败";
@@ -750,31 +572,40 @@ function App(): React.JSX.Element {
         }
       }
     },
-    [],
+    [storeAgentRunTrace],
   );
 
-  const loadAgentRuns = useCallback(
-    async (knowledgeBaseId: string) => {
-      if (!knowledgeBaseId) {
-        setAgentRuns([]);
-        setAgentRunTrace(null);
+  const loadConversationAgentTraces = useCallback(
+    async (knowledgeBaseId: string, targetConversationId: string) => {
+      if (!knowledgeBaseId || !targetConversationId) {
+        setAgentRunTraces({});
         return;
       }
       try {
         const result = await getDesktopApi().agentRuns.list(knowledgeBaseId, {
           includeTerminal: true,
-          limit: 8,
+          limit: 200,
         });
-        setAgentRuns(result.runs);
+        const matchingRuns = result.runs.filter(
+          (run) =>
+            run.skillId === "conversation_answer" &&
+            run.plan.conversationId === targetConversationId,
+        );
+        const responses = await Promise.all(
+          matchingRuns.map((run) => getDesktopApi().agentRuns.get(run.id)),
+        );
+        const traces = responses.reduce<Record<string, AgentRunResponse>>(
+          (items, response) => {
+            const messageId = traceAssistantMessageId(response);
+            if (messageId) {
+              items[messageId] = response;
+            }
+            return items;
+          },
+          {},
+        );
+        setAgentRunTraces(traces);
         setAgentTraceError("");
-        const active =
-          result.runs.find((run) => !isAgentRunFinished(run.status)) ??
-          result.runs[0];
-        if (active) {
-          await openAgentRunTrace(active.id, undefined, knowledgeBaseId);
-        } else {
-          setAgentRunTrace(null);
-        }
       } catch (error) {
         const message =
           error instanceof Error ? error.message : "AgentRun 列表读取失败";
@@ -783,33 +614,21 @@ function App(): React.JSX.Element {
         }
       }
     },
-    [openAgentRunTrace],
+    [],
   );
 
   useEffect(() => {
     void checkHealth();
     void loadSeedStatus();
-    void loadJobs();
     void loadKnowledgeBases();
-  }, [checkHealth, loadJobs, loadKnowledgeBases, loadSeedStatus]);
+  }, [checkHealth, loadKnowledgeBases, loadSeedStatus]);
 
   useEffect(() => {
     if (!activeKnowledgeBaseId) {
       return;
     }
     void loadConversations(activeKnowledgeBaseId);
-    void loadParseChecks(activeKnowledgeBaseId);
-    void loadIndexStatus(activeKnowledgeBaseId);
-    void loadIndexLifecycle(activeKnowledgeBaseId);
-    void loadAgentRuns(activeKnowledgeBaseId);
-  }, [
-    activeKnowledgeBaseId,
-    loadAgentRuns,
-    loadConversations,
-    loadIndexStatus,
-    loadIndexLifecycle,
-    loadParseChecks,
-  ]);
+  }, [activeKnowledgeBaseId, loadConversations]);
 
   useEffect(() => {
     setWritingOpen(false);
@@ -834,19 +653,10 @@ function App(): React.JSX.Element {
       return;
     }
     const timer = window.setInterval(() => {
-      void loadJobs();
-      void loadParseChecks(activeKnowledgeBaseId);
-      void loadIndexStatus(activeKnowledgeBaseId);
+      void loadSources(activeKnowledgeBaseId);
     }, 1800);
     return () => window.clearInterval(timer);
-  }, [
-    activeKnowledgeBaseId,
-    loadIndexStatus,
-    loadJobs,
-    loadParseChecks,
-    online,
-    chatBusy,
-  ]);
+  }, [activeKnowledgeBaseId, loadSources, online, chatBusy]);
 
   useEffect(() => {
     if (!activeKnowledgeBaseId) {
@@ -854,12 +664,12 @@ function App(): React.JSX.Element {
     }
     try {
       return getDesktopApi().agentRuns.onTraceEvent((event) => {
-        setAgentRunTrace((current) =>
-          current?.run.id === event.runId
-            ? { ...current, events: upsertAgentRunEvent(current.events, event) }
-            : current,
+        setAgentRunTraces((items) => updateAgentRunTraceEvent(items, event));
+        void openAgentRunTrace(
+          event.runId,
+          pendingTraceMessageIdRef.current,
+          activeKnowledgeBaseId,
         );
-        void openAgentRunTrace(event.runId, undefined, activeKnowledgeBaseId);
       });
     } catch {
       return undefined;
@@ -907,6 +717,8 @@ function App(): React.JSX.Element {
     setConversationId(null);
     setMessages([]);
     setAnswerResponses({});
+    setAgentRunTraces({});
+    pendingTraceMessageIdRef.current = "";
     setSelectedEvidence(null);
     setSourceJumpNotice("");
     setChatError("");
@@ -990,6 +802,10 @@ function App(): React.JSX.Element {
       );
       setMessages(result.messages);
       setAnswerResponses({});
+      await loadConversationAgentTraces(
+        activeKnowledgeBaseId,
+        targetConversationId,
+      );
       setSelectedEvidence(null);
       setSourceJumpNotice("");
     } catch (error) {
@@ -1159,6 +975,7 @@ function App(): React.JSX.Element {
       createdAt,
       citations: [],
     };
+    pendingTraceMessageIdRef.current = pendingAssistantMessage.id;
     setMessages((items) => [
       ...items,
       pendingUserMessage,
@@ -1194,6 +1011,22 @@ function App(): React.JSX.Element {
         ...items,
         [response.assistantMessage.id]: response,
       }));
+      setAgentRunTraces((items) => {
+        const next = { ...items };
+        const pendingTrace = next[pendingAssistantMessage.id];
+        delete next[pendingAssistantMessage.id];
+        if (pendingTrace) {
+          next[response.assistantMessage.id] = pendingTrace;
+        }
+        return next;
+      });
+      if (response.agentRunId) {
+        await openAgentRunTrace(
+          response.agentRunId,
+          response.assistantMessage.id,
+          activeKnowledgeBaseId,
+        );
+      }
       if (response.citations[0]) {
         selectCitation(response.citations[0], response, 1);
       } else {
@@ -1204,9 +1037,17 @@ function App(): React.JSX.Element {
       setMessages((items) =>
         items.filter((message) => message.id !== pendingAssistantMessage.id),
       );
+      setAgentRunTraces((items) => {
+        const next = { ...items };
+        delete next[pendingAssistantMessage.id];
+        return next;
+      });
       setQuery(value);
       setChatError(error instanceof Error ? error.message : "回答生成失败");
     } finally {
+      if (pendingTraceMessageIdRef.current === pendingAssistantMessage.id) {
+        pendingTraceMessageIdRef.current = "";
+      }
       setChatBusy(false);
     }
   };
@@ -1313,36 +1154,6 @@ function App(): React.JSX.Element {
     }
   };
 
-  const handleJobAction = async (
-    jobId: string,
-    action: "pause" | "resume" | "cancel" | "retry" | "recover",
-  ): Promise<void> => {
-    setJobBusyId(action === "recover" ? "recover" : jobId);
-    setJobError("");
-    try {
-      if (action === "pause") {
-        await getDesktopApi().jobs.pause(jobId);
-      }
-      if (action === "resume") {
-        await getDesktopApi().jobs.resume(jobId);
-      }
-      if (action === "cancel") {
-        await getDesktopApi().jobs.cancel(jobId);
-      }
-      if (action === "retry") {
-        await getDesktopApi().jobs.retry(jobId);
-      }
-      if (action === "recover") {
-        await getDesktopApi().jobs.recover();
-      }
-      await loadJobs();
-    } catch (error) {
-      setJobError(error instanceof Error ? error.message : "任务操作失败");
-    } finally {
-      setJobBusyId("");
-    }
-  };
-
   const handleAgentRunAction = async (
     runId: string,
     action: "resume" | "cancel" | "retry",
@@ -1359,9 +1170,9 @@ function App(): React.JSX.Element {
                 runId,
                 "user_cancelled_from_trace",
               );
-      setAgentRunTrace(response);
-      setAgentRuns((items) => upsertAgentRun(items, response.run));
-      setAgentTraceExpanded(!isAgentRunFinished(response.run.status));
+      setAgentRunTraces((items) =>
+        updateAgentRunTraceResponse(items, response),
+      );
     } catch (error) {
       setAgentTraceError(
         error instanceof Error ? error.message : "AgentRun 操作失败",
@@ -1372,13 +1183,7 @@ function App(): React.JSX.Element {
   };
 
   const refreshImportState = async (knowledgeBaseId: string): Promise<void> => {
-    await Promise.all([
-      loadSources(knowledgeBaseId),
-      loadJobs(),
-      loadParseChecks(knowledgeBaseId),
-      loadIndexStatus(knowledgeBaseId),
-      loadIndexLifecycle(knowledgeBaseId),
-    ]);
+    await loadSources(knowledgeBaseId);
   };
 
   const importFiles = async (): Promise<void> => {
@@ -1422,24 +1227,6 @@ function App(): React.JSX.Element {
       setImportError(error instanceof Error ? error.message : "网页导入失败");
     } finally {
       setImportBusy(false);
-    }
-  };
-
-  const buildIndex = async (): Promise<void> => {
-    if (!activeKnowledgeBaseId) {
-      setIndexError("请先选择知识库");
-      return;
-    }
-    setIndexBusy(true);
-    setIndexError("");
-    try {
-      const result = await getDesktopApi().indexes.build(activeKnowledgeBaseId);
-      setIndexStatus(result);
-      await refreshImportState(activeKnowledgeBaseId);
-    } catch (error) {
-      setIndexError(error instanceof Error ? error.message : "索引构建失败");
-    } finally {
-      setIndexBusy(false);
     }
   };
 
@@ -1673,9 +1460,7 @@ function App(): React.JSX.Element {
       );
       setSourceVersionDiff(null);
       if (rebuild && activeKnowledgeBaseId) {
-        setIndexStatus(
-          await getDesktopApi().indexes.rebuild(activeKnowledgeBaseId),
-        );
+        await getDesktopApi().indexes.rebuild(activeKnowledgeBaseId);
       }
       if (activeKnowledgeBaseId) {
         await refreshImportState(activeKnowledgeBaseId);
@@ -1743,123 +1528,6 @@ function App(): React.JSX.Element {
     }
   };
 
-  const resolveDuplicate = async (
-    sourceId: string,
-    action: DuplicateAction,
-  ): Promise<void> => {
-    if (!activeKnowledgeBaseId) {
-      return;
-    }
-    setDuplicateBusyId(sourceId);
-    setImportError("");
-    try {
-      await getDesktopApi().sources.resolveDuplicate({ sourceId, action });
-      await refreshImportState(activeKnowledgeBaseId);
-    } catch (error) {
-      setImportError(
-        error instanceof Error ? error.message : "重复来源处理失败",
-      );
-    } finally {
-      setDuplicateBusyId("");
-    }
-  };
-
-  const deleteIndex = async (): Promise<void> => {
-    if (!activeKnowledgeBaseId) {
-      setConfirmError("请先选择知识库");
-      return;
-    }
-    setIndexBusy(true);
-    setIndexError("");
-    setConfirmError("");
-    try {
-      setIndexStatus(
-        await getDesktopApi().indexes.delete(activeKnowledgeBaseId),
-      );
-      setSearchResults([]);
-      setLastSearchQuery("");
-      setSelectedEvidence(null);
-      setSourceJumpNotice("");
-      await refreshImportState(activeKnowledgeBaseId);
-      setConfirmAction(null);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "索引删除失败";
-      setConfirmError(message);
-      setIndexError(message);
-    } finally {
-      setIndexBusy(false);
-    }
-  };
-
-  const rebuildIndex = async (): Promise<void> => {
-    if (!activeKnowledgeBaseId) {
-      setConfirmError("请先选择知识库");
-      return;
-    }
-    setIndexBusy(true);
-    setIndexError("");
-    setConfirmError("");
-    try {
-      setIndexStatus(
-        await getDesktopApi().indexes.rebuild(activeKnowledgeBaseId),
-      );
-      setSearchResults([]);
-      setLastSearchQuery("");
-      setSelectedEvidence(null);
-      setSourceJumpNotice("");
-      await refreshImportState(activeKnowledgeBaseId);
-      setConfirmAction(null);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "索引重构失败";
-      setConfirmError(message);
-      setIndexError(message);
-    } finally {
-      setIndexBusy(false);
-    }
-  };
-
-  const rollbackIndex = async (indexVersionId: string): Promise<void> => {
-    if (!activeKnowledgeBaseId) {
-      return;
-    }
-    setIndexBusy(true);
-    setIndexError("");
-    try {
-      setIndexStatus(
-        await getDesktopApi().indexes.rollback(
-          activeKnowledgeBaseId,
-          indexVersionId,
-        ),
-      );
-      await refreshImportState(activeKnowledgeBaseId);
-    } catch (error) {
-      setIndexError(error instanceof Error ? error.message : "索引回滚失败");
-    } finally {
-      setIndexBusy(false);
-    }
-  };
-
-  const retryIndex = async (indexVersionId: string): Promise<void> => {
-    if (!activeKnowledgeBaseId) {
-      return;
-    }
-    setIndexBusy(true);
-    setIndexError("");
-    try {
-      setIndexStatus(
-        await getDesktopApi().indexes.retry(
-          activeKnowledgeBaseId,
-          indexVersionId,
-        ),
-      );
-      await refreshImportState(activeKnowledgeBaseId);
-    } catch (error) {
-      setIndexError(error instanceof Error ? error.message : "索引重试失败");
-    } finally {
-      setIndexBusy(false);
-    }
-  };
-
   const changeChatModel = async (modelId: string): Promise<void> => {
     setChatModel(modelId);
     if (!conversationId) {
@@ -1884,13 +1552,6 @@ function App(): React.JSX.Element {
     if (confirmAction?.kind === "delete-conversation") {
       await deleteConversation(confirmAction.conversation);
       return;
-    }
-    if (confirmAction?.kind === "delete-index") {
-      await deleteIndex();
-      return;
-    }
-    if (confirmAction?.kind === "rebuild-index") {
-      await rebuildIndex();
     }
   };
 
@@ -1935,9 +1596,6 @@ function App(): React.JSX.Element {
       setSeedStatus(status);
       if (!conversationId) {
         setChatModel(status.defaultChatModel);
-      }
-      if (activeKnowledgeBaseId) {
-        await loadIndexLifecycle(activeKnowledgeBaseId);
       }
     } catch (error) {
       setSeedError(error instanceof Error ? error.message : "默认模型保存失败");
@@ -2356,78 +2014,6 @@ function App(): React.JSX.Element {
               </div>
             )}
           </div>
-          {parsePanelOpen && (
-            <ParseCheckPanel
-              busy={importBusy}
-              error={importError}
-              indexBusy={indexBusy}
-              indexError={indexError}
-              indexEstimate={indexEstimate}
-              indexStatus={indexStatus}
-              indexVersions={indexVersions}
-              items={parseChecks}
-              duplicateBusyId={duplicateBusyId}
-              summary={parseSummary}
-              onBuildIndex={() => void buildIndex()}
-              onCollapse={() => setParsePanelOpen(false)}
-              onDeleteIndex={() => {
-                setConfirmError("");
-                setConfirmAction({ kind: "delete-index" });
-              }}
-              onRefresh={() => void loadParseChecks(activeKnowledgeBaseId)}
-              onRetryIndex={(indexVersionId) => void retryIndex(indexVersionId)}
-              onRollbackIndex={(indexVersionId) =>
-                void rollbackIndex(indexVersionId)
-              }
-              onResolveDuplicate={(sourceId, action) =>
-                void resolveDuplicate(sourceId, action)
-              }
-              onRebuildIndex={() => {
-                setConfirmError("");
-                setConfirmAction({ kind: "rebuild-index" });
-              }}
-            />
-          )}
-          {jobsPanelOpen && (
-            <JobProgressPanel
-              busyJobId={jobBusyId}
-              error={jobError}
-              jobs={jobs}
-              onCancel={(jobId) => void handleJobAction(jobId, "cancel")}
-              onCollapse={() => setJobsPanelOpen(false)}
-              onPause={(jobId) => void handleJobAction(jobId, "pause")}
-              onRecover={() => void handleJobAction("", "recover")}
-              onRefresh={() => void loadJobs()}
-              onResume={(jobId) => void handleJobAction(jobId, "resume")}
-              onRetry={(jobId) => void handleJobAction(jobId, "retry")}
-            />
-          )}
-          {(!parsePanelOpen || !jobsPanelOpen) && (
-            <div className="collapsed-source-panels">
-              {!parsePanelOpen && (
-                <button type="button" onClick={() => setParsePanelOpen(true)}>
-                  <Icon name="check" size={15} />
-                  <span>
-                    <strong>导入检查</strong>
-                    <small>
-                      成功 {parseSummary.success} · 失败 {parseSummary.failed}
-                    </small>
-                  </span>
-                  <Icon name="chevron" size={14} />
-                </button>
-              )}
-              {!jobsPanelOpen && (
-                <button type="button" onClick={() => setJobsPanelOpen(true)}>
-                  <Icon name="panel" size={15} />
-                  <span>
-                    <strong>后台任务</strong>
-                    <small>{jobs.length} 个未完成</small>
-                  </span>
-                  <Icon name="chevron" size={14} />
-                </button>
-              )}
-            </div>
-          )}
         </aside>
 
         <section className="panel chat-panel">
@@ -2520,29 +2106,6 @@ function App(): React.JSX.Element {
                 />
               )}
 
-            {agentRunTrace && (
-              <AgentRunTracePanel
-                busyAction={agentTraceBusyId}
-                error={agentTraceError}
-                expanded={agentTraceExpanded}
-                expandedToolCallId={expandedTraceToolId}
-                filter={agentTraceStageFilter}
-                response={agentRunTrace}
-                runs={agentRuns}
-                onAction={(runId, action) =>
-                  void handleAgentRunAction(runId, action)
-                }
-                onExpandTool={setExpandedTraceToolId}
-                onFilterChange={setAgentTraceStageFilter}
-                onOpenRun={(runId) =>
-                  void openAgentRunTrace(runId, true, activeKnowledgeBaseId)
-                }
-                onToggleExpanded={() =>
-                  setAgentTraceExpanded((value) => !value)
-                }
-              />
-            )}
-
             {chatError && (
               <div className="message-flow">
                 <div className="inline-error">{chatError}</div>
@@ -2556,25 +2119,49 @@ function App(): React.JSX.Element {
 
             {messages.length > 0 && (
               <div className="message-flow">
-                {messages.map((message) =>
-                  message.role === "user" ? (
-                    <p className="user-message" key={message.id}>
-                      {message.content}
-                    </p>
-                  ) : message.role === "assistant" ? (
-                    <AssistantAnswerMessage
-                      key={message.id}
-                      message={message}
-                      response={answerResponses[message.id]}
-                      selectedChunkId={selectedEvidenceChunkId(
-                        selectedEvidence,
-                      )}
-                      onSelectCitation={selectCitation}
-                      exportBusy={exportBusyId === message.id}
-                      onExport={() => void exportMarkdown(message.id)}
-                    />
-                  ) : null,
-                )}
+                {messages.map((message) => {
+                  const trace = agentRunTraces[message.id];
+                  if (message.role === "user") {
+                    return (
+                      <p className="user-message" key={message.id}>
+                        {message.content}
+                      </p>
+                    );
+                  }
+                  if (message.role === "assistant") {
+                    return (
+                      <div className="assistant-turn" key={message.id}>
+                        {trace && (
+                          <AgentRunTracePanel
+                            answerVisible={!isPendingAssistantMessage(message)}
+                            busyAction={agentTraceBusyId}
+                            error={agentTraceError}
+                            response={trace}
+                            onAction={(runId, action) =>
+                              void handleAgentRunAction(runId, action)
+                            }
+                          />
+                        )}
+                        {!trace && isPendingAssistantMessage(message) && (
+                          <PendingAgentRunTracePanel
+                            startedAt={message.createdAt}
+                          />
+                        )}
+                        <AssistantAnswerMessage
+                          message={message}
+                          response={answerResponses[message.id]}
+                          selectedChunkId={selectedEvidenceChunkId(
+                            selectedEvidence,
+                          )}
+                          onSelectCitation={selectCitation}
+                          exportBusy={exportBusyId === message.id}
+                          onExport={() => void exportMarkdown(message.id)}
+                        />
+                      </div>
+                    );
+                  }
+                  return null;
+                })}
               </div>
             )}
 
@@ -2895,17 +2482,11 @@ function App(): React.JSX.Element {
         <ConfirmActionDialog
           action={confirmAction}
           busy={
-            Boolean(sourceDeleteBusyId) ||
-            Boolean(conversationDeleteBusyId) ||
-            indexBusy
+            Boolean(sourceDeleteBusyId) || Boolean(conversationDeleteBusyId)
           }
           error={confirmError}
           onClose={() => {
-            if (
-              !sourceDeleteBusyId &&
-              !conversationDeleteBusyId &&
-              !indexBusy
-            ) {
+            if (!sourceDeleteBusyId && !conversationDeleteBusyId) {
               setConfirmAction(null);
             }
           }}
@@ -2916,36 +2497,71 @@ function App(): React.JSX.Element {
   );
 }
 
+function PendingAgentRunTracePanel({
+  startedAt,
+}: {
+  startedAt: string;
+}): React.JSX.Element {
+  const [now, setNow] = useState(Date.now());
+  const startedAtMs = new Date(startedAt).getTime();
+
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  return (
+    <section className="agent-trace-panel expanded">
+      <header className="agent-trace-heading">
+        <div className="agent-trace-title">
+          <strong>
+            已处理{" "}
+            {formatAgentRunDuration(
+              Number.isNaN(startedAtMs) ? 0 : now - startedAtMs,
+            )}
+          </strong>
+          <small>正在启动</small>
+          <Icon name="chevron" size={15} />
+        </div>
+      </header>
+      <div className="agent-trace-body">
+        <div className="agent-trace-list">
+          <article className="agent-trace-event running">
+            <div className="agent-trace-event-main">
+              <span className="agent-trace-event-icon">›</span>
+              <span>
+                <strong>正在创建当前任务</strong>
+                <small>准备执行上下文与工具调用</small>
+              </span>
+            </div>
+          </article>
+        </div>
+      </div>
+    </section>
+  );
+}
+
 function AgentRunTracePanel({
+  answerVisible,
   busyAction,
   error,
-  expanded,
-  expandedToolCallId,
-  filter,
   response,
-  runs,
   onAction,
-  onExpandTool,
-  onFilterChange,
-  onOpenRun,
-  onToggleExpanded,
 }: {
+  answerVisible: boolean;
   busyAction: string;
   error: string;
-  expanded: boolean;
-  expandedToolCallId: string;
-  filter: string;
   response: AgentRunResponse;
-  runs: AgentRunRecord[];
   onAction: (runId: string, action: "resume" | "cancel" | "retry") => void;
-  onExpandTool: (toolCallId: string) => void;
-  onFilterChange: (filter: string) => void;
-  onOpenRun: (runId: string) => void;
-  onToggleExpanded: () => void;
 }): React.JSX.Element {
   const [now, setNow] = useState(Date.now());
   const { run, events, toolCalls, confirmations } = response;
   const finished = isAgentRunFinished(run.status);
+  const [expanded, setExpanded] = useState(!finished || !answerVisible);
+  const [filter, setFilter] = useState("all");
+  const [expandedToolCallId, setExpandedToolCallId] = useState("");
+  const previousRunStatusRef = useRef(run.status);
+  const eventListRef = useRef<HTMLDivElement>(null);
   const snapshot = run.traceSnapshot ?? {};
   const phases = snapshot.phases ?? [];
   const currentStage =
@@ -2964,40 +2580,50 @@ function AgentRunTracePanel({
     return () => window.clearInterval(timer);
   }, [finished]);
 
+  useEffect(() => {
+    setFilter("all");
+    setExpandedToolCallId("");
+    setExpanded(!isAgentRunFinished(run.status) || !answerVisible);
+    previousRunStatusRef.current = run.status;
+  }, [answerVisible, run.id, run.status]);
+
+  useEffect(() => {
+    const previouslyFinished = isAgentRunFinished(previousRunStatusRef.current);
+    if (!finished || !answerVisible) {
+      setExpanded(true);
+    } else if (!previouslyFinished) {
+      setExpanded(false);
+    }
+    previousRunStatusRef.current = run.status;
+  }, [answerVisible, finished, run.status]);
+
+  useEffect(() => {
+    const list = eventListRef.current;
+    if (!list || !expanded || finished) {
+      return;
+    }
+    const distanceFromBottom =
+      list.scrollHeight - list.scrollTop - list.clientHeight;
+    if (distanceFromBottom <= 80) {
+      list.scrollTop = list.scrollHeight;
+    }
+  }, [events.length, expanded, finished]);
+
   return (
     <section className={`agent-trace-panel ${expanded ? "expanded" : ""}`}>
       <header className="agent-trace-heading">
         <button
           className="agent-trace-title"
           type="button"
-          onClick={onToggleExpanded}
+          onClick={() => setExpanded((value) => !value)}
         >
-          <span className={`agent-trace-dot ${run.status}`} />
-          <span>
-            <strong>{finished ? "任务执行记录" : "任务进行中"}</strong>
-            <small>
-              {formatDurationMs(elapsedMs)} · {currentStage}
-            </small>
-          </span>
+          <strong>
+            {finished ? "已执行" : "已处理"} {formatAgentRunDuration(elapsedMs)}
+          </strong>
+          {expanded && <small>{currentStage}</small>}
           <Icon name="chevron" size={15} />
         </button>
         <div className="agent-trace-actions">
-          {runs.length > 1 && (
-            <label className="agent-run-select">
-              <select
-                aria-label="切换 AgentRun"
-                value={run.id}
-                onChange={(event) => onOpenRun(event.target.value)}
-              >
-                {runs.map((item) => (
-                  <option key={item.id} value={item.id}>
-                    {item.title}
-                  </option>
-                ))}
-              </select>
-              <Icon name="chevron" size={12} />
-            </label>
-          )}
           {run.status === "paused" && (
             <button
               className="text-button"
@@ -3031,18 +2657,7 @@ function AgentRunTracePanel({
         </div>
       </header>
 
-      {!expanded ? (
-        <div className="agent-trace-collapsed">
-          <span>{events.length} 条记录</span>
-          <button
-            className="text-button"
-            type="button"
-            onClick={onToggleExpanded}
-          >
-            查看执行记录
-          </button>
-        </div>
-      ) : (
+      {expanded && (
         <div className="agent-trace-body">
           {error && <div className="inline-error">{error}</div>}
           <div className="agent-trace-progress">
@@ -3058,7 +2673,7 @@ function AgentRunTracePanel({
               <select
                 aria-label="筛选 Trace 阶段"
                 value={filter}
-                onChange={(event) => onFilterChange(event.target.value)}
+                onChange={(event) => setFilter(event.target.value)}
               >
                 <option value="all">全部</option>
                 {phases.map((phase) => (
@@ -3073,7 +2688,7 @@ function AgentRunTracePanel({
               {pendingConfirmations(confirmations)} 个待确认
             </span>
           </div>
-          <div className="agent-trace-list">
+          <div className="agent-trace-list" ref={eventListRef}>
             {visibleEvents.map((event) => {
               const toolCall = event.toolCallId
                 ? toolCalls.find((item) => item.id === event.toolCallId)
@@ -3091,7 +2706,7 @@ function AgentRunTracePanel({
                     type="button"
                     onClick={() => {
                       if (toolCall) {
-                        onExpandTool(expandedTool ? "" : toolCall.id);
+                        setExpandedToolCallId(expandedTool ? "" : toolCall.id);
                       }
                     }}
                   >
@@ -3933,375 +3548,6 @@ function EvidenceDetail({
   );
 }
 
-function JobProgressPanel({
-  busyJobId,
-  error,
-  jobs,
-  onCancel,
-  onCollapse,
-  onPause,
-  onRecover,
-  onRefresh,
-  onResume,
-  onRetry,
-}: {
-  busyJobId: string;
-  error: string;
-  jobs: BackgroundJobRecord[];
-  onCancel: (jobId: string) => void;
-  onCollapse: () => void;
-  onPause: (jobId: string) => void;
-  onRecover: () => void;
-  onRefresh: () => void;
-  onResume: (jobId: string) => void;
-  onRetry: (jobId: string) => void;
-}): React.JSX.Element {
-  return (
-    <section className="job-panel" aria-label="后台任务">
-      <div className="job-panel-heading">
-        <div>
-          <strong>后台任务</strong>
-          <span>{jobs.length} 个未完成</span>
-        </div>
-        <div className="job-heading-actions">
-          <button
-            className="text-button"
-            disabled={busyJobId === "recover"}
-            type="button"
-            onClick={onRecover}
-          >
-            恢复扫描
-          </button>
-          <button className="icon-button" type="button" onClick={onRefresh}>
-            <Icon name="refresh" size={15} />
-          </button>
-          <button
-            aria-label="收起后台任务"
-            className="icon-button"
-            type="button"
-            onClick={onCollapse}
-          >
-            <Icon name="chevron" size={15} />
-          </button>
-        </div>
-      </div>
-      {error && <div className="inline-error">{error}</div>}
-      <div className="job-list">
-        {jobs.length > 0 ? (
-          jobs.map((job) => (
-            <article className={`job-card ${job.status}`} key={job.id}>
-              <div className="job-card-heading">
-                <div>
-                  <strong>{jobTypeLabel(job.jobType)}</strong>
-                  <span>{job.targetId}</span>
-                </div>
-                <span className={`job-status ${job.status}`}>
-                  {jobStatusLabel(job.status)}
-                </span>
-              </div>
-              <div className="job-progress">
-                <span style={{ width: `${Math.round(job.progress * 100)}%` }} />
-              </div>
-              <div className="job-meta">
-                <span>{Math.round(job.progress * 100)}%</span>
-                <span>重试 {job.retryCount} 次</span>
-              </div>
-              <div className="job-stages">
-                {jobStages(job).map((stage) => (
-                  <span className={stage.status} key={stage.id}>
-                    {stage.label}
-                  </span>
-                ))}
-              </div>
-              {job.errorMessage && (
-                <p className="job-error">{job.errorMessage}</p>
-              )}
-              <div className="job-actions">
-                {job.status === "running" && (
-                  <button
-                    className="text-button"
-                    disabled={busyJobId === job.id}
-                    type="button"
-                    onClick={() => onPause(job.id)}
-                  >
-                    暂停
-                  </button>
-                )}
-                {["pending", "paused", "retrying"].includes(job.status) && (
-                  <button
-                    className="text-button"
-                    disabled={busyJobId === job.id}
-                    type="button"
-                    onClick={() => onResume(job.id)}
-                  >
-                    {job.status === "pending" ? "开始" : "继续"}
-                  </button>
-                )}
-                {job.status === "failed" && (
-                  <button
-                    className="text-button"
-                    disabled={busyJobId === job.id}
-                    type="button"
-                    onClick={() => onRetry(job.id)}
-                  >
-                    重试
-                  </button>
-                )}
-                {jobCanCancel(job.status) && (
-                  <button
-                    className="text-button danger-text"
-                    disabled={busyJobId === job.id}
-                    type="button"
-                    onClick={() => onCancel(job.id)}
-                  >
-                    取消
-                  </button>
-                )}
-              </div>
-            </article>
-          ))
-        ) : (
-          <div className="empty-job-state">
-            <strong>暂无后台任务</strong>
-            <span>导入、OCR、Embedding 和索引任务会在这里实时更新。</span>
-          </div>
-        )}
-      </div>
-    </section>
-  );
-}
-
-function ParseCheckPanel({
-  busy,
-  error,
-  indexBusy,
-  indexError,
-  indexEstimate,
-  indexStatus,
-  indexVersions,
-  items,
-  duplicateBusyId,
-  summary,
-  onBuildIndex,
-  onCollapse,
-  onDeleteIndex,
-  onRefresh,
-  onRetryIndex,
-  onRollbackIndex,
-  onResolveDuplicate,
-  onRebuildIndex,
-}: {
-  busy: boolean;
-  error: string;
-  indexBusy: boolean;
-  indexError: string;
-  indexEstimate: IndexBuildEstimate | null;
-  indexStatus: BuildIndexResponse | null;
-  indexVersions: IndexVersionRecord[];
-  items: ParseCheckItem[];
-  duplicateBusyId: string;
-  summary: ParseCheckSummary;
-  onBuildIndex: () => void;
-  onCollapse: () => void;
-  onDeleteIndex: () => void;
-  onRefresh: () => void;
-  onRetryIndex: (indexVersionId: string) => void;
-  onRollbackIndex: (indexVersionId: string) => void;
-  onResolveDuplicate: (sourceId: string, action: DuplicateAction) => void;
-  onRebuildIndex: () => void;
-}): React.JSX.Element {
-  const indexableCount = items.filter((item) =>
-    ["success", "processing"].includes(item.status),
-  ).length;
-
-  return (
-    <section className="parse-panel" aria-label="导入检查">
-      <div className="parse-panel-heading">
-        <div>
-          <strong>导入检查</strong>
-          <span>{summary.total} 个来源</span>
-        </div>
-        <div className="job-heading-actions">
-          <button
-            className="icon-button"
-            disabled={busy}
-            type="button"
-            onClick={onRefresh}
-          >
-            <Icon name="refresh" size={15} />
-          </button>
-          <button
-            aria-label="收起导入检查"
-            className="icon-button"
-            type="button"
-            onClick={onCollapse}
-          >
-            <Icon name="chevron" size={15} />
-          </button>
-        </div>
-      </div>
-      <div className="parse-summary-grid">
-        <span className="success">成功 {summary.success}</span>
-        <span className="needs-ocr">需要 OCR {summary.needsOcr}</span>
-        <span className="failed">失败 {summary.failed}</span>
-        <span className="duplicate">重复 {summary.duplicate}</span>
-      </div>
-      {error && <div className="inline-error">{error}</div>}
-      {indexError && <div className="inline-error">{indexError}</div>}
-      {indexEstimate && (
-        <div className="index-estimate">
-          <strong>新索引预估</strong>
-          <span>
-            {indexEstimate.documentCount} 文档 · {indexEstimate.chunkCount}{" "}
-            文本块 · {indexEstimate.estimatedEmbeddingCalls} 次 Embedding 调用
-          </span>
-          <small>{indexEstimate.pricingNotice}</small>
-        </div>
-      )}
-      <div className="parse-list">
-        {items.length > 0 ? (
-          items.slice(0, 4).map((item) => (
-            <article
-              className={`parse-card ${item.status}`}
-              key={item.sourceId}
-            >
-              <div className="parse-card-heading">
-                <strong>{item.displayName}</strong>
-                <span>{parseStatusLabel(item.status)}</span>
-              </div>
-              <small>
-                {sourceTypeLabel(item.sourceType)} · {item.chunkCount} 片段
-                {item.versionStatus
-                  ? ` · ${sourceStatusLabel(item.versionStatus)}`
-                  : ""}
-              </small>
-              {item.preview && <p>{item.preview}</p>}
-              {item.errorMessage && (
-                <p className="parse-error">{item.errorMessage}</p>
-              )}
-              {item.status === "duplicate" && (
-                <div className="duplicate-actions">
-                  <span>
-                    {item.duplicateKind === "original"
-                      ? "文件完全重复"
-                      : "正文内容重复"}
-                  </span>
-                  <div>
-                    <button
-                      disabled={duplicateBusyId === item.sourceId}
-                      type="button"
-                      onClick={() => onResolveDuplicate(item.sourceId, "skip")}
-                    >
-                      跳过
-                    </button>
-                    <button
-                      disabled={duplicateBusyId === item.sourceId}
-                      type="button"
-                      onClick={() => onResolveDuplicate(item.sourceId, "keep")}
-                    >
-                      保留副本
-                    </button>
-                    <button
-                      disabled={duplicateBusyId === item.sourceId}
-                      type="button"
-                      onClick={() => onResolveDuplicate(item.sourceId, "link")}
-                    >
-                      关联已有
-                    </button>
-                  </div>
-                </div>
-              )}
-            </article>
-          ))
-        ) : (
-          <div className="empty-parse-state">
-            <strong>还没有解析结果</strong>
-            <span>添加 PDF、DOCX、图片或网页后会显示检查结果。</span>
-          </div>
-        )}
-      </div>
-      {indexStatus?.indexVersion && (
-        <div className="index-status-card">
-          <div>
-            <strong>
-              {indexStatus.ready ? "当前索引可检索" : "当前索引未就绪"}
-            </strong>
-            <span>
-              {indexStatus.indexVersion.chunkCount} chunks ·{" "}
-              {indexStatus.indexVersion.chunkingVersion}
-            </span>
-          </div>
-          <div className="index-card-actions">
-            <button
-              className="text-button danger-text"
-              disabled={indexBusy}
-              type="button"
-              onClick={onDeleteIndex}
-            >
-              删除索引
-            </button>
-            <button
-              className="text-button"
-              disabled={indexBusy || indexableCount === 0}
-              type="button"
-              onClick={onRebuildIndex}
-            >
-              {indexBusy ? "重构中..." : "重构索引"}
-            </button>
-          </div>
-        </div>
-      )}
-      {!indexStatus?.indexVersion && (
-        <button
-          className="button primary parse-index-action"
-          disabled={indexBusy || indexableCount === 0}
-          type="button"
-          onClick={onBuildIndex}
-        >
-          {indexBusy ? "建立索引中..." : "开始建立索引"}
-        </button>
-      )}
-      {indexVersions.length > 0 && (
-        <div className="index-version-list">
-          {indexVersions.slice(0, 4).map((version) => (
-            <article key={version.id}>
-              <div>
-                <strong>
-                  {version.isCurrent
-                    ? "当前版本"
-                    : sourceStatusLabel(version.status)}
-                </strong>
-                <span>{version.embeddingModel}</span>
-                <small>
-                  {version.chunkCount} chunks · {version.id.slice(0, 12)}
-                </small>
-              </div>
-              {!version.isCurrent && version.status === "retired" && (
-                <button
-                  disabled={indexBusy}
-                  type="button"
-                  onClick={() => onRollbackIndex(version.id)}
-                >
-                  回滚
-                </button>
-              )}
-              {version.status === "failed" && (
-                <button
-                  disabled={indexBusy}
-                  type="button"
-                  onClick={() => onRetryIndex(version.id)}
-                >
-                  重试
-                </button>
-              )}
-            </article>
-          ))}
-        </div>
-      )}
-    </section>
-  );
-}
-
 function SourceMaintenanceDialog({
   busy,
   diff,
@@ -4822,34 +4068,14 @@ function ConfirmActionDialog({
           busyLabel: "删除中...",
           danger: true,
         }
-      : action.kind === "delete-conversation"
-        ? {
-            eyebrow: "Conversation",
-            title: "删除历史对话",
-            description: `将删除“${action.conversation.title}”及其全部消息和引用记录。此操作无法撤销。`,
-            submitLabel: "删除对话",
-            busyLabel: "删除中...",
-            danger: true,
-          }
-        : action.kind === "delete-index"
-          ? {
-              eyebrow: "Index",
-              title: "删除当前知识库索引",
-              description:
-                "将删除关键词索引、向量索引和文本块，但保留已导入来源与解析产物，之后可直接重新构建。",
-              submitLabel: "删除索引",
-              busyLabel: "删除中...",
-              danger: true,
-            }
-          : {
-              eyebrow: "Index",
-              title: "重构当前知识库索引",
-              description:
-                "将使用当前解析结果和 Ark Embedding 模型构建新版本；成功前，现有索引仍可继续检索。",
-              submitLabel: "开始重构",
-              busyLabel: "重构中...",
-              danger: false,
-            };
+      : {
+          eyebrow: "Conversation",
+          title: "删除历史对话",
+          description: `将删除“${action.conversation.title}”及其全部消息和引用记录。此操作无法撤销。`,
+          submitLabel: "删除对话",
+          busyLabel: "删除中...",
+          danger: true,
+        };
 
   return (
     <div className="modal-backdrop" role="presentation">
@@ -5496,13 +4722,6 @@ function StatusRow({
   );
 }
 
-function upsertAgentRun(
-  runs: AgentRunRecord[],
-  run: AgentRunRecord,
-): AgentRunRecord[] {
-  return [run, ...runs.filter((item) => item.id !== run.id)];
-}
-
 function upsertAgentRunEvent(
   events: AgentRunEventRecord[],
   event: AgentRunEventRecord,
@@ -5510,6 +4729,69 @@ function upsertAgentRunEvent(
   return [...events.filter((item) => item.id !== event.id), event].sort(
     (left, right) => left.sequence - right.sequence,
   );
+}
+
+function updateAgentRunTraceEvent(
+  traces: Record<string, AgentRunResponse>,
+  event: AgentRunEventRecord,
+): Record<string, AgentRunResponse> {
+  let changed = false;
+  const next = Object.fromEntries(
+    Object.entries(traces).map(([messageId, response]) => {
+      if (response.run.id !== event.runId) {
+        return [messageId, response];
+      }
+      changed = true;
+      return [
+        messageId,
+        {
+          ...response,
+          events: upsertAgentRunEvent(response.events, event),
+        },
+      ];
+    }),
+  );
+  return changed ? next : traces;
+}
+
+function updateAgentRunTraceResponse(
+  traces: Record<string, AgentRunResponse>,
+  response: AgentRunResponse,
+): Record<string, AgentRunResponse> {
+  const entries = Object.entries(traces);
+  const matchingMessageId = entries.find(
+    ([, item]) => item.run.id === response.run.id,
+  )?.[0];
+  const messageId = matchingMessageId ?? traceAssistantMessageId(response);
+  if (!messageId) {
+    return traces;
+  }
+  return {
+    ...traces,
+    [messageId]: mergeAgentRunResponse(traces[messageId], response),
+  };
+}
+
+function mergeAgentRunResponse(
+  current: AgentRunResponse | undefined,
+  incoming: AgentRunResponse,
+): AgentRunResponse {
+  if (!current || current.run.id !== incoming.run.id) {
+    return incoming;
+  }
+  const currentSequence = current.events.at(-1)?.sequence ?? 0;
+  const incomingSequence = incoming.events.at(-1)?.sequence ?? 0;
+  return incomingSequence >= currentSequence ? incoming : current;
+}
+
+function traceAssistantMessageId(response: AgentRunResponse): string | null {
+  for (const output of response.outputs) {
+    const messageId = output.payload.assistantMessageId;
+    if (output.outputType === "final" && typeof messageId === "string") {
+      return messageId;
+    }
+  }
+  return null;
 }
 
 function isAgentRunFinished(status: AgentRunRecord["status"]): boolean {
@@ -6072,19 +5354,6 @@ function sourceStatusLabel(status: string): string {
   return labels[status] ?? status;
 }
 
-function parseStatusLabel(status: ParseCheckItem["status"]): string {
-  const labels: Record<ParseCheckItem["status"], string> = {
-    success: "成功",
-    needs_ocr: "需要 OCR",
-    failed: "失败",
-    duplicate: "重复",
-    skipped: "已跳过",
-    linked: "已关联",
-    processing: "处理中",
-  };
-  return labels[status];
-}
-
 function formatNumber(value: number): string {
   return new Intl.NumberFormat("zh-CN").format(value);
 }
@@ -6096,6 +5365,18 @@ function formatDurationMs(value: number): string {
   const rest = seconds % 60;
   const parts = hours > 0 ? [hours, minutes, rest] : [minutes, rest];
   return parts.map((part) => String(part).padStart(2, "0")).join(":");
+}
+
+function formatAgentRunDuration(value: number): string {
+  const seconds = Math.max(0, Math.floor(value / 1000));
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  const rest = seconds % 60;
+  const minutePart = `${String(minutes).padStart(2, "0")}m`;
+  const secondPart = `${String(rest).padStart(2, "0")}s`;
+  return hours > 0
+    ? `${String(hours).padStart(2, "0")}h ${minutePart} ${secondPart}`
+    : `${minutePart} ${secondPart}`;
 }
 
 function formatDateTime(value: string): string {
@@ -6195,85 +5476,6 @@ function formatMetricDuration(value: number | null | undefined): string {
   return value >= 1000
     ? `${(value / 1000).toFixed(1)} s`
     : `${Math.round(value)} ms`;
-}
-
-function emptyParseSummary(): ParseCheckSummary {
-  return {
-    total: 0,
-    success: 0,
-    needsOcr: 0,
-    failed: 0,
-    duplicate: 0,
-    processing: 0,
-  };
-}
-
-function summarizeParseChecks(items: ParseCheckItem[]): ParseCheckSummary {
-  return items.reduce<ParseCheckSummary>((summary, item) => {
-    summary.total += 1;
-    if (item.status === "needs_ocr") {
-      summary.needsOcr += 1;
-    } else if (item.status === "skipped" || item.status === "linked") {
-      summary.success += 1;
-    } else {
-      summary[item.status] += 1;
-    }
-    return summary;
-  }, emptyParseSummary());
-}
-
-function jobTypeLabel(type: string): string {
-  const labels: Record<string, string> = {
-    "source.import": "导入与解析",
-    "source.parse": "文档解析",
-    ocr: "OCR",
-    embedding: "Embedding",
-    "index.build": "索引构建",
-    "index.rebuild": "索引重建",
-    "index.retry": "索引重试",
-    "web.refresh": "网页更新",
-  };
-  return labels[type] ?? type;
-}
-
-function jobStatusLabel(status: BackgroundJobStatus): string {
-  const labels: Record<BackgroundJobStatus, string> = {
-    pending: "待执行",
-    running: "运行中",
-    completed: "已完成",
-    paused: "已暂停",
-    cancelled: "已取消",
-    failed: "失败",
-    retrying: "重试中",
-  };
-  return labels[status];
-}
-
-function jobStages(
-  job: BackgroundJobRecord,
-): BackgroundJobRecord["checkpoint"]["stages"] {
-  const stages = Array.isArray(job.checkpoint.stages)
-    ? job.checkpoint.stages
-    : [];
-  const byId = new Map(stages.map((stage) => [stage.id, stage]));
-  const stageTemplates: Array<
-    Pick<BackgroundJobRecord["checkpoint"]["stages"][number], "id" | "label">
-  > = [
-    { id: "parse", label: "解析" },
-    { id: "ocr", label: "OCR" },
-    { id: "embedding", label: "Embedding" },
-    { id: "index", label: "索引" },
-  ];
-  return stageTemplates.map((stage) => ({
-    id: stage.id,
-    label: stage.label,
-    status: byId.get(stage.id)?.status ?? "pending",
-    progress: byId.get(stage.id)?.progress ?? 0,
-  }));
-}
-
-function jobCanCancel(status: BackgroundJobStatus): boolean {
-  return !["completed", "cancelled"].includes(status);
 }
 
 export default App;

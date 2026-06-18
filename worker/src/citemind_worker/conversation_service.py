@@ -388,6 +388,7 @@ class ConversationService:
                     started=started,
                     citation_failed=True,
                 )
+                response["agentRunId"] = trace_run_id
                 self._save_answer_trace_output(trace_run_id, response)
                 self._complete_answer_trace(
                     trace_run_id,
@@ -565,6 +566,7 @@ class ConversationService:
                 started=started,
                 citation_failed=final_validation["valid"] is not True,
             )
+            response["agentRunId"] = trace_run_id
             self._save_answer_trace_output(trace_run_id, response)
             self._complete_answer_trace(
                 trace_run_id,

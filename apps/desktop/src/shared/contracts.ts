@@ -609,6 +609,7 @@ export interface ConversationAnswerRequest {
 }
 
 export interface ConversationAnswerResponse {
+  agentRunId: string | null;
   conversation: ConversationRecord;
   userMessage: ConversationMessageRecord;
   assistantMessage: ConversationMessageRecord;

@@ -149,6 +149,7 @@ def test_conversation_answer_persists_messages_and_valid_citations(tmp_path: Pat
     assert response["assistantMessage"]["indexVersionId"] == "index-current"
     assert response["assistantMessage"]["modelParams"]["generationTimeMs"] >= 0
     assert response["assistantMessage"]["modelParams"]["retryCount"] == 0
+    assert response["agentRunId"] is None
     assert [event["type"] for event in response["events"]] == [
         "conversation.ready",
         "retrieval.completed",
@@ -213,6 +214,7 @@ def test_conversation_answer_emits_agent_run_trace_events(tmp_path: Path) -> Non
     tool_names = {tool["toolName"] for tool in trace["toolCalls"]}
 
     assert runs[0]["skillId"] == "conversation_answer"
+    assert response["agentRunId"] == run_id
     assert runs[0]["status"] == "completed"
     assert {
         "run.created",
