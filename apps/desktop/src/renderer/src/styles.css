@@ -53,6 +53,50 @@ button:disabled {
     #edf0ea;
 }
 
+.app-error-toast {
+  position: fixed;
+  z-index: 40;
+  top: 14px;
+  left: 50%;
+  display: flex;
+  align-items: center;
+  width: min(560px, calc(100vw - 48px));
+  min-height: 40px;
+  gap: 12px;
+  padding: 9px 10px 9px 14px;
+  border: 1px solid #d86b63;
+  border-radius: 8px;
+  color: #8f2420;
+  background: #fff0ee;
+  box-shadow: 0 12px 34px rgb(117 33 28 / 18%);
+  font-size: 12px;
+  line-height: 1.55;
+  transform: translateX(-50%);
+}
+
+.app-error-toast span {
+  min-width: 0;
+  flex: 1;
+  overflow-wrap: anywhere;
+}
+
+.app-error-toast button {
+  display: grid;
+  width: 26px;
+  height: 26px;
+  flex: 0 0 auto;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  color: #9d3a34;
+  background: transparent;
+  place-items: center;
+}
+
+.app-error-toast button:hover {
+  background: #f7d9d5;
+}
+
 .topbar {
   display: grid;
   grid-template-columns: minmax(350px, 1fr) minmax(260px, 520px) minmax(

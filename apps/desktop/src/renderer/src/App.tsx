@@ -15,6 +15,7 @@ import type {
   MaintenanceStatus,
   ModelCapabilityStatus,
   ModelValidationStatus,
+  ParseCheckItem,
   SeedCredentialStatus,
   SeedModelDescriptor,
   SourceOrganizationResponse,
@@ -313,6 +314,13 @@ function App(): React.JSX.Element {
   const [confirmError, setConfirmError] = useState("");
   const [importBusy, setImportBusy] = useState(false);
   const [importError, setImportError] = useState("");
+  const [appError, setAppError] = useState("");
+  const automaticIndexBuildsRef = useRef(
+    new Map<
+      string,
+      { jobId: string; context: string; queuedContext: string | null }
+    >(),
+  );
   const [webImportOpen, setWebImportOpen] = useState(false);
   const [webImportForm, setWebImportForm] = useState({
     url: "",
@@ -530,6 +538,81 @@ function App(): React.JSX.Element {
     }
   }, []);
 
+  const showAppError = useCallback((message: string) => {
+    setAppError(message);
+  }, []);
+
+  const startAutomaticIndexBuild = useCallback(
+    async (knowledgeBaseId: string, context: string): Promise<void> => {
+      const current = automaticIndexBuildsRef.current.get(knowledgeBaseId);
+      if (current) {
+        automaticIndexBuildsRef.current.set(knowledgeBaseId, {
+          ...current,
+          queuedContext: context,
+        });
+        return;
+      }
+      try {
+        const result = await getDesktopApi().indexes.build(knowledgeBaseId);
+        if (result.jobId) {
+          automaticIndexBuildsRef.current.set(knowledgeBaseId, {
+            jobId: result.jobId,
+            context,
+            queuedContext: null,
+          });
+        }
+      } catch (error) {
+        const reason =
+          error instanceof Error ? error.message : "后台任务启动失败";
+        showAppError(`索引构建失败（${context}）：${reason}`);
+      }
+    },
+    [showAppError],
+  );
+
+  const checkAutomaticIndexBuilds = useCallback(async (): Promise<void> => {
+    if (automaticIndexBuildsRef.current.size === 0) {
+      return;
+    }
+    try {
+      const result = await getDesktopApi().jobs.list({
+        includeTerminal: true,
+        limit: 200,
+      });
+      for (const [knowledgeBaseId, tracked] of Array.from(
+        automaticIndexBuildsRef.current.entries(),
+      )) {
+        const job = result.jobs.find((item) => item.id === tracked.jobId);
+        if (
+          !job ||
+          !["completed", "failed", "cancelled"].includes(job.status)
+        ) {
+          continue;
+        }
+        automaticIndexBuildsRef.current.delete(knowledgeBaseId);
+        if (job.status === "failed") {
+          const failedStage = job.checkpoint.stages.find(
+            (stage) => stage.status === "failed",
+          )?.label;
+          const stage = failedStage ? ` / ${failedStage}` : "";
+          showAppError(
+            `索引构建失败（${tracked.context}${stage}）：${
+              job.errorMessage ?? "未知错误"
+            }`,
+          );
+        }
+        if (tracked.queuedContext) {
+          await startAutomaticIndexBuild(
+            knowledgeBaseId,
+            tracked.queuedContext,
+          );
+        }
+      }
+    } catch {
+      // Keep tracking; the next polling cycle will retry.
+    }
+  }, [showAppError, startAutomaticIndexBuild]);
+
   const storeAgentRunTrace = useCallback(
     (response: AgentRunResponse, preferredMessageId?: string) => {
       if (response.run.skillId !== "conversation_answer") {
@@ -646,6 +729,14 @@ function App(): React.JSX.Element {
     }
   }, [activeKnowledgeBaseId, loadOperationalStatus, settingsOpen]);
 
+  useEffect(() => {
+    if (!appError) {
+      return;
+    }
+    const timer = window.setTimeout(() => setAppError(""), 8000);
+    return () => window.clearTimeout(timer);
+  }, [appError]);
+
   const online = worker.kind === "online";
 
   useEffect(() => {
@@ -657,6 +748,18 @@ function App(): React.JSX.Element {
     }, 1800);
     return () => window.clearInterval(timer);
   }, [activeKnowledgeBaseId, loadSources, online, chatBusy]);
+
+  useEffect(() => {
+    if (!online) {
+      return;
+    }
+    const check = (): void => {
+      void checkAutomaticIndexBuilds();
+    };
+    check();
+    const timer = window.setInterval(check, 1200);
+    return () => window.clearInterval(timer);
+  }, [checkAutomaticIndexBuilds, online]);
 
   useEffect(() => {
     if (!activeKnowledgeBaseId) {
@@ -1188,7 +1291,9 @@ function App(): React.JSX.Element {
 
   const importFiles = async (): Promise<void> => {
     if (!activeKnowledgeBaseId) {
-      setImportError("请先选择知识库");
+      const message = "请先选择知识库";
+      setImportError(message);
+      showAppError(message);
       return;
     }
     setImportBusy(true);
@@ -1198,10 +1303,29 @@ function App(): React.JSX.Element {
         activeKnowledgeBaseId,
       );
       if (!result.cancelled) {
+        const failed = result.imported.filter(
+          (item) => item.parseCheck.status === "failed",
+        );
+        if (failed.length > 0) {
+          showAppError(
+            parseFailureMessage(failed.map((item) => item.parseCheck)),
+          );
+        }
+        const succeeded = result.imported.filter(
+          (item) => item.parseCheck.status === "success",
+        );
+        if (succeeded.length > 0) {
+          await startAutomaticIndexBuild(
+            activeKnowledgeBaseId,
+            sourceNames(succeeded.map((item) => item.parseCheck.displayName)),
+          );
+        }
         await refreshImportState(activeKnowledgeBaseId);
       }
     } catch (error) {
-      setImportError(error instanceof Error ? error.message : "文件导入失败");
+      const message = error instanceof Error ? error.message : "文件导入失败";
+      setImportError(message);
+      showAppError(`资料导入失败：${message}`);
     } finally {
       setImportBusy(false);
     }
@@ -1209,22 +1333,35 @@ function App(): React.JSX.Element {
 
   const importWebSource = async (): Promise<void> => {
     if (!activeKnowledgeBaseId) {
-      setImportError("请先选择知识库");
+      const message = "请先选择知识库";
+      setImportError(message);
+      showAppError(message);
       return;
     }
     setImportBusy(true);
     setImportError("");
     try {
-      await getDesktopApi().sources.importWeb({
+      const result = await getDesktopApi().sources.importWeb({
         knowledgeBaseId: activeKnowledgeBaseId,
         url: webImportForm.url,
         displayName: webImportForm.displayName || null,
       });
       setWebImportOpen(false);
       setWebImportForm({ url: "", displayName: "" });
+      if (result.parseCheck.status === "failed") {
+        showAppError(parseFailureMessage([result.parseCheck]));
+      }
+      if (result.parseCheck.status === "success") {
+        await startAutomaticIndexBuild(
+          activeKnowledgeBaseId,
+          result.parseCheck.displayName,
+        );
+      }
       await refreshImportState(activeKnowledgeBaseId);
     } catch (error) {
-      setImportError(error instanceof Error ? error.message : "网页导入失败");
+      const message = error instanceof Error ? error.message : "网页导入失败";
+      setImportError(message);
+      showAppError(`资料导入失败：${message}`);
     } finally {
       setImportBusy(false);
     }
@@ -1410,8 +1547,11 @@ function App(): React.JSX.Element {
         await loadSources(activeKnowledgeBaseId);
       }
     } catch (error) {
-      setSourceMaintenanceError(
-        error instanceof Error ? error.message : "网页更新检查失败",
+      const message =
+        error instanceof Error ? error.message : "网页更新检查失败";
+      setSourceMaintenanceError(message);
+      showAppError(
+        `资料解析失败（${sourceMaintenance.source.displayName}）：${message}`,
       );
     } finally {
       setSourceMaintenanceBusy(false);
@@ -1443,7 +1583,6 @@ function App(): React.JSX.Element {
   const decideSourceVersion = async (
     versionId: string,
     decision: "accept" | "reject",
-    rebuild: boolean,
   ): Promise<void> => {
     if (!sourceMaintenance) {
       return;
@@ -1451,16 +1590,18 @@ function App(): React.JSX.Element {
     setSourceMaintenanceBusy(true);
     setSourceMaintenanceError("");
     try {
-      setSourceMaintenance(
-        await getDesktopApi().sources.decideVersion({
-          sourceId: sourceMaintenance.source.id,
-          versionId,
-          decision,
-        }),
-      );
+      const updated = await getDesktopApi().sources.decideVersion({
+        sourceId: sourceMaintenance.source.id,
+        versionId,
+        decision,
+      });
+      setSourceMaintenance(updated);
       setSourceVersionDiff(null);
-      if (rebuild && activeKnowledgeBaseId) {
-        await getDesktopApi().indexes.rebuild(activeKnowledgeBaseId);
+      if (decision === "accept" && activeKnowledgeBaseId) {
+        await startAutomaticIndexBuild(
+          activeKnowledgeBaseId,
+          sourceMaintenance.source.displayName,
+        );
       }
       if (activeKnowledgeBaseId) {
         await refreshImportState(activeKnowledgeBaseId);
@@ -1799,6 +1940,18 @@ function App(): React.JSX.Element {
 
   return (
     <main className={`app-shell ${evidenceOpen ? "" : "evidence-collapsed"}`}>
+      {appError && (
+        <div aria-live="assertive" className="app-error-toast" role="alert">
+          <span>{appError}</span>
+          <button
+            aria-label="关闭错误提示"
+            type="button"
+            onClick={() => setAppError("")}
+          >
+            <Icon name="close" size={15} />
+          </button>
+        </div>
+      )}
       <header className="topbar">
         <div className="brand">
           <span className="brand-mark">
@@ -2450,8 +2603,8 @@ function App(): React.JSX.Element {
           onDecideTag={(tagId, decision) =>
             void decideSourceTag(tagId, decision)
           }
-          onDecideVersion={(versionId, decision, rebuild) =>
-            void decideSourceVersion(versionId, decision, rebuild)
+          onDecideVersion={(versionId, decision) =>
+            void decideSourceVersion(versionId, decision)
           }
           onFormChange={setSourceMaintenanceForm}
           onInspectDiff={(versionId) =>
@@ -3593,11 +3746,7 @@ function SourceMaintenanceDialog({
   ) => void;
   onDecideSuggestion: (decision: "accept" | "dismiss") => void;
   onDecideTag: (tagId: string, decision: "confirm" | "dismiss") => void;
-  onDecideVersion: (
-    versionId: string,
-    decision: "accept" | "reject",
-    rebuild: boolean,
-  ) => void;
+  onDecideVersion: (versionId: string, decision: "accept" | "reject") => void;
   onFormChange: (next: {
     replacementSourceId: string;
     reviewAt: string;
@@ -3987,31 +4136,17 @@ function SourceMaintenanceDialog({
                           className="text-button danger-text"
                           disabled={busy}
                           type="button"
-                          onClick={() =>
-                            onDecideVersion(version.id, "reject", false)
-                          }
+                          onClick={() => onDecideVersion(version.id, "reject")}
                         >
                           忽略
-                        </button>
-                        <button
-                          className="button ghost"
-                          disabled={busy}
-                          type="button"
-                          onClick={() =>
-                            onDecideVersion(version.id, "accept", false)
-                          }
-                        >
-                          采用
                         </button>
                         <button
                           className="button primary"
                           disabled={busy}
                           type="button"
-                          onClick={() =>
-                            onDecideVersion(version.id, "accept", true)
-                          }
+                          onClick={() => onDecideVersion(version.id, "accept")}
                         >
-                          采用并重建索引
+                          采用
                         </button>
                       </>
                     )}
@@ -5352,6 +5487,26 @@ function sourceStatusLabel(status: string): string {
     completed: "已完成",
   };
   return labels[status] ?? status;
+}
+
+function sourceNames(names: string[]): string {
+  const visible = names.slice(0, 2).join("、");
+  return names.length > 2 ? `${visible} 等 ${names.length} 份资料` : visible;
+}
+
+function parseFailureMessage(
+  items: Array<Pick<ParseCheckItem, "displayName" | "errorMessage">>,
+): string {
+  const details = items
+    .slice(0, 2)
+    .map(
+      (item) =>
+        `${item.displayName}：${item.errorMessage ?? "无法读取或解析内容"}`,
+    )
+    .join("；");
+  const suffix =
+    items.length > 2 ? `；另有 ${items.length - 2} 份资料失败` : "";
+  return `资料解析失败：${details}${suffix}`;
 }
 
 function formatNumber(value: number): string {
