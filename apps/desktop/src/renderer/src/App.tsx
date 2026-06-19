@@ -6,6 +6,7 @@ import type {
   AgentRunRecord,
   AgentRunResponse,
   AgentRunToolCallRecord,
+  BackgroundJobRecord,
   ConversationAnswerResponse,
   ConversationMessageRecord,
   ConversationRecord,
@@ -318,7 +319,7 @@ function App(): React.JSX.Element {
   const automaticIndexBuildsRef = useRef(
     new Map<
       string,
-      { jobId: string; context: string; queuedContext: string | null }
+      { jobId: string | null; context: string; queuedContext: string | null }
     >(),
   );
   const [webImportOpen, setWebImportOpen] = useState(false);
@@ -546,22 +547,31 @@ function App(): React.JSX.Element {
     async (knowledgeBaseId: string, context: string): Promise<void> => {
       const current = automaticIndexBuildsRef.current.get(knowledgeBaseId);
       if (current) {
-        automaticIndexBuildsRef.current.set(knowledgeBaseId, {
-          ...current,
-          queuedContext: context,
-        });
+        current.queuedContext = context;
         return;
       }
+      const trackedBuild: {
+        jobId: string | null;
+        context: string;
+        queuedContext: string | null;
+      } = {
+        jobId: null,
+        context,
+        queuedContext: null,
+      };
+      automaticIndexBuildsRef.current.set(knowledgeBaseId, trackedBuild);
       try {
         const result = await getDesktopApi().indexes.build(knowledgeBaseId);
-        if (result.jobId) {
-          automaticIndexBuildsRef.current.set(knowledgeBaseId, {
-            jobId: result.jobId,
-            context,
-            queuedContext: null,
-          });
+        const tracked = automaticIndexBuildsRef.current.get(knowledgeBaseId);
+        if (result.jobId && tracked === trackedBuild) {
+          trackedBuild.jobId = result.jobId;
         }
       } catch (error) {
+        if (
+          automaticIndexBuildsRef.current.get(knowledgeBaseId) === trackedBuild
+        ) {
+          automaticIndexBuildsRef.current.delete(knowledgeBaseId);
+        }
         const reason =
           error instanceof Error ? error.message : "后台任务启动失败";
         showAppError(`索引构建失败（${context}）：${reason}`);
@@ -570,48 +580,66 @@ function App(): React.JSX.Element {
     [showAppError],
   );
 
-  const checkAutomaticIndexBuilds = useCallback(async (): Promise<void> => {
-    if (automaticIndexBuildsRef.current.size === 0) {
-      return;
-    }
-    try {
-      const result = await getDesktopApi().jobs.list({
-        includeTerminal: true,
-        limit: 200,
-      });
-      for (const [knowledgeBaseId, tracked] of Array.from(
-        automaticIndexBuildsRef.current.entries(),
-      )) {
-        const job = result.jobs.find((item) => item.id === tracked.jobId);
-        if (
-          !job ||
-          !["completed", "failed", "cancelled"].includes(job.status)
-        ) {
-          continue;
-        }
-        automaticIndexBuildsRef.current.delete(knowledgeBaseId);
-        if (job.status === "failed") {
-          const failedStage = job.checkpoint.stages.find(
-            (stage) => stage.status === "failed",
-          )?.label;
-          const stage = failedStage ? ` / ${failedStage}` : "";
-          showAppError(
-            `索引构建失败（${tracked.context}${stage}）：${
-              job.errorMessage ?? "未知错误"
-            }`,
-          );
-        }
-        if (tracked.queuedContext) {
-          await startAutomaticIndexBuild(
-            knowledgeBaseId,
-            tracked.queuedContext,
-          );
+  const handleBackgroundJobUpdate = useCallback(
+    async (job: BackgroundJobRecord): Promise<void> => {
+      const terminal = ["completed", "failed", "cancelled"].includes(
+        job.status,
+      );
+      const tracked = automaticIndexBuildsRef.current.get(job.targetId);
+      const isTrackedIndex =
+        job.jobType.startsWith("index.") &&
+        tracked !== undefined &&
+        (tracked.jobId === null || tracked.jobId === job.id);
+
+      if (isTrackedIndex && tracked.jobId === null) {
+        tracked.jobId = job.id;
+      }
+
+      if (!terminal) {
+        return;
+      }
+
+      if (activeKnowledgeBaseId) {
+        try {
+          await loadSources(activeKnowledgeBaseId);
+        } catch {
+          // A later user action will retry the source refresh.
         }
       }
-    } catch {
-      // Keep tracking; the next polling cycle will retry.
-    }
-  }, [showAppError, startAutomaticIndexBuild]);
+
+      if (
+        job.status === "failed" &&
+        job.jobType.startsWith("index.") &&
+        (isTrackedIndex || job.targetId === activeKnowledgeBaseId)
+      ) {
+        const failedStage = job.checkpoint.stages.find(
+          (stage) => stage.status === "failed",
+        )?.label;
+        const stage = failedStage ? ` / ${failedStage}` : "";
+        const context = isTrackedIndex ? tracked.context : "当前知识库";
+        showAppError(
+          `索引构建失败（${context}${stage}）：${
+            job.errorMessage ?? "未知错误"
+          }`,
+        );
+      }
+
+      if (!isTrackedIndex) {
+        return;
+      }
+
+      automaticIndexBuildsRef.current.delete(job.targetId);
+      if (tracked.queuedContext) {
+        await startAutomaticIndexBuild(job.targetId, tracked.queuedContext);
+      }
+    },
+    [
+      activeKnowledgeBaseId,
+      loadSources,
+      showAppError,
+      startAutomaticIndexBuild,
+    ],
+  );
 
   const storeAgentRunTrace = useCallback(
     (response: AgentRunResponse, preferredMessageId?: string) => {
@@ -740,26 +768,17 @@ function App(): React.JSX.Element {
   const online = worker.kind === "online";
 
   useEffect(() => {
-    if (!online || !activeKnowledgeBaseId || chatBusy) {
-      return;
-    }
-    const timer = window.setInterval(() => {
-      void loadSources(activeKnowledgeBaseId);
-    }, 1800);
-    return () => window.clearInterval(timer);
-  }, [activeKnowledgeBaseId, loadSources, online, chatBusy]);
-
-  useEffect(() => {
     if (!online) {
       return;
     }
-    const check = (): void => {
-      void checkAutomaticIndexBuilds();
-    };
-    check();
-    const timer = window.setInterval(check, 1200);
-    return () => window.clearInterval(timer);
-  }, [checkAutomaticIndexBuilds, online]);
+    try {
+      return getDesktopApi().jobs.onUpdated((job) => {
+        void handleBackgroundJobUpdate(job);
+      });
+    } catch {
+      return undefined;
+    }
+  }, [handleBackgroundJobUpdate, online]);
 
   useEffect(() => {
     if (!activeKnowledgeBaseId) {

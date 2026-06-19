@@ -1,5 +1,5 @@
 import json
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from typing import Literal, cast
 from uuid import uuid4
 
@@ -40,10 +40,21 @@ ALLOWED_TRANSITIONS: dict[str, set[str]] = {
     "retrying": {"running", "paused", "cancelled", "failed"},
 }
 
+JobEventSink = Callable[[dict[str, object]], None]
+
 
 class BackgroundJobService:
-    def __init__(self, storage: StorageRuntime) -> None:
+    def __init__(
+        self,
+        storage: StorageRuntime,
+        *,
+        event_sink: JobEventSink | None = None,
+    ) -> None:
         self.storage = storage
+        self._event_sink = event_sink
+
+    def set_event_sink(self, event_sink: JobEventSink | None) -> None:
+        self._event_sink = event_sink
 
     def create(
         self,
@@ -72,7 +83,9 @@ class BackgroundJobService:
                 ),
             )
             connection.commit()
-        return self.get(job_id)
+        job = self.get(job_id)
+        self._emit_job(job)
+        return job
 
     def list_jobs(
         self,
@@ -183,7 +196,9 @@ class BackgroundJobService:
                 ),
             )
             connection.commit()
-        return self.get(job_id)
+        job = self.get(job_id)
+        self._emit_job(job)
+        return job
 
     def pause(self, job_id: str) -> dict[str, object]:
         return self.update_progress(job_id, status="paused")
@@ -234,7 +249,10 @@ class BackgroundJobService:
                     )
                 recovered.append({"jobId": str(row["id"]), "status": next_status})
             connection.commit()
-        return {"jobs": [self.get(str(item["jobId"])) for item in recovered]}
+        jobs = [self.get(str(item["jobId"])) for item in recovered]
+        for job in jobs:
+            self._emit_job(job)
+        return {"jobs": jobs}
 
     def _normalize_checkpoint(
         self,
@@ -260,6 +278,10 @@ class BackgroundJobService:
             "createdAt": str(row["created_at"]),  # type: ignore[index]
             "updatedAt": str(row["updated_at"]),  # type: ignore[index]
         }
+
+    def _emit_job(self, job: dict[str, object]) -> None:
+        if self._event_sink is not None:
+            self._event_sink(job)
 
 
 def _normalize_stages(value: object, *, progress: float) -> list[dict[str, object]]:

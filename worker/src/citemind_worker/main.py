@@ -82,6 +82,19 @@ def create_server(
         agent_runs.set_event_sink(
             lambda event: server.notify("agent_runs.trace_event", event)  # type: ignore[arg-type]
         )
+    job_services = {
+        id(service): service
+        for service in (
+            background_jobs,
+            getattr(source_imports, "jobs", None),
+            getattr(indexes, "jobs", None),
+        )
+        if isinstance(service, BackgroundJobService)
+    }
+    for job_service in job_services.values():
+        job_service.set_event_sink(
+            lambda job: server.notify("jobs.updated", job)  # type: ignore[arg-type]
+        )
 
     def health(params: JsonValue) -> JsonValue:
         require_object_params(params)

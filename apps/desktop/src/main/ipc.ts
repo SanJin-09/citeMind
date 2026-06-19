@@ -104,6 +104,11 @@ export function registerIpcHandlers(workerManager: PythonWorkerManager): void {
       window.webContents.send(IPC_CHANNELS.agentRunTraceEvent, params);
     }
   });
+  workerManager.onNotification("jobs.updated", (params) => {
+    for (const window of BrowserWindow.getAllWindows()) {
+      window.webContents.send(IPC_CHANNELS.backgroundJobUpdated, params);
+    }
+  });
 
   ipcMain.handle(IPC_CHANNELS.checkWorkerHealth, () => workerManager.health());
   ipcMain.handle(IPC_CHANNELS.restartWorker, () => workerManager.restart());

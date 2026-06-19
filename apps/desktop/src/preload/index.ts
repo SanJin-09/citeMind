@@ -2,6 +2,7 @@ import { contextBridge, ipcRenderer } from "electron";
 import {
   IPC_CHANNELS,
   type AgentRunEventRecord,
+  type BackgroundJobRecord,
   type DesktopApi,
 } from "../shared/contracts";
 
@@ -47,6 +48,15 @@ const api: DesktopApi = {
     cancel: (jobId) => ipcRenderer.invoke(IPC_CHANNELS.cancelJob, jobId),
     retry: (jobId) => ipcRenderer.invoke(IPC_CHANNELS.retryJob, jobId),
     recover: () => ipcRenderer.invoke(IPC_CHANNELS.recoverJobs),
+    onUpdated: (listener) => {
+      const handler = (_event: unknown, payload: BackgroundJobRecord): void => {
+        listener(payload);
+      };
+      ipcRenderer.on(IPC_CHANNELS.backgroundJobUpdated, handler);
+      return () => {
+        ipcRenderer.removeListener(IPC_CHANNELS.backgroundJobUpdated, handler);
+      };
+    },
   },
   agentRuns: {
     list: (knowledgeBaseId, options) =>

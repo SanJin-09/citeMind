@@ -87,6 +87,17 @@ def run_server(payload: str) -> list[dict[str, JsonValue]]:
     return [json.loads(line) for line in output.getvalue().splitlines()]
 
 
+def rpc_messages(output: StringIO) -> list[dict[str, JsonValue]]:
+    return [json.loads(line) for line in output.getvalue().splitlines()]
+
+
+def rpc_result(output: StringIO, request_id: str) -> JsonValue:
+    for message in rpc_messages(output):
+        if message.get("id") == request_id:
+            return message["result"]
+    raise AssertionError(f"Missing RPC response for request {request_id}")
+
+
 def test_health_request() -> None:
     responses = run_server('{"jsonrpc":"2.0","id":"1","method":"system.health","params":{}}\n')
 
@@ -259,7 +270,11 @@ def test_background_job_rpc_create_update_and_list(tmp_path: Path) -> None:
             output,
         )
     )
-    created = json.loads(output.getvalue())["result"]
+    messages = rpc_messages(output)
+    created = rpc_result(output, "1")
+    assert isinstance(created, dict)
+    assert messages[0]["method"] == "jobs.updated"
+    assert messages[0]["params"] == created
 
     output = StringIO()
     asyncio.run(
@@ -271,7 +286,11 @@ def test_background_job_rpc_create_update_and_list(tmp_path: Path) -> None:
             output,
         )
     )
-    updated = json.loads(output.getvalue())["result"]
+    messages = rpc_messages(output)
+    updated = rpc_result(output, "2")
+    assert isinstance(updated, dict)
+    assert messages[0]["method"] == "jobs.updated"
+    assert messages[0]["params"] == updated
 
     output = StringIO()
     asyncio.run(
@@ -318,7 +337,8 @@ def test_source_import_rpc_imports_file_and_lists_parse_checks(tmp_path: Path) -
             output,
         )
     )
-    imported = json.loads(output.getvalue())["result"]
+    imported = rpc_result(output, "2")
+    assert isinstance(imported, dict)
 
     output = StringIO()
     asyncio.run(
@@ -422,7 +442,8 @@ def test_index_build_rpc_marks_chunks_ready(tmp_path: Path) -> None:
             output,
         )
     )
-    imported = json.loads(output.getvalue())["result"]
+    imported = rpc_result(output, "2")
+    assert isinstance(imported, dict)
     source_id = imported["source"]["sourceId"]
 
     output = StringIO()
@@ -435,7 +456,8 @@ def test_index_build_rpc_marks_chunks_ready(tmp_path: Path) -> None:
             output,
         )
     )
-    built = json.loads(output.getvalue())["result"]
+    built = rpc_result(output, "3")
+    assert isinstance(built, dict)
 
     assert built["ready"] is True
     assert built["indexVersion"]["chunkCount"] == 1
@@ -513,7 +535,8 @@ def test_index_build_rpc_marks_chunks_ready(tmp_path: Path) -> None:
             output,
         )
     )
-    rebuilt = json.loads(output.getvalue())["result"]
+    rebuilt = rpc_result(output, "7")
+    assert isinstance(rebuilt, dict)
     assert rebuilt["ready"] is True
     assert rebuilt["indexVersion"]["chunkCount"] == 1
 

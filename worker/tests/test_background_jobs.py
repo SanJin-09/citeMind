@@ -11,7 +11,8 @@ def test_background_job_persists_progress_checkpoint_retries_and_error(
 ) -> None:
     storage = StorageRuntime(tmp_path, vector_dimension=3)
     storage.initialize()
-    service = BackgroundJobService(storage)
+    emitted: list[dict[str, object]] = []
+    service = BackgroundJobService(storage, event_sink=emitted.append)
 
     created = service.create("source.import", "source-1")
 
@@ -49,12 +50,19 @@ def test_background_job_persists_progress_checkpoint_retries_and_error(
     assert failed["errorMessage"] == "Docling parse failed"
     assert retrying["status"] == "retrying"
     assert retrying["retryCount"] == 1
+    assert [job["status"] for job in emitted] == [
+        "pending",
+        "running",
+        "failed",
+        "retrying",
+    ]
 
 
 def test_background_job_recovery_pauses_orphaned_running_jobs(tmp_path: Path) -> None:
     storage = StorageRuntime(tmp_path, vector_dimension=3)
     storage.initialize()
-    service = BackgroundJobService(storage)
+    emitted: list[dict[str, object]] = []
+    service = BackgroundJobService(storage, event_sink=emitted.append)
     job = service.create("index.rebuild", "kb-1")
     service.update_progress(str(job["id"]), status="running", progress=0.2)
 
@@ -63,6 +71,7 @@ def test_background_job_recovery_pauses_orphaned_running_jobs(tmp_path: Path) ->
     assert recovered["jobs"][0]["id"] == job["id"]
     assert recovered["jobs"][0]["status"] == "paused"
     assert service.list_unfinished()["jobs"][0]["status"] == "paused"
+    assert emitted[-1]["status"] == "paused"
 
 
 def test_background_job_rejects_invalid_transitions(tmp_path: Path) -> None:

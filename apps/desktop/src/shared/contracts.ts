@@ -1146,6 +1146,7 @@ export interface DesktopApi {
     cancel: (jobId: string) => Promise<BackgroundJobRecord>;
     retry: (jobId: string) => Promise<BackgroundJobRecord>;
     recover: () => Promise<BackgroundJobListResponse>;
+    onUpdated: (listener: (job: BackgroundJobRecord) => void) => () => void;
   };
   agentRuns: {
     list: (
@@ -1326,6 +1327,7 @@ export const IPC_CHANNELS = {
   cancelJob: "citemind:jobs:cancel",
   retryJob: "citemind:jobs:retry",
   recoverJobs: "citemind:jobs:recover",
+  backgroundJobUpdated: "citemind:jobs:updated",
   createAgentRun: "citemind:agent-runs:create",
   listAgentRuns: "citemind:agent-runs:list",
   getAgentRun: "citemind:agent-runs:get",

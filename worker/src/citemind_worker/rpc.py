@@ -1,6 +1,7 @@
 import inspect
 import json
 import logging
+import threading
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from typing import TextIO
@@ -29,6 +30,7 @@ class RpcServer:
     def __init__(self) -> None:
         self._methods: dict[str, RpcMethod] = {}
         self._output_stream: TextIO | None = None
+        self._output_lock = threading.Lock()
         self.stopped = False
 
     def register(self, method: str, handler: RpcMethod) -> None:
@@ -37,29 +39,26 @@ class RpcServer:
         self._methods[method] = handler
 
     def notify(self, method: str, params: JsonValue) -> None:
-        if self._output_stream is None:
-            return
-        self._output_stream.write(
-            json.dumps(
-                {"jsonrpc": "2.0", "method": method, "params": params},
-                ensure_ascii=False,
-                separators=(",", ":"),
-            )
-        )
-        self._output_stream.write("\n")
-        self._output_stream.flush()
+        self._write_message({"jsonrpc": "2.0", "method": method, "params": params})
 
     async def serve(self, input_stream: TextIO, output_stream: TextIO) -> None:
         self._output_stream = output_stream
         for line in input_stream:
             response = await self.handle_line(line)
             if response is not None:
-                output_stream.write(json.dumps(response, ensure_ascii=False, separators=(",", ":")))
-                output_stream.write("\n")
-                output_stream.flush()
+                self._write_message(response)
             if self.stopped:
                 break
         self._output_stream = None
+
+    def _write_message(self, payload: dict[str, JsonValue]) -> None:
+        with self._output_lock:
+            output_stream = self._output_stream
+            if output_stream is None:
+                return
+            output_stream.write(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
+            output_stream.write("\n")
+            output_stream.flush()
 
     async def handle_line(self, line: str) -> dict[str, JsonValue] | None:
         try:
