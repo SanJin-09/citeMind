@@ -117,6 +117,28 @@ const api: DesktopApi = {
     invokeTool: (request) =>
       ipcRenderer.invoke(IPC_CHANNELS.invokeAgentTool, request),
   },
+  mcpServers: {
+    list: () => ipcRenderer.invoke(IPC_CHANNELS.listMcpServers),
+    save: (request) => ipcRenderer.invoke(IPC_CHANNELS.saveMcpServer, request),
+    delete: (serverId) =>
+      ipcRenderer.invoke(IPC_CHANNELS.deleteMcpServer, serverId),
+    discover: (serverId) =>
+      ipcRenderer.invoke(IPC_CHANNELS.discoverMcpServer, serverId),
+  },
+  externalResearch: {
+    setAccess: (runId, enabled, serverIds) =>
+      ipcRenderer.invoke(IPC_CHANNELS.setExternalResearchAccess, {
+        runId,
+        enabled,
+        serverIds,
+      }),
+    search: (request) =>
+      ipcRenderer.invoke(IPC_CHANNELS.searchExternalResearch, request),
+    candidates: (runId) =>
+      ipcRenderer.invoke(IPC_CHANNELS.listExternalCandidates, runId),
+    decide: (request) =>
+      ipcRenderer.invoke(IPC_CHANNELS.decideExternalCandidates, request),
+  },
   sources: {
     importFiles: (knowledgeBaseId) =>
       ipcRenderer.invoke(IPC_CHANNELS.importSourceFiles, knowledgeBaseId),

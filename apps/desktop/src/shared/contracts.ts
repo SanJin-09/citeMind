@@ -989,6 +989,16 @@ export interface AgentFactClass {
   description: string;
 }
 
+export interface AgentSubAgentDescriptor {
+  role: "Evidence Scout" | "Auditor";
+  allowedTools: string[];
+  maxSteps: number;
+  maxToolCalls: number;
+  maxModelCalls: 0;
+  maxDurationSeconds: number;
+  canDelegate: false;
+}
+
 export interface AgentNativeToolDescriptor {
   name: string;
   title: string;
@@ -1013,6 +1023,7 @@ export interface AgentSkillListResponse {
   version: string;
   nativeTools: AgentNativeToolDescriptor[];
   factClasses: AgentFactClass[];
+  subAgents: AgentSubAgentDescriptor[];
   skills: AgentSkillDescriptor[];
 }
 
@@ -1036,6 +1047,112 @@ export interface AgentToolInvocationResponse {
   toolName: string;
   result: Record<string, unknown>;
   agentRun: AgentRunResponse;
+}
+
+export interface McpServerRecord {
+  id: string;
+  name: string;
+  transport: "stdio";
+  command: string;
+  args: string[];
+  envKeys: string[];
+  readOnlyTools: string[];
+  enabled: boolean;
+  timeoutSeconds: number;
+  lastError: string | null;
+  lastDiscoveredAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface McpServerListResponse {
+  servers: McpServerRecord[];
+}
+
+export interface SaveMcpServerRequest {
+  serverId?: string | null;
+  name: string;
+  command: string;
+  args?: string[];
+  envKeys?: string[];
+  readOnlyTools?: string[];
+  enabled?: boolean;
+  timeoutSeconds?: number;
+}
+
+export interface McpToolDescriptor {
+  name: string;
+  title: string;
+  description: string;
+  inputSchema: Record<string, unknown>;
+  annotations: {
+    readOnlyHint: boolean;
+    destructiveHint: boolean;
+  };
+  locallyAllowedReadOnly: boolean;
+  trustNotice: string;
+}
+
+export interface McpDiscoveryResponse {
+  server: McpServerRecord;
+  tools: McpToolDescriptor[];
+}
+
+export interface ExternalComparison {
+  classification: "consensus" | "supplement" | "conflict";
+  label: string;
+  matches: Array<{
+    sourceId: string;
+    displayName: string;
+    overlap: number;
+    polarityConflict: boolean;
+  }>;
+}
+
+export interface ExternalResearchCandidate {
+  id: string;
+  runId: string;
+  knowledgeBaseId: string;
+  serverId: string;
+  toolName: string;
+  title: string;
+  url: string;
+  snippet: string;
+  content: string;
+  sourceMetadata: Record<string, unknown>;
+  initialComparison: ExternalComparison;
+  finalComparison: ExternalComparison | Record<string, never>;
+  status: "candidate" | "rejected" | "importing" | "indexed" | "failed";
+  importedSourceId: string | null;
+  indexedVersionId: string | null;
+  errorMessage: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ExternalResearchResponse {
+  runId: string;
+  candidates: ExternalResearchCandidate[];
+  confirmationId?: string | null;
+  addedCount?: number;
+  indexVersionId?: string | null;
+  errors?: Array<{ serverId: string; toolName: string; error: string }>;
+  failures?: Array<{ candidateId: string; error: string }>;
+  agentRun?: AgentRunResponse;
+}
+
+export interface ExternalResearchSearchRequest {
+  runId: string;
+  query: string;
+  searches: Array<{ serverId: string; toolName: string }>;
+  limit?: number;
+}
+
+export interface ExternalResearchDecisionRequest {
+  runId: string;
+  confirmationId: string;
+  candidateIds: string[];
+  decision: "import" | "reject";
 }
 
 export interface CreateWritingProjectRequest {
@@ -1209,6 +1326,31 @@ export interface DesktopApi {
       request: AgentToolInvocationRequest,
     ) => Promise<AgentToolInvocationResponse>;
   };
+  mcpServers: {
+    list: () => Promise<McpServerListResponse>;
+    save: (request: SaveMcpServerRequest) => Promise<McpServerRecord>;
+    delete: (serverId: string) => Promise<McpServerListResponse>;
+    discover: (serverId: string) => Promise<McpDiscoveryResponse>;
+  };
+  externalResearch: {
+    setAccess: (
+      runId: string,
+      enabled: boolean,
+      serverIds: string[],
+    ) => Promise<{
+      runId: string;
+      enabled: boolean;
+      serverIds: string[];
+      agentRun: AgentRunResponse;
+    }>;
+    search: (
+      request: ExternalResearchSearchRequest,
+    ) => Promise<ExternalResearchResponse>;
+    candidates: (runId: string) => Promise<ExternalResearchResponse>;
+    decide: (
+      request: ExternalResearchDecisionRequest,
+    ) => Promise<ExternalResearchResponse>;
+  };
   sources: {
     importFiles: (knowledgeBaseId: string) => Promise<ImportFilesResponse>;
     importWeb: (request: ImportWebRequest) => Promise<ImportSourceResult>;
@@ -1352,6 +1494,14 @@ export const IPC_CHANNELS = {
   getAgentSkill: "citemind:agent-skills:get",
   runAgentSkill: "citemind:agent-skills:run",
   invokeAgentTool: "citemind:agent-tools:invoke",
+  listMcpServers: "citemind:mcp-servers:list",
+  saveMcpServer: "citemind:mcp-servers:save",
+  deleteMcpServer: "citemind:mcp-servers:delete",
+  discoverMcpServer: "citemind:mcp-servers:discover",
+  setExternalResearchAccess: "citemind:external-research:set-access",
+  searchExternalResearch: "citemind:external-research:search",
+  listExternalCandidates: "citemind:external-research:candidates",
+  decideExternalCandidates: "citemind:external-research:decide",
   importSourceFiles: "citemind:sources:import-files",
   importWebSource: "citemind:sources:import-web",
   listParseChecks: "citemind:sources:parse-checks",

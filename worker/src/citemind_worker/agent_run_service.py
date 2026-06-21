@@ -76,6 +76,8 @@ TRACE_SENSITIVE_KEYS = {
 TRACE_TEXT_LIMIT = 800
 TRACE_SUMMARY_LIMIT = 240
 TraceEventSink = Callable[[dict[str, object]], None]
+DELEGATE_ROLES = {"Evidence Scout", "Auditor"}
+MAX_PARALLEL_DELEGATIONS = 2
 
 
 class AgentRunService:
@@ -798,6 +800,9 @@ class AgentRunService:
         child_run_id: str | None = None,
     ) -> dict[str, object]:
         self._ensure_active(run_id)
+        clean_role = _required_text(delegatee_role, "delegateeRole")
+        if clean_role not in DELEGATE_ROLES:
+            raise ValueError("delegateeRole must be Evidence Scout or Auditor")
         delegation_id = f"agent-delegation-{uuid4().hex}"
         with self.storage.database.connect() as connection:
             connection.execute(
@@ -811,9 +816,9 @@ class AgentRunService:
                     delegation_id,
                     run_id,
                     child_run_id,
-                    _required_text(delegatee_role, "delegateeRole"),
+                    clean_role,
                     _required_text(task, "task"),
-                    _json(input_scope or {}),
+                    _json(_sanitize_trace_payload(input_scope or {})),
                 ),
             )
             event = self._insert_event(
@@ -822,9 +827,116 @@ class AgentRunService:
                 event_type="delegation.created",
                 stage="executing",
                 status=self._status_in_connection(connection, run_id),
-                title="子 Agent 委派已记录",
+                title=f"子 Agent 委派已记录：{clean_role}",
                 summary=task,
-                payload={"delegationId": delegation_id, "childRunId": child_run_id},
+                payload={
+                    "delegationId": delegation_id,
+                    "childRunId": child_run_id,
+                    "delegateeRole": clean_role,
+                    "inputScope": dict(input_scope or {}),
+                },
+            )
+            connection.commit()
+        self._emit_event(event)
+        return self.get(run_id)
+
+    def start_delegation(self, delegation_id: str) -> dict[str, object]:
+        row = self._delegation_row(delegation_id)
+        run_id = str(row["run_id"])
+        self._ensure_active(run_id)
+        with self.storage.database.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            current = connection.execute(
+                "SELECT status FROM agent_run_delegations WHERE id = ?",
+                (delegation_id,),
+            ).fetchone()
+            if current is None:
+                raise ValueError("AgentRun delegation not found")
+            if str(current["status"]) != "pending":
+                raise ValueError("Only pending delegation can be started")
+            running_count = int(
+                connection.execute(
+                    """
+                    SELECT COUNT(*)
+                    FROM agent_run_delegations
+                    WHERE run_id = ? AND status = 'running'
+                    """,
+                    (run_id,),
+                ).fetchone()[0]
+            )
+            if running_count >= MAX_PARALLEL_DELEGATIONS:
+                raise ValueError("AgentRun sub-agent parallel limit exceeded")
+            connection.execute(
+                """
+                UPDATE agent_run_delegations
+                SET status = 'running'
+                WHERE id = ?
+                """,
+                (delegation_id,),
+            )
+            event = self._insert_event(
+                connection,
+                run_id,
+                event_type="delegation.started",
+                stage="tool_calling",
+                status=self._status_in_connection(connection, run_id),
+                title=f"子 Agent 开始：{row['delegatee_role']}",
+                summary=str(row["task"]),
+                payload={
+                    "delegationId": delegation_id,
+                    "delegateeRole": str(row["delegatee_role"]),
+                    "inputScope": _json_object(row["input_scope_json"]),
+                },
+            )
+            connection.commit()
+        self._emit_event(event)
+        return self.get(run_id)
+
+    def finish_delegation(
+        self,
+        delegation_id: str,
+        *,
+        status: str,
+        output: Mapping[str, object] | None = None,
+        stop_reason: str,
+    ) -> dict[str, object]:
+        if status not in {"completed", "failed", "cancelled"}:
+            raise ValueError("delegation status must be completed, failed, or cancelled")
+        row = self._delegation_row(delegation_id)
+        run_id = str(row["run_id"])
+        if str(row["status"]) not in {"pending", "running"}:
+            raise ValueError("AgentRun delegation is already terminal")
+        safe_output = _sanitize_trace_payload(output or {})
+        clean_reason = _required_text(stop_reason, "stopReason")
+        with self.storage.database.connect() as connection:
+            connection.execute(
+                """
+                UPDATE agent_run_delegations
+                SET status = ?,
+                    output_json = ?,
+                    stop_reason = ?,
+                    completed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                WHERE id = ?
+                """,
+                (status, _json(safe_output), clean_reason, delegation_id),
+            )
+            event = self._insert_event(
+                connection,
+                run_id,
+                event_type=f"delegation.{status}",
+                stage="conflict_audit"
+                if str(row["delegatee_role"]) == "Auditor"
+                else "evidence_retrieval",
+                status=self._status_in_connection(connection, run_id),
+                title=f"子 Agent {_delegation_status_label(status)}：{row['delegatee_role']}",
+                summary=clean_reason,
+                payload={
+                    "delegationId": delegation_id,
+                    "delegateeRole": str(row["delegatee_role"]),
+                    "output": safe_output,
+                    "stopReason": clean_reason,
+                },
+                completed_at="now",
             )
             connection.commit()
         self._emit_event(event)
@@ -904,6 +1016,92 @@ class AgentRunService:
                 title=f"{_output_type_label(output_type)}已保存",
                 summary=title,
                 payload={"outputId": output_id, "citationCount": len(citations or [])},
+            )
+            connection.commit()
+        self._emit_event(event)
+        return self.get(run_id)
+
+    def attach_indexed_source(
+        self,
+        run_id: str,
+        *,
+        source_id: str,
+        index_version_id: str,
+        candidate_id: str,
+    ) -> dict[str, object]:
+        self._ensure_active(run_id)
+        run = self._run_row(run_id)
+        knowledge_base_id = str(run["knowledge_base_id"])
+        self._ensure_index_version(knowledge_base_id, index_version_id)
+        with self.storage.database.connect() as connection:
+            source = connection.execute(
+                """
+                SELECT 1
+                FROM sources
+                WHERE id = ? AND knowledge_base_id = ? AND status = 'ready'
+                """,
+                (source_id, knowledge_base_id),
+            ).fetchone()
+            if source is None:
+                raise ValueError("外部资料尚未完成索引")
+            source_scope = [
+                item for item in _json_list(run["source_scope_json"]) if isinstance(item, str)
+            ]
+            if source_id not in source_scope:
+                source_scope.append(source_id)
+            connection.execute(
+                """
+                UPDATE agent_runs
+                SET source_scope_json = ?,
+                    index_version_id = ?,
+                    updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                WHERE id = ?
+                """,
+                (_json(source_scope), index_version_id, run_id),
+            )
+            event = self._insert_event(
+                connection,
+                run_id,
+                event_type="external_source.indexed",
+                stage="conflict_audit",
+                status=self._status_in_connection(connection, run_id),
+                title="外部资料已进入可引用范围",
+                summary=f"已保存快照并切换到索引 {index_version_id}",
+                payload={
+                    "candidateId": candidate_id,
+                    "sourceId": source_id,
+                    "indexVersionId": index_version_id,
+                    "sourceScope": source_scope,
+                },
+                completed_at="now",
+            )
+            connection.commit()
+        self._emit_event(event)
+        return self.get(run_id)
+
+    def record_external_access(
+        self,
+        run_id: str,
+        *,
+        enabled: bool,
+        server_ids: Sequence[str],
+    ) -> dict[str, object]:
+        self._ensure_active(run_id)
+        with self.storage.database.connect() as connection:
+            event = self._insert_event(
+                connection,
+                run_id,
+                event_type="external_access.enabled" if enabled else "external_access.disabled",
+                stage="waiting_confirmation" if enabled else "planning",
+                status=self._status_in_connection(connection, run_id),
+                title="已启用寻找外部资料" if enabled else "已关闭寻找外部资料",
+                summary=(
+                    f"本次 AgentRun 仅开放 {len(server_ids)} 个 MCP 服务的本地只读白名单"
+                    if enabled
+                    else "外部 MCP Tool 已恢复为禁止状态"
+                ),
+                payload={"enabled": enabled, "serverIds": list(server_ids)},
+                completed_at="now",
             )
             connection.commit()
         self._emit_event(event)
@@ -992,6 +1190,16 @@ class AgentRunService:
             ).fetchone()
         if row is None:
             raise ValueError("AgentRun confirmation not found")
+        return cast(sqlite3.Row, row)
+
+    def _delegation_row(self, delegation_id: str) -> sqlite3.Row:
+        with self.storage.database.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM agent_run_delegations WHERE id = ?",
+                (delegation_id,),
+            ).fetchone()
+        if row is None:
+            raise ValueError("AgentRun delegation not found")
         return cast(sqlite3.Row, row)
 
     def _ensure_citation_chunk_scope(
@@ -1379,6 +1587,10 @@ def _json_list(value: object) -> list[object]:
 
 
 def _tool_status_label(status: str) -> str:
+    return {"completed": "完成", "failed": "失败", "cancelled": "取消"}[status]
+
+
+def _delegation_status_label(status: str) -> str:
     return {"completed": "完成", "failed": "失败", "cancelled": "取消"}[status]
 
 

@@ -256,6 +256,96 @@ class SourceImportService:
         )
         return result
 
+    def import_external_snapshot(
+        self,
+        knowledge_base_id: str,
+        url: str,
+        *,
+        display_name: str,
+        content: str,
+        metadata: dict[str, object] | None = None,
+    ) -> dict[str, object]:
+        clean_url = _clean_url(url)
+        clean_content = _normalize_text(content)
+        if not clean_content:
+            raise ValueError("外部资料快照内容为空")
+        source_id = f"source-{uuid4().hex}"
+        source_version_id = f"source-version-{uuid4().hex}"
+        snapshot_path = self.storage.paths.web_snapshots / f"{source_id}.html"
+        artifact_path = _artifact_path(self.storage, source_version_id)
+        snapshot_path.parent.mkdir(parents=True, exist_ok=True)
+        artifact_path.parent.mkdir(parents=True, exist_ok=True)
+        snapshot_html = _external_snapshot_html(
+            title=display_name,
+            url=clean_url,
+            content=clean_content,
+            metadata=metadata or {},
+        )
+        snapshot_path.write_text(snapshot_html, encoding="utf-8")
+        original_hash = _text_hash(snapshot_html)
+        self._insert_source(
+            source_id=source_id,
+            knowledge_base_id=knowledge_base_id,
+            source_type="web",
+            display_name=display_name,
+            uri=clean_url,
+            original_hash=original_hash,
+            status="processing",
+        )
+        self._insert_source_version(
+            source_version_id=source_version_id,
+            source_id=source_id,
+            original_path=None,
+            snapshot_path=snapshot_path,
+            parse_artifact_path=artifact_path,
+            status="processing",
+        )
+        job = self.jobs.create("source.import_external_snapshot", source_id)
+        self.jobs.update_progress(str(job["id"]), status="running", progress=0.2)
+        blocks = [
+            ParsedBlock(
+                original_text=paragraph,
+                normalized_text=paragraph,
+                location=ParsedLocation(
+                    heading_path=[display_name],
+                    anchor=f"external-snapshot-{index}",
+                ),
+            )
+            for index, paragraph in enumerate(_snapshot_paragraphs(clean_content), start=1)
+        ]
+        parsed = ParsedDocument(
+            parser="mcp-external-snapshot",
+            parser_version=PARSER_VERSION,
+            source_type="web",
+            original_text=clean_content,
+            normalized_text=clean_content,
+            blocks=blocks,
+            snapshot_text=snapshot_html,
+        )
+        try:
+            return self._complete_parsed_import(
+                job_id=str(job["id"]),
+                knowledge_base_id=knowledge_base_id,
+                source_id=source_id,
+                source_version_id=source_version_id,
+                artifact_path=artifact_path,
+                original_hash=original_hash,
+                parsed=parsed,
+                snapshot_path=snapshot_path,
+                duplicate_source_id=None,
+                duplicate_kind=None,
+                duplicate_action="ask",
+            )
+        except Exception as error:
+            return self._fail_import(
+                job_id=str(job["id"]),
+                source_id=source_id,
+                source_version_id=source_version_id,
+                artifact_path=artifact_path,
+                source_type="web",
+                message=_public_error(error),
+            )
+
     def _record_parse_metrics(
         self,
         knowledge_base_id: str,
@@ -1983,6 +2073,32 @@ def _clean_url(url: str) -> str:
     if not clean.startswith(("http://", "https://")):
         raise ValueError("网页链接必须以 http:// 或 https:// 开头")
     return clean
+
+
+def _snapshot_paragraphs(content: str) -> list[str]:
+    paragraphs = [item.strip() for item in re.split(r"\n{2,}", content) if item.strip()]
+    return paragraphs or [content]
+
+
+def _external_snapshot_html(
+    *,
+    title: str,
+    url: str,
+    content: str,
+    metadata: dict[str, object],
+) -> str:
+    metadata_json = json.dumps(metadata, ensure_ascii=False, separators=(",", ":"))
+    paragraphs = "".join(
+        f'<p id="external-snapshot-{index}">{html.escape(paragraph)}</p>'
+        for index, paragraph in enumerate(_snapshot_paragraphs(content), start=1)
+    )
+    return (
+        '<!doctype html><html><head><meta charset="utf-8">'
+        f"<title>{html.escape(title)}</title>"
+        f'<meta name="citemind-original-url" content="{html.escape(url, quote=True)}">'
+        f'<meta name="citemind-mcp-metadata" content="{html.escape(metadata_json, quote=True)}">'
+        f"</head><body><h1>{html.escape(title)}</h1>{paragraphs}</body></html>"
+    )
 
 
 def _decode_text_file(path: Path) -> str:

@@ -33,6 +33,9 @@ import {
   type DecideSourceRelationRequest,
   type DecideSourceTagRequest,
   type DecideSourceVersionRequest,
+  type ExternalResearchDecisionRequest,
+  type ExternalResearchResponse,
+  type ExternalResearchSearchRequest,
   type HybridSearchRequest,
   type HybridSearchResponse,
   type IndexBuildEstimate,
@@ -45,12 +48,16 @@ import {
   type KnowledgeBaseRecord,
   type KnowledgeBaseSourcesResponse,
   type MaintenanceStatus,
+  type McpDiscoveryResponse,
+  type McpServerListResponse,
+  type McpServerRecord,
   type ModelCapabilityStatus,
   type ParseChecksResponse,
   type RenameKnowledgeBaseRequest,
   type ResolveDuplicateRequest,
   type RunAgentSkillRequest,
   type SaveSeedCredentialRequest,
+  type SaveMcpServerRequest,
   type SaveKnowledgeBaseRequest,
   SEED_DEFAULTS,
   type SeedCredentialStatus,
@@ -364,6 +371,62 @@ export function registerIpcHandlers(workerManager: PythonWorkerManager): void {
       180_000,
     );
   });
+  ipcMain.handle(IPC_CHANNELS.listMcpServers, () =>
+    workerManager.call<McpServerListResponse>("mcp_servers.list"),
+  );
+  ipcMain.handle(IPC_CHANNELS.saveMcpServer, (_event, payload) =>
+    workerManager.call<McpServerRecord>(
+      "mcp_servers.upsert",
+      normalizeSaveMcpServerRequest(payload),
+      30_000,
+    ),
+  );
+  ipcMain.handle(IPC_CHANNELS.deleteMcpServer, (_event, serverId) =>
+    workerManager.call<McpServerListResponse>("mcp_servers.delete", {
+      serverId: normalizeNonEmptyString(serverId, "MCP 服务 ID"),
+    }),
+  );
+  ipcMain.handle(IPC_CHANNELS.discoverMcpServer, (_event, serverId) =>
+    workerManager.call<McpDiscoveryResponse>(
+      "mcp_servers.discover",
+      { serverId: normalizeNonEmptyString(serverId, "MCP 服务 ID") },
+      60_000,
+    ),
+  );
+  ipcMain.handle(IPC_CHANNELS.setExternalResearchAccess, (_event, payload) => {
+    const request = normalizeExternalResearchAccessRequest(payload);
+    return workerManager.call("external_research.set_access", request);
+  });
+  ipcMain.handle(IPC_CHANNELS.searchExternalResearch, (_event, payload) =>
+    workerManager.call<ExternalResearchResponse>(
+      "external_research.search",
+      normalizeExternalResearchSearchRequest(payload),
+      180_000,
+    ),
+  );
+  ipcMain.handle(IPC_CHANNELS.listExternalCandidates, (_event, runId) =>
+    workerManager.call<ExternalResearchResponse>(
+      "external_research.candidates",
+      { runId: normalizeAgentRunId(runId) },
+    ),
+  );
+  ipcMain.handle(
+    IPC_CHANNELS.decideExternalCandidates,
+    async (_event, payload) => {
+      const request = normalizeExternalResearchDecisionRequest(payload);
+      const summary = await seedStore.summary();
+      return workerManager.call<ExternalResearchResponse>(
+        "external_research.decide",
+        {
+          ...request,
+          apiKey: await seedStore.readApiKey(),
+          baseUrl: summary.baseUrl,
+          embeddingModel: summary.defaultEmbeddingModel,
+        },
+        300_000,
+      );
+    },
+  );
   ipcMain.handle(IPC_CHANNELS.startAgentRunToolCall, (_event, payload) => {
     const request = normalizeAgentRunToolCallStartRequest(payload);
     return workerManager.call<AgentRunResponse>(
@@ -1533,6 +1596,96 @@ function normalizeAgentToolInvocationRequest(
     runId: normalizeAgentRunId(payload.runId),
     toolName: normalizeNonEmptyString(payload.toolName, "Tool 名称"),
     params: normalizeOptionalRecord(payload.params, "Tool 参数"),
+  };
+}
+
+function normalizeSaveMcpServerRequest(payload: unknown): SaveMcpServerRequest {
+  if (!isRecord(payload)) {
+    throw new Error("MCP 服务配置无效");
+  }
+  const enabled = payload.enabled;
+  if (enabled !== undefined && typeof enabled !== "boolean") {
+    throw new Error("MCP 服务启用状态无效");
+  }
+  const timeoutSeconds =
+    payload.timeoutSeconds === undefined
+      ? undefined
+      : normalizePositiveInteger(payload.timeoutSeconds, "MCP 调用超时");
+  return {
+    serverId: normalizeOptionalNullableString(payload.serverId, "MCP 服务 ID"),
+    name: normalizeNonEmptyString(payload.name, "MCP 服务名称"),
+    command: normalizeNonEmptyString(payload.command, "MCP 服务命令"),
+    args: normalizeOptionalStringArray(payload.args, "MCP 命令参数"),
+    envKeys: normalizeOptionalStringArray(payload.envKeys, "MCP 环境变量名"),
+    readOnlyTools: normalizeOptionalStringArray(
+      payload.readOnlyTools,
+      "MCP 只读 Tool",
+    ),
+    enabled,
+    timeoutSeconds,
+  };
+}
+
+function normalizeExternalResearchAccessRequest(payload: unknown): {
+  runId: string;
+  enabled: boolean;
+  serverIds: string[];
+} {
+  if (!isRecord(payload) || typeof payload.enabled !== "boolean") {
+    throw new Error("外部资料授权参数无效");
+  }
+  return {
+    runId: normalizeAgentRunId(payload.runId),
+    enabled: payload.enabled,
+    serverIds:
+      normalizeOptionalStringArray(payload.serverIds, "MCP 服务范围") ?? [],
+  };
+}
+
+function normalizeExternalResearchSearchRequest(
+  payload: unknown,
+): ExternalResearchSearchRequest {
+  if (!isRecord(payload) || !Array.isArray(payload.searches)) {
+    throw new Error("外部资料检索参数无效");
+  }
+  const searches = payload.searches.map((item) => {
+    if (!isRecord(item)) {
+      throw new Error("外部资料检索 Tool 配置无效");
+    }
+    return {
+      serverId: normalizeNonEmptyString(item.serverId, "MCP 服务 ID"),
+      toolName: normalizeNonEmptyString(item.toolName, "MCP Tool 名称"),
+    };
+  });
+  return {
+    runId: normalizeAgentRunId(payload.runId),
+    query: normalizeNonEmptyString(payload.query, "外部资料检索词"),
+    searches,
+    limit:
+      payload.limit === undefined
+        ? undefined
+        : normalizePositiveInteger(payload.limit, "外部候选数量"),
+  };
+}
+
+function normalizeExternalResearchDecisionRequest(
+  payload: unknown,
+): ExternalResearchDecisionRequest {
+  if (!isRecord(payload)) {
+    throw new Error("外部资料确认参数无效");
+  }
+  if (payload.decision !== "import" && payload.decision !== "reject") {
+    throw new Error("外部资料确认决策无效");
+  }
+  return {
+    runId: normalizeAgentRunId(payload.runId),
+    confirmationId: normalizeNonEmptyString(
+      payload.confirmationId,
+      "确认记录 ID",
+    ),
+    candidateIds:
+      normalizeOptionalStringArray(payload.candidateIds, "外部候选范围") ?? [],
+    decision: payload.decision,
   };
 }
 

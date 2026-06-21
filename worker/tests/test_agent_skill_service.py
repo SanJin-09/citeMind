@@ -35,6 +35,7 @@ def test_agent_skill_registry_exposes_versioned_skills_and_native_tools(
     skill_ids = {skill["id"] for skill in registry["skills"]}
     tool_names = {tool["name"] for tool in registry["nativeTools"]}
     research = service.get_skill("research_brief")
+    sub_agent_roles = {item["role"] for item in registry["subAgents"]}
 
     assert {"research_brief", "multi_source_compare", "citation_conflict_audit"} <= skill_ids
     assert {
@@ -47,6 +48,8 @@ def test_agent_skill_registry_exposes_versioned_skills_and_native_tools(
     assert research["version"] == "1.0.0"
     assert research["executionConstraints"]["mustClassifyEveryFactualClaim"] is True
     assert "verified_evidence" in {item["id"] for item in research["factClasses"]}
+    assert sub_agent_roles == {"Evidence Scout", "Auditor"}
+    assert all(item["canDelegate"] is False for item in registry["subAgents"])
 
 
 def test_research_brief_runs_controlled_tools_and_saves_validated_output(
@@ -97,6 +100,11 @@ def test_research_brief_runs_controlled_tools_and_saves_validated_output(
         for conclusion in skill_output["conclusions"]
     )
     assert response["citations"]
+    assert {item["delegateeRole"] for item in response["delegations"]} == {
+        "Evidence Scout",
+        "Auditor",
+    }
+    assert all(item["status"] == "completed" for item in response["delegations"])
     assert {event["eventType"] for event in emitted} >= {
         "skill.loaded",
         "tool_call.started",

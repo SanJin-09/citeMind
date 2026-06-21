@@ -105,11 +105,16 @@ class CitationValidator:
                     s.uri,
                     s.status AS source_status,
                     iv.status AS index_status,
-                    iv.is_current
+                    iv.is_current,
+                    erc.id AS external_candidate_id,
+                    erc.status AS external_candidate_status,
+                    erc.indexed_version_id AS external_indexed_version_id
                 FROM chunks c
                 JOIN source_versions sv ON sv.id = c.source_version_id
                 JOIN sources s ON s.id = sv.source_id
                 LEFT JOIN index_versions iv ON iv.id = c.index_version_id
+                LEFT JOIN external_research_candidates erc
+                    ON erc.imported_source_id = s.id
                 WHERE c.id IN ({placeholders})
                 """,
                 tuple(unique_ids),
@@ -140,6 +145,11 @@ def _invalid_reason(
         or source.get("status") != "ready"
     ):
         return "source_version_not_valid"
+    if row.get("externalCandidateId") is not None and (
+        row.get("externalCandidateStatus") != "indexed"
+        or row.get("externalIndexedVersionId") != index_version_id
+    ):
+        return "external_source_not_confirmed_indexed"
     if not _is_locatable(row):
         return "location_not_valid"
     return None
@@ -166,6 +176,9 @@ def _chunk_payload(row: sqlite3.Row) -> dict[str, object]:
         },
         "indexStatus": row["index_status"],
         "indexIsCurrent": bool(row["is_current"]),
+        "externalCandidateId": row["external_candidate_id"],
+        "externalCandidateStatus": row["external_candidate_status"],
+        "externalIndexedVersionId": row["external_indexed_version_id"],
     }
 
 

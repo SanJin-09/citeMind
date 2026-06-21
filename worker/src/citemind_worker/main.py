@@ -11,6 +11,7 @@ from citemind_worker.indexing_service import IndexingService
 from citemind_worker.knowledge_base_service import KnowledgeBaseService
 from citemind_worker.logging_config import configure_logging
 from citemind_worker.maintenance_service import MaintenanceService
+from citemind_worker.mcp_client_manager import ExternalResearchService, McpClientManager
 from citemind_worker.model_catalog import (
     DEFAULT_ARK_BASE_URL,
     DEFAULT_CHAT_MODEL,
@@ -40,6 +41,8 @@ def create_server(
     writing_workflow_service: WritingWorkflowService | None = None,
     agent_run_service: AgentRunService | None = None,
     agent_skill_service: AgentSkillService | None = None,
+    mcp_client_manager: McpClientManager | None = None,
+    external_research_service: ExternalResearchService | None = None,
 ) -> RpcServer:
     server = RpcServer()
     seed_models = model_service or (SeedModelService(storage) if storage is not None else None)
@@ -76,6 +79,28 @@ def create_server(
     agent_skills = agent_skill_service or (
         AgentSkillService(storage, retrieval=retrievals, agent_runs=agent_runs)
         if storage is not None and retrievals is not None and agent_runs is not None
+        else None
+    )
+    mcp_clients = mcp_client_manager or (
+        McpClientManager(storage, agent_runs=agent_runs)
+        if storage is not None and agent_runs is not None
+        else None
+    )
+    external_research = external_research_service or (
+        ExternalResearchService(
+            storage,
+            manager=mcp_clients,
+            agent_runs=agent_runs,
+            source_imports=source_imports,
+            indexes=indexes,
+        )
+        if (
+            storage is not None
+            and mcp_clients is not None
+            and agent_runs is not None
+            and source_imports is not None
+            and indexes is not None
+        )
         else None
     )
     if agent_runs is not None:
@@ -537,6 +562,101 @@ def create_server(
                 params=tool_params,
             )  # type: ignore[return-value]
         except ValueError as error:
+            raise RpcError(-32602, str(error)) from error
+
+    def list_mcp_servers(params: JsonValue) -> JsonValue:
+        require_object_params(params)
+        service = _require_mcp_client_manager(mcp_clients)
+        return service.list_servers()  # type: ignore[return-value]
+
+    def upsert_mcp_server(params: JsonValue) -> JsonValue:
+        values = require_object_params(params)
+        service = _require_mcp_client_manager(mcp_clients)
+        try:
+            return service.upsert_server(
+                server_id=_optional_nullable_str(values, "serverId"),
+                name=_required_str(values, "name"),
+                command=_required_str(values, "command"),
+                args=_optional_string_list(values, "args"),
+                env_keys=_optional_string_list(values, "envKeys"),
+                read_only_tools=_optional_string_list(values, "readOnlyTools"),
+                enabled=_optional_bool(values, "enabled", True),
+                timeout_seconds=_optional_int(values, "timeoutSeconds", 30),
+            )  # type: ignore[return-value]
+        except ValueError as error:
+            raise RpcError(-32602, str(error)) from error
+
+    def delete_mcp_server(params: JsonValue) -> JsonValue:
+        service = _require_mcp_client_manager(mcp_clients)
+        server_id = _required_str(require_object_params(params), "serverId")
+        try:
+            return service.delete_server(server_id)  # type: ignore[return-value]
+        except ValueError as error:
+            raise RpcError(-32602, str(error)) from error
+
+    async def discover_mcp_server(params: JsonValue) -> JsonValue:
+        service = _require_mcp_client_manager(mcp_clients)
+        server_id = _required_str(require_object_params(params), "serverId")
+        try:
+            return await service.discover(server_id)  # type: ignore[return-value]
+        except (RuntimeError, TimeoutError, ValueError) as error:
+            raise RpcError(-32022, str(error)) from error
+
+    def set_external_research_access(params: JsonValue) -> JsonValue:
+        values = require_object_params(params)
+        service = _require_mcp_client_manager(mcp_clients)
+        run_id = _required_str(values, "runId")
+        enabled = _optional_bool(values, "enabled", False)
+        server_ids = _optional_string_list(values, "serverIds") or []
+        try:
+            return service.set_run_access(
+                run_id,
+                enabled=enabled,
+                server_ids=server_ids,
+            )  # type: ignore[return-value]
+        except (PermissionError, ValueError) as error:
+            raise RpcError(-32602, str(error)) from error
+
+    async def search_external_research(params: JsonValue) -> JsonValue:
+        values = require_object_params(params)
+        service = _require_external_research_service(external_research)
+        searches = _optional_object_list(values, "searches") or []
+        try:
+            return await service.search(
+                _required_str(values, "runId"),
+                query=_required_str(values, "query"),
+                searches=searches,
+                limit=_optional_int(values, "limit", 8),
+            )  # type: ignore[return-value]
+        except (PermissionError, ValueError) as error:
+            raise RpcError(-32602, str(error)) from error
+
+    def list_external_candidates(params: JsonValue) -> JsonValue:
+        service = _require_external_research_service(external_research)
+        run_id = _required_str(require_object_params(params), "runId")
+        try:
+            return service.list_candidates(run_id)  # type: ignore[return-value]
+        except ValueError as error:
+            raise RpcError(-32602, str(error)) from error
+
+    async def decide_external_candidates(params: JsonValue) -> JsonValue:
+        values = require_object_params(params)
+        service = _require_external_research_service(external_research)
+        try:
+            return await service.decide(
+                _required_str(values, "runId"),
+                confirmation_id=_required_str(values, "confirmationId"),
+                candidate_ids=_optional_string_list(values, "candidateIds") or [],
+                decision=_required_str(values, "decision"),
+                api_key=_optional_nullable_str(values, "apiKey"),
+                base_url=_optional_str(values, "baseUrl", DEFAULT_ARK_BASE_URL),
+                embedding_model=_optional_str(
+                    values,
+                    "embeddingModel",
+                    DEFAULT_EMBEDDING_MODEL,
+                ),
+            )  # type: ignore[return-value]
+        except (RuntimeError, ValueError) as error:
             raise RpcError(-32602, str(error)) from error
 
     def start_agent_tool_call(params: JsonValue) -> JsonValue:
@@ -1241,6 +1361,14 @@ def create_server(
     server.register("agent_skills.get", get_agent_skill)
     server.register("agent_skills.run", run_agent_skill)
     server.register("agent_tools.invoke", invoke_agent_tool)
+    server.register("mcp_servers.list", list_mcp_servers)
+    server.register("mcp_servers.upsert", upsert_mcp_server)
+    server.register("mcp_servers.delete", delete_mcp_server)
+    server.register("mcp_servers.discover", discover_mcp_server)
+    server.register("external_research.set_access", set_external_research_access)
+    server.register("external_research.search", search_external_research)
+    server.register("external_research.candidates", list_external_candidates)
+    server.register("external_research.decide", decide_external_candidates)
     server.register("agent_runs.start_tool_call", start_agent_tool_call)
     server.register("agent_runs.record_tool_output", record_agent_tool_output)
     server.register("agent_runs.finish_tool_call", finish_agent_tool_call)
@@ -1350,6 +1478,22 @@ def _require_agent_skill_service(
 ) -> AgentSkillService:
     if service is None:
         raise RpcError(-32021, "Agent Skill service is not available")
+    return service
+
+
+def _require_mcp_client_manager(
+    service: McpClientManager | None,
+) -> McpClientManager:
+    if service is None:
+        raise RpcError(-32022, "MCP Client Manager is not available")
+    return service
+
+
+def _require_external_research_service(
+    service: ExternalResearchService | None,
+) -> ExternalResearchService:
+    if service is None:
+        raise RpcError(-32023, "External research service is not available")
     return service
 
 

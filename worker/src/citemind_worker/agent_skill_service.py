@@ -1,9 +1,11 @@
 import json
 import re
 from collections.abc import Mapping, Sequence
+from functools import partial
 from typing import Any
 
 from citemind_worker.agent_run_service import AgentRunService
+from citemind_worker.agent_subagent_service import AgentSubAgentService
 from citemind_worker.citation_validator import CitationValidator
 from citemind_worker.model_catalog import (
     DEFAULT_ARK_BASE_URL,
@@ -22,6 +24,7 @@ NATIVE_TOOLS: dict[str, dict[str, object]] = {
             "type": "object",
             "properties": {
                 "query": {"type": "string"},
+                "sourceIds": {"type": "array", "items": {"type": "string"}},
                 "limit": {"type": "integer", "minimum": 1, "maximum": 50},
                 "candidateLimit": {"type": "integer", "minimum": 1, "maximum": 200},
             },
@@ -251,17 +254,23 @@ class AgentSkillService:
         retrieval: HybridRetrievalService | None = None,
         validator: CitationValidator | None = None,
         agent_runs: AgentRunService | None = None,
+        sub_agents: AgentSubAgentService | None = None,
     ) -> None:
         self.storage = storage
         self.retrieval = retrieval or HybridRetrievalService(storage)
         self.validator = validator or CitationValidator(storage)
         self.agent_runs = agent_runs or AgentRunService(storage)
+        self.sub_agents = sub_agents or AgentSubAgentService(
+            storage,
+            agent_runs=self.agent_runs,
+        )
 
     def list_skills(self) -> dict[str, object]:
         return {
             "version": "1",
             "nativeTools": list(NATIVE_TOOLS.values()),
             "factClasses": list(FACT_CLASSES),
+            "subAgents": self.sub_agents.definitions(),
             "skills": [_skill_descriptor(skill) for skill in SKILL_DEFINITIONS.values()],
         }
 
@@ -415,45 +424,40 @@ class AgentSkillService:
         candidate_limit: int,
     ) -> None:
         query = _input_text(inputs, "query", goal)
-        retrieval = await self._retrieve_evidence(
+        run = self._run_scope(run_id)
+        executor = partial(self._invoke_subagent_tool, run_id, skill)
+        scout = await self.sub_agents.run(
             run_id,
-            skill,
-            query=query,
-            api_key=api_key,
-            base_url=base_url,
-            embedding_model=embedding_model,
-            limit=limit,
-            candidate_limit=candidate_limit,
+            role="Evidence Scout",
+            task=f"为研究问题寻找候选证据：{query}",
+            input_scope={
+                "question": query,
+                "sourceIds": run["sourceScope"],
+                "limit": limit,
+                "candidateLimit": candidate_limit,
+                "apiKey": api_key,
+                "baseUrl": base_url,
+                "embeddingModel": embedding_model,
+            },
+            executor=executor,
         )
-        chunk_ids = _candidate_chunk_ids(retrieval)
-        self.agent_runs.record_stage(
+        scout_output = _mapping(scout.get("output"))
+        retrieval = _mapping(scout_output.get("retrieval"))
+        source_chunks = _object_list(scout_output.get("chunks"))
+        paragraphs = _evidence_paragraphs(source_chunks, prefix="已验证证据")
+        auditor = await self.sub_agents.run(
             run_id,
-            stage="source_reading",
-            status="started",
-            title="读取来源片段",
-            step_id="source-read",
+            role="Auditor",
+            task="独立检查研究简报候选段落的引用与来源冲突",
+            input_scope={
+                "sourceIds": run["sourceScope"],
+                "paragraphs": paragraphs,
+                "candidateChunkIds": _candidate_chunk_ids(retrieval),
+            },
+            executor=executor,
         )
-        source_read = await self._invoke_tool_with_trace(
-            run_id,
-            skill=skill,
-            tool_name="source.read",
-            params={"chunkIds": chunk_ids},
-            step_id="source-read",
-            action_summary="读取检索候选片段",
-        )
-        source_chunks = _object_list(source_read.get("chunks"))
-        self.agent_runs.record_stage(
-            run_id,
-            stage="source_reading",
-            status="completed",
-            summary=f"读取 {len(source_chunks)} 个片段",
-            step_id="source-read",
-        )
-        paragraphs = _evidence_paragraphs(
-            source_chunks,
-            prefix="已验证证据",
-        )
-        validation = await self._validate_paragraphs(run_id, skill, retrieval, paragraphs)
+        audit_output = _mapping(auditor.get("output"))
+        validation = _mapping(audit_output.get("validation"))
         payload = _research_brief_payload(
             goal=goal,
             query=query,
@@ -461,6 +465,8 @@ class AgentSkillService:
             retrieval=retrieval,
             validation=validation,
         )
+        payload["subAgentAudit"] = _sub_agent_summary(scout, auditor)
+        payload["conflicts"] = _object_list(audit_output.get("conflicts"))
         await self._save_skill_output(
             run_id,
             skill=skill,
@@ -484,34 +490,48 @@ class AgentSkillService:
         candidate_limit: int,
     ) -> None:
         topic = _input_text(inputs, "topic", goal)
-        retrieval = await self._retrieve_evidence(
+        run = self._run_scope(run_id)
+        executor = partial(self._invoke_subagent_tool, run_id, skill)
+        scout = await self.sub_agents.run(
             run_id,
-            skill,
-            query=topic,
-            api_key=api_key,
-            base_url=base_url,
-            embedding_model=embedding_model,
-            limit=limit,
-            candidate_limit=candidate_limit,
+            role="Evidence Scout",
+            task=f"为观点对比寻找候选证据：{topic}",
+            input_scope={
+                "question": topic,
+                "sourceIds": run["sourceScope"],
+                "limit": limit,
+                "candidateLimit": candidate_limit,
+                "apiKey": api_key,
+                "baseUrl": base_url,
+                "embeddingModel": embedding_model,
+            },
+            executor=executor,
         )
-        chunk_ids = _candidate_chunk_ids(retrieval)
-        source_read = await self._invoke_tool_with_trace(
-            run_id,
-            skill=skill,
-            tool_name="source.read",
-            params={"chunkIds": chunk_ids},
-            step_id="source-read",
-            action_summary="读取多来源观点片段",
-        )
-        chunks = _object_list(source_read.get("chunks"))
+        scout_output = _mapping(scout.get("output"))
+        retrieval = _mapping(scout_output.get("retrieval"))
+        chunks = _object_list(scout_output.get("chunks"))
         paragraphs = _evidence_paragraphs(chunks, prefix="来源观点")
-        validation = await self._validate_paragraphs(run_id, skill, retrieval, paragraphs)
+        auditor = await self.sub_agents.run(
+            run_id,
+            role="Auditor",
+            task="独立检查多来源观点的引用与冲突",
+            input_scope={
+                "sourceIds": run["sourceScope"],
+                "paragraphs": paragraphs,
+                "candidateChunkIds": _candidate_chunk_ids(retrieval),
+            },
+            executor=executor,
+        )
+        audit_output = _mapping(auditor.get("output"))
+        validation = _mapping(audit_output.get("validation"))
         payload = _multi_source_compare_payload(
             topic=topic,
             chunks=chunks,
             retrieval=retrieval,
             validation=validation,
         )
+        payload["subAgentAudit"] = _sub_agent_summary(scout, auditor)
+        payload["conflicts"] = _object_list(audit_output.get("conflicts"))
         await self._save_skill_output(
             run_id,
             skill=skill,
@@ -535,64 +555,55 @@ class AgentSkillService:
         candidate_limit: int,
     ) -> None:
         input_paragraphs = _object_list(inputs.get("paragraphs"))
+        run = self._run_scope(run_id)
+        executor = partial(self._invoke_subagent_tool, run_id, skill)
+        scout: dict[str, object] | None = None
         if input_paragraphs:
-            run = self.agent_runs.get(run_id)["run"]
-            if not isinstance(run, dict):
-                raise ValueError("AgentRun not found")
             candidate_chunk_ids = _string_list(inputs.get("candidateChunkIds"))
             if not candidate_chunk_ids:
                 candidate_chunk_ids = _paragraph_chunk_ids(input_paragraphs)
-            source_read = await self._invoke_tool_with_trace(
-                run_id,
-                skill=skill,
-                tool_name="source.read",
-                params={"chunkIds": candidate_chunk_ids},
-                step_id="source-read",
-                action_summary="读取待审计引用片段",
-            )
-            validation = await self._invoke_tool_with_trace(
-                run_id,
-                skill=skill,
-                tool_name="citation.validate",
-                params={
-                    "paragraphs": input_paragraphs,
-                    "candidateChunkIds": candidate_chunk_ids,
-                    "indexVersionId": run.get("indexVersionId"),
-                },
-                step_id="citation-validation",
-                action_summary="审计输入段落引用",
-            )
             retrieval: dict[str, object] = {
                 "query": goal,
                 "indexVersion": {"id": run.get("indexVersionId")},
                 "results": [],
             }
         else:
-            retrieval = await self._retrieve_evidence(
+            scout = await self.sub_agents.run(
                 run_id,
-                skill,
-                query=goal,
-                api_key=api_key,
-                base_url=base_url,
-                embedding_model=embedding_model,
-                limit=limit,
-                candidate_limit=candidate_limit,
+                role="Evidence Scout",
+                task=f"为引用审计寻找候选证据：{goal}",
+                input_scope={
+                    "question": goal,
+                    "sourceIds": run["sourceScope"],
+                    "limit": limit,
+                    "candidateLimit": candidate_limit,
+                    "apiKey": api_key,
+                    "baseUrl": base_url,
+                    "embeddingModel": embedding_model,
+                },
+                executor=executor,
             )
-            chunk_ids = _candidate_chunk_ids(retrieval)
-            source_read = await self._invoke_tool_with_trace(
-                run_id,
-                skill=skill,
-                tool_name="source.read",
-                params={"chunkIds": chunk_ids},
-                step_id="source-read",
-                action_summary="读取审计候选片段",
-            )
+            scout_output = _mapping(scout.get("output"))
+            retrieval = _mapping(scout_output.get("retrieval"))
+            candidate_chunk_ids = _candidate_chunk_ids(retrieval)
             input_paragraphs = _evidence_paragraphs(
-                _object_list(source_read.get("chunks")),
+                _object_list(scout_output.get("chunks")),
                 prefix="审计候选证据",
             )
-            validation = await self._validate_paragraphs(run_id, skill, retrieval, input_paragraphs)
-        chunks = _object_list(source_read.get("chunks"))
+        auditor = await self.sub_agents.run(
+            run_id,
+            role="Auditor",
+            task="独立执行引用有效性与来源冲突审计",
+            input_scope={
+                "sourceIds": run["sourceScope"],
+                "paragraphs": input_paragraphs,
+                "candidateChunkIds": candidate_chunk_ids,
+            },
+            executor=executor,
+        )
+        audit_output = _mapping(auditor.get("output"))
+        validation = _mapping(audit_output.get("validation"))
+        chunks = _object_list(audit_output.get("chunks"))
         payload = _citation_conflict_audit_payload(
             goal=goal,
             paragraphs=input_paragraphs,
@@ -600,6 +611,10 @@ class AgentSkillService:
             validation=validation,
             retrieval=retrieval,
         )
+        payload["subAgentAudit"] = _sub_agent_summary(
+            *([scout, auditor] if scout is not None else [auditor])
+        )
+        payload["conflicts"] = _object_list(audit_output.get("conflicts"))
         await self._save_skill_output(
             run_id,
             skill=skill,
@@ -608,96 +623,6 @@ class AgentSkillService:
             payload=payload,
             validation=validation,
         )
-
-    async def _retrieve_evidence(
-        self,
-        run_id: str,
-        skill: Mapping[str, object],
-        *,
-        query: str,
-        api_key: str | None,
-        base_url: str,
-        embedding_model: str,
-        limit: int,
-        candidate_limit: int,
-    ) -> dict[str, object]:
-        run = self.agent_runs.get(run_id)["run"]
-        if not isinstance(run, dict):
-            raise ValueError("AgentRun not found")
-        await self._invoke_tool_with_trace(
-            run_id,
-            skill=skill,
-            tool_name="source.status_check",
-            params={},
-            step_id="source-status",
-            action_summary="检查来源状态",
-        )
-        self.agent_runs.record_stage(
-            run_id,
-            stage="evidence_retrieval",
-            status="started",
-            title="检索证据",
-            step_id="evidence-retrieval",
-        )
-        retrieval = await self._invoke_tool_with_trace(
-            run_id,
-            skill=skill,
-            tool_name="hybrid_retrieval.search",
-            params={
-                "knowledgeBaseId": run["knowledgeBaseId"],
-                "query": query,
-                "apiKey": api_key,
-                "baseUrl": base_url,
-                "embeddingModel": embedding_model,
-                "limit": limit,
-                "candidateLimit": candidate_limit,
-            },
-            step_id="evidence-retrieval",
-            action_summary="执行混合检索",
-        )
-        self.agent_runs.record_stage(
-            run_id,
-            stage="evidence_retrieval",
-            status="completed",
-            summary=f"检索到 {len(_candidate_chunk_ids(retrieval))} 个候选片段",
-            step_id="evidence-retrieval",
-        )
-        return retrieval
-
-    async def _validate_paragraphs(
-        self,
-        run_id: str,
-        skill: Mapping[str, object],
-        retrieval: Mapping[str, object],
-        paragraphs: Sequence[Mapping[str, object]],
-    ) -> dict[str, object]:
-        self.agent_runs.record_stage(
-            run_id,
-            stage="citation_validation",
-            status="started",
-            title="引用校验",
-            step_id="citation-validation",
-        )
-        validation = await self._invoke_tool_with_trace(
-            run_id,
-            skill=skill,
-            tool_name="citation.validate",
-            params={
-                "paragraphs": list(paragraphs),
-                "candidateChunkIds": _candidate_chunk_ids(retrieval),
-                "indexVersionId": _index_version_id(retrieval),
-            },
-            step_id="citation-validation",
-            action_summary="校验最终段落引用",
-        )
-        self.agent_runs.record_stage(
-            run_id,
-            stage="citation_validation",
-            status="completed",
-            summary=_validation_summary(validation),
-            step_id="citation-validation",
-        )
-        return validation
 
     async def _save_skill_output(
         self,
@@ -739,6 +664,24 @@ class AgentSkillService:
             status="completed",
             summary="最终成果与引用关系已保存",
             step_id="output-save",
+        )
+
+    async def _invoke_subagent_tool(
+        self,
+        run_id: str,
+        skill: Mapping[str, object],
+        tool_name: str,
+        params: Mapping[str, object],
+        step_id: str,
+        action_summary: str,
+    ) -> dict[str, object]:
+        return await self._invoke_tool_with_trace(
+            run_id,
+            skill=skill,
+            tool_name=tool_name,
+            params=params,
+            step_id=step_id,
+            action_summary=action_summary,
         )
 
     async def _invoke_tool_with_trace(
@@ -824,7 +767,11 @@ class AgentSkillService:
             limit=_optional_int(params, "limit", 8),
             candidate_limit=_optional_int(params, "candidateLimit", 24),
         )
-        return _filter_retrieval_to_source_scope(result, _string_list(run.get("sourceScope")))
+        delegated_source_ids = _string_list(params.get("sourceIds"))
+        if delegated_source_ids:
+            self._ensure_source_ids_in_scope(run, delegated_source_ids)
+        allowed_source_ids = delegated_source_ids or _string_list(run.get("sourceScope"))
+        return _filter_retrieval_to_source_scope(result, allowed_source_ids)
 
     def _tool_source_read(
         self,
@@ -1148,6 +1095,17 @@ def _fact_policy() -> dict[str, object]:
         "classes": list(FACT_CLASSES),
         "rule": "事实性结论必须显式标记已验证证据、来源冲突、模型推断或证据不足。",
     }
+
+
+def _sub_agent_summary(*runs: Mapping[str, object]) -> list[dict[str, object]]:
+    return [
+        {
+            "delegationId": run.get("delegationId"),
+            "role": run.get("role"),
+            "budgetUsage": _mapping(_mapping(run.get("output")).get("budgetUsage")),
+        }
+        for run in runs
+    ]
 
 
 def _research_brief_payload(
@@ -1611,13 +1569,6 @@ def _candidate_chunk_ids(retrieval: Mapping[str, object]) -> list[str]:
     ]
 
 
-def _index_version_id(retrieval: Mapping[str, object]) -> str:
-    index = retrieval.get("indexVersion")
-    if isinstance(index, dict) and isinstance(index.get("id"), str):
-        return str(index["id"])
-    raise ValueError("retrieval indexVersion is missing")
-
-
 def _retrieval_summary(retrieval: Mapping[str, object]) -> dict[str, object]:
     meta = retrieval.get("retrieval")
     return {
@@ -1744,6 +1695,10 @@ def _object_list(value: object) -> list[dict[str, object]]:
     if not isinstance(value, list):
         return []
     return [dict(item) for item in value if isinstance(item, dict)]
+
+
+def _mapping(value: object) -> dict[str, object]:
+    return dict(value) if isinstance(value, dict) else {}
 
 
 def _string_list(value: object) -> list[str]:

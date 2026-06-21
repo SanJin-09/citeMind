@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type {
   AnswerCitation,
   AgentRunConfirmationRecord,
+  AgentRunDelegationRecord,
   AgentRunEventRecord,
   AgentRunRecord,
   AgentRunResponse,
@@ -10,10 +11,14 @@ import type {
   ConversationAnswerResponse,
   ConversationMessageRecord,
   ConversationRecord,
+  ExternalResearchCandidate,
+  ExternalResearchResponse,
   HybridSearchResult,
   KnowledgeBaseRecord,
   KnowledgeBaseSource,
   MaintenanceStatus,
+  McpServerRecord,
+  McpToolDescriptor,
   ModelCapabilityStatus,
   ModelValidationStatus,
   ParseCheckItem,
@@ -327,6 +332,29 @@ function App(): React.JSX.Element {
     url: "",
     displayName: "",
   });
+  const [externalResearchOpen, setExternalResearchOpen] = useState(false);
+  const [externalResearchBusy, setExternalResearchBusy] = useState(false);
+  const [externalResearchError, setExternalResearchError] = useState("");
+  const [externalResearchQuery, setExternalResearchQuery] = useState("");
+  const [externalResearchRunId, setExternalResearchRunId] = useState("");
+  const [externalResearchConfirmationId, setExternalResearchConfirmationId] =
+    useState("");
+  const [externalResearchResult, setExternalResearchResult] =
+    useState<ExternalResearchResponse | null>(null);
+  const [externalCandidateIds, setExternalCandidateIds] = useState<string[]>(
+    [],
+  );
+  const [mcpServers, setMcpServers] = useState<McpServerRecord[]>([]);
+  const [selectedMcpServerId, setSelectedMcpServerId] = useState("");
+  const [mcpTools, setMcpTools] = useState<McpToolDescriptor[]>([]);
+  const [selectedMcpToolName, setSelectedMcpToolName] = useState("");
+  const [mcpServerForm, setMcpServerForm] = useState({
+    name: "",
+    command: "",
+    args: "",
+    envKeys: "",
+    readOnlyTools: "",
+  });
   const [query, setQuery] = useState("");
   const [searchQuery, setSearchQuery] = useState("");
   const [lastSearchQuery, setLastSearchQuery] = useState("");
@@ -513,7 +541,14 @@ function App(): React.JSX.Element {
       } catch (error) {
         const message =
           error instanceof Error ? error.message : "知识库状态读取失败";
-        if (!message.includes("Preload IPC")) {
+        if (message.includes("Preload IPC")) {
+          const fallback =
+            FALLBACK_KNOWLEDGE_BASES.find((item) => item.id === preferredId) ??
+            FALLBACK_KNOWLEDGE_BASES[0];
+          setActiveKnowledgeBaseId(fallback?.id ?? "");
+          setSources(FALLBACK_SOURCES);
+          setSelectedSourceIds(FALLBACK_SOURCES.map((source) => source.id));
+        } else {
           setKnowledgeBaseError(message);
         }
       }
@@ -1386,6 +1421,146 @@ function App(): React.JSX.Element {
     }
   };
 
+  const discoverMcpServer = async (serverId: string): Promise<void> => {
+    const discovery = await getDesktopApi().mcpServers.discover(serverId);
+    setMcpTools(discovery.tools);
+    const allowed = discovery.tools.find((tool) => tool.locallyAllowedReadOnly);
+    setSelectedMcpToolName(allowed?.name ?? "");
+  };
+
+  const openExternalResearch = async (): Promise<void> => {
+    setExternalResearchOpen(true);
+    setExternalResearchBusy(true);
+    setExternalResearchError("");
+    setExternalResearchResult(null);
+    setExternalCandidateIds([]);
+    setExternalResearchRunId("");
+    setExternalResearchConfirmationId("");
+    try {
+      const result = await getDesktopApi().mcpServers.list();
+      setMcpServers(result.servers);
+      const first = result.servers.find((server) => server.enabled);
+      setSelectedMcpServerId(first?.id ?? "");
+      if (first) {
+        await discoverMcpServer(first.id);
+      } else {
+        setMcpTools([]);
+        setSelectedMcpToolName("");
+      }
+    } catch (error) {
+      setExternalResearchError(
+        error instanceof Error ? error.message : "MCP 服务读取失败",
+      );
+    } finally {
+      setExternalResearchBusy(false);
+    }
+  };
+
+  const saveMcpServer = async (): Promise<void> => {
+    setExternalResearchBusy(true);
+    setExternalResearchError("");
+    try {
+      const server = await getDesktopApi().mcpServers.save({
+        name: mcpServerForm.name,
+        command: mcpServerForm.command,
+        args: splitConfigValues(mcpServerForm.args, "\n"),
+        envKeys: splitConfigValues(mcpServerForm.envKeys, ","),
+        readOnlyTools: splitConfigValues(mcpServerForm.readOnlyTools, ","),
+        enabled: true,
+      });
+      const result = await getDesktopApi().mcpServers.list();
+      setMcpServers(result.servers);
+      setSelectedMcpServerId(server.id);
+      await discoverMcpServer(server.id);
+    } catch (error) {
+      setExternalResearchError(
+        error instanceof Error ? error.message : "MCP 服务保存失败",
+      );
+    } finally {
+      setExternalResearchBusy(false);
+    }
+  };
+
+  const searchExternalResearch = async (): Promise<void> => {
+    if (
+      !activeKnowledgeBaseId ||
+      !selectedMcpServerId ||
+      !selectedMcpToolName
+    ) {
+      setExternalResearchError("请选择已通过本地只读校验的 MCP Tool");
+      return;
+    }
+    setExternalResearchBusy(true);
+    setExternalResearchError("");
+    try {
+      const created = await getDesktopApi().agentRuns.create({
+        knowledgeBaseId: activeKnowledgeBaseId,
+        goal: externalResearchQuery,
+        title: "寻找外部资料",
+        skillId: "research_brief",
+        skillVersion: "1.0.0",
+        sourceIds: selectedSourceIds,
+      });
+      const runId = created.run.id;
+      setExternalResearchRunId(runId);
+      await getDesktopApi().externalResearch.setAccess(runId, true, [
+        selectedMcpServerId,
+      ]);
+      const result = await getDesktopApi().externalResearch.search({
+        runId,
+        query: externalResearchQuery,
+        searches: [
+          {
+            serverId: selectedMcpServerId,
+            toolName: selectedMcpToolName,
+          },
+        ],
+        limit: 8,
+      });
+      setExternalResearchResult(result);
+      setExternalResearchConfirmationId(result.confirmationId ?? "");
+      setExternalCandidateIds(
+        result.candidates
+          .filter((candidate) => candidate.status === "candidate")
+          .map((candidate) => candidate.id),
+      );
+    } catch (error) {
+      setExternalResearchError(
+        error instanceof Error ? error.message : "外部资料检索失败",
+      );
+    } finally {
+      setExternalResearchBusy(false);
+    }
+  };
+
+  const decideExternalResearch = async (
+    decision: "import" | "reject",
+  ): Promise<void> => {
+    if (!externalResearchRunId || !externalResearchConfirmationId) {
+      return;
+    }
+    setExternalResearchBusy(true);
+    setExternalResearchError("");
+    try {
+      const result = await getDesktopApi().externalResearch.decide({
+        runId: externalResearchRunId,
+        confirmationId: externalResearchConfirmationId,
+        candidateIds: decision === "import" ? externalCandidateIds : [],
+        decision,
+      });
+      setExternalResearchResult(result);
+      if (activeKnowledgeBaseId) {
+        await loadSources(activeKnowledgeBaseId);
+      }
+    } catch (error) {
+      setExternalResearchError(
+        error instanceof Error ? error.message : "外部资料处理失败",
+      );
+    } finally {
+      setExternalResearchBusy(false);
+    }
+  };
+
   const deleteSource = async (source: KnowledgeBaseSource): Promise<void> => {
     setSourceDeleteBusyId(source.id);
     setConfirmError("");
@@ -2106,6 +2281,15 @@ function App(): React.JSX.Element {
                 网页链接
               </button>
             </div>
+            <button
+              className="button external-research-button"
+              disabled={importBusy || !activeKnowledgeBaseId}
+              type="button"
+              onClick={() => void openExternalResearch()}
+            >
+              <Icon name="sparkle" size={16} />
+              寻找外部资料
+            </button>
             <label className="panel-search">
               <Icon name="search" size={16} />
               <input aria-label="筛选来源" placeholder="筛选来源" />
@@ -2581,6 +2765,51 @@ function App(): React.JSX.Element {
         />
       )}
 
+      {externalResearchOpen && (
+        <ExternalResearchDialog
+          busy={externalResearchBusy}
+          candidateIds={externalCandidateIds}
+          error={externalResearchError}
+          mcpForm={mcpServerForm}
+          query={externalResearchQuery}
+          result={externalResearchResult}
+          selectedServerId={selectedMcpServerId}
+          selectedToolName={selectedMcpToolName}
+          servers={mcpServers}
+          tools={mcpTools}
+          onCandidateToggle={(candidateId) =>
+            setExternalCandidateIds((items) =>
+              items.includes(candidateId)
+                ? items.filter((item) => item !== candidateId)
+                : [...items, candidateId],
+            )
+          }
+          onClose={() => {
+            if (!externalResearchBusy) {
+              setExternalResearchOpen(false);
+            }
+          }}
+          onDecide={(decision) => void decideExternalResearch(decision)}
+          onDiscover={(serverId) => {
+            setSelectedMcpServerId(serverId);
+            setExternalResearchBusy(true);
+            setExternalResearchError("");
+            void discoverMcpServer(serverId)
+              .catch((error: unknown) =>
+                setExternalResearchError(
+                  error instanceof Error ? error.message : "MCP 能力发现失败",
+                ),
+              )
+              .finally(() => setExternalResearchBusy(false));
+          }}
+          onMcpFormChange={setMcpServerForm}
+          onQueryChange={setExternalResearchQuery}
+          onSaveServer={() => void saveMcpServer()}
+          onSearch={() => void searchExternalResearch()}
+          onToolChange={setSelectedMcpToolName}
+        />
+      )}
+
       {webImportOpen && (
         <WebImportDialog
           busy={importBusy}
@@ -2727,11 +2956,12 @@ function AgentRunTracePanel({
   onAction: (runId: string, action: "resume" | "cancel" | "retry") => void;
 }): React.JSX.Element {
   const [now, setNow] = useState(Date.now());
-  const { run, events, toolCalls, confirmations } = response;
+  const { run, events, toolCalls, confirmations, delegations } = response;
   const finished = isAgentRunFinished(run.status);
   const [expanded, setExpanded] = useState(!finished || !answerVisible);
   const [filter, setFilter] = useState("all");
   const [expandedToolCallId, setExpandedToolCallId] = useState("");
+  const [expandedDelegationId, setExpandedDelegationId] = useState("");
   const previousRunStatusRef = useRef(run.status);
   const eventListRef = useRef<HTMLDivElement>(null);
   const snapshot = run.traceSnapshot ?? {};
@@ -2755,6 +2985,7 @@ function AgentRunTracePanel({
   useEffect(() => {
     setFilter("all");
     setExpandedToolCallId("");
+    setExpandedDelegationId("");
     setExpanded(!isAgentRunFinished(run.status) || !answerVisible);
     previousRunStatusRef.current = run.status;
   }, [answerVisible, run.id, run.status]);
@@ -2857,9 +3088,46 @@ function AgentRunTracePanel({
             </label>
             <span>
               {events.length} 条事件 · {toolCalls.length} 个 Tool ·{" "}
+              {delegations.length} 个子 Agent ·{" "}
               {pendingConfirmations(confirmations)} 个待确认
             </span>
           </div>
+          {delegations.length > 0 && (
+            <div className="sub-agent-trace-list">
+              {delegations.map((delegation) => {
+                const delegationExpanded =
+                  expandedDelegationId === delegation.id;
+                return (
+                  <article
+                    className={`sub-agent-trace-card ${delegation.status}`}
+                    key={delegation.id}
+                  >
+                    <button
+                      className="sub-agent-trace-heading"
+                      type="button"
+                      onClick={() =>
+                        setExpandedDelegationId(
+                          delegationExpanded ? "" : delegation.id,
+                        )
+                      }
+                    >
+                      <span>
+                        <strong>{delegation.delegateeRole}</strong>
+                        <small>{delegation.task}</small>
+                      </span>
+                      <span className="sub-agent-trace-status">
+                        {delegationStatusLabel(delegation.status)}
+                        <Icon name="chevron" size={13} />
+                      </span>
+                    </button>
+                    {delegationExpanded && (
+                      <SubAgentTraceDetail delegation={delegation} />
+                    )}
+                  </article>
+                );
+              })}
+            </div>
+          )}
           <div className="agent-trace-list" ref={eventListRef}>
             {visibleEvents.map((event) => {
               const toolCall = event.toolCallId
@@ -2917,6 +3185,37 @@ function AgentRunTracePanel({
         </div>
       )}
     </section>
+  );
+}
+
+function SubAgentTraceDetail({
+  delegation,
+}: {
+  delegation: AgentRunDelegationRecord;
+}): React.JSX.Element {
+  return (
+    <div className="sub-agent-trace-detail">
+      <span>
+        <strong>任务</strong>
+        {delegation.task}
+      </span>
+      <span>
+        <strong>输入范围</strong>
+        <code>{JSON.stringify(delegation.inputScope)}</code>
+      </span>
+      <span>
+        <strong>产出</strong>
+        <code>
+          {Object.keys(delegation.output).length > 0
+            ? JSON.stringify(delegation.output)
+            : "等待执行"}
+        </code>
+      </span>
+      <span>
+        <strong>停止原因</strong>
+        {delegation.stopReason ?? "执行中"}
+      </span>
+    </div>
   );
 }
 
@@ -4274,6 +4573,336 @@ function ConfirmActionDialog({
   );
 }
 
+function ExternalResearchDialog({
+  busy,
+  candidateIds,
+  error,
+  mcpForm,
+  query,
+  result,
+  selectedServerId,
+  selectedToolName,
+  servers,
+  tools,
+  onCandidateToggle,
+  onClose,
+  onDecide,
+  onDiscover,
+  onMcpFormChange,
+  onQueryChange,
+  onSaveServer,
+  onSearch,
+  onToolChange,
+}: {
+  busy: boolean;
+  candidateIds: string[];
+  error: string;
+  mcpForm: {
+    name: string;
+    command: string;
+    args: string;
+    envKeys: string;
+    readOnlyTools: string;
+  };
+  query: string;
+  result: ExternalResearchResponse | null;
+  selectedServerId: string;
+  selectedToolName: string;
+  servers: McpServerRecord[];
+  tools: McpToolDescriptor[];
+  onCandidateToggle: (candidateId: string) => void;
+  onClose: () => void;
+  onDecide: (decision: "import" | "reject") => void;
+  onDiscover: (serverId: string) => void;
+  onMcpFormChange: (value: {
+    name: string;
+    command: string;
+    args: string;
+    envKeys: string;
+    readOnlyTools: string;
+  }) => void;
+  onQueryChange: (value: string) => void;
+  onSaveServer: () => void;
+  onSearch: () => void;
+  onToolChange: (toolName: string) => void;
+}): React.JSX.Element {
+  const pending =
+    result?.candidates.filter(
+      (candidate) => candidate.status === "candidate",
+    ) ?? [];
+  const finished =
+    result !== null &&
+    result.candidates.some((candidate) =>
+      ["indexed", "rejected", "failed"].includes(candidate.status),
+    ) &&
+    pending.length === 0;
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <section
+        className="kb-dialog external-research-dialog"
+        role="dialog"
+        aria-modal="true"
+      >
+        <header className="settings-heading">
+          <div>
+            <p className="eyebrow">External Evidence</p>
+            <h2>寻找外部资料</h2>
+            <span>
+              外部结果仅作为候选；确认后才会保存快照、导入当前知识库并重新索引。
+            </span>
+          </div>
+          <button
+            aria-label="关闭外部资料"
+            className="icon-button"
+            disabled={busy || pending.length > 0}
+            type="button"
+            onClick={onClose}
+          >
+            <Icon name="close" size={17} />
+          </button>
+        </header>
+        <div className="external-research-body">
+          <section className="external-mcp-panel">
+            <h3>MCP 只读能力</h3>
+            {servers.length > 0 ? (
+              <>
+                <label>
+                  <span>服务</span>
+                  <select
+                    value={selectedServerId}
+                    onChange={(event) => onDiscover(event.target.value)}
+                  >
+                    {servers.map((server) => (
+                      <option key={server.id} value={server.id}>
+                        {server.name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label>
+                  <span>只读 Tool</span>
+                  <select
+                    value={selectedToolName}
+                    onChange={(event) => onToolChange(event.target.value)}
+                  >
+                    <option value="">请选择</option>
+                    {tools.map((tool) => (
+                      <option
+                        disabled={!tool.locallyAllowedReadOnly}
+                        key={tool.name}
+                        value={tool.name}
+                      >
+                        {tool.title}
+                        {tool.locallyAllowedReadOnly
+                          ? ""
+                          : "（未通过本地策略）"}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              </>
+            ) : (
+              <p className="external-empty-copy">
+                尚未配置 MCP 服务。命令由本机启动，密钥仅通过环境变量名传递。
+              </p>
+            )}
+            <details className="external-config">
+              <summary>
+                {servers.length > 0 ? "新增 MCP 服务" : "配置 MCP 服务"}
+              </summary>
+              <div className="external-config-fields">
+                <label>
+                  <span>名称</span>
+                  <input
+                    value={mcpForm.name}
+                    onChange={(event) =>
+                      onMcpFormChange({ ...mcpForm, name: event.target.value })
+                    }
+                  />
+                </label>
+                <label>
+                  <span>命令</span>
+                  <input
+                    placeholder="例如 npx 或 uvx"
+                    value={mcpForm.command}
+                    onChange={(event) =>
+                      onMcpFormChange({
+                        ...mcpForm,
+                        command: event.target.value,
+                      })
+                    }
+                  />
+                </label>
+                <label>
+                  <span>参数（每行一个）</span>
+                  <textarea
+                    rows={3}
+                    value={mcpForm.args}
+                    onChange={(event) =>
+                      onMcpFormChange({ ...mcpForm, args: event.target.value })
+                    }
+                  />
+                </label>
+                <label>
+                  <span>环境变量名（逗号分隔）</span>
+                  <input
+                    placeholder="SEARCH_API_KEY"
+                    value={mcpForm.envKeys}
+                    onChange={(event) =>
+                      onMcpFormChange({
+                        ...mcpForm,
+                        envKeys: event.target.value,
+                      })
+                    }
+                  />
+                </label>
+                <label>
+                  <span>本地只读 Tool 白名单（逗号分隔）</span>
+                  <input
+                    placeholder="search_web"
+                    value={mcpForm.readOnlyTools}
+                    onChange={(event) =>
+                      onMcpFormChange({
+                        ...mcpForm,
+                        readOnlyTools: event.target.value,
+                      })
+                    }
+                  />
+                </label>
+                <button
+                  className="button ghost"
+                  disabled={
+                    busy ||
+                    !mcpForm.name.trim() ||
+                    !mcpForm.command.trim() ||
+                    !mcpForm.readOnlyTools.trim()
+                  }
+                  type="button"
+                  onClick={onSaveServer}
+                >
+                  保存并发现能力
+                </button>
+              </div>
+            </details>
+          </section>
+          <section className="external-candidate-panel">
+            <div className="external-search-row">
+              <input
+                aria-label="外部资料检索词"
+                placeholder="输入要补充或核验的问题"
+                value={query}
+                onChange={(event) => onQueryChange(event.target.value)}
+              />
+              <button
+                className="button primary"
+                disabled={busy || !query.trim() || !selectedToolName}
+                type="button"
+                onClick={onSearch}
+              >
+                {busy && !result ? "检索中..." : "寻找候选"}
+              </button>
+            </div>
+            {error && <div className="settings-error">{error}</div>}
+            {!result && !error && (
+              <div className="external-candidates-empty">
+                <Icon name="sparkle" size={24} />
+                <strong>候选资料会显示在这里</strong>
+                <span>Tool 描述、注解和返回内容均按不可信输入处理。</span>
+              </div>
+            )}
+            {result && (
+              <div className="external-candidate-list">
+                {result.candidates.map((candidate) => (
+                  <ExternalCandidateCard
+                    candidate={candidate}
+                    checked={candidateIds.includes(candidate.id)}
+                    key={candidate.id}
+                    onToggle={() => onCandidateToggle(candidate.id)}
+                  />
+                ))}
+              </div>
+            )}
+          </section>
+        </div>
+        <div className="settings-actions">
+          <button
+            className="button ghost"
+            disabled={busy || pending.length > 0}
+            type="button"
+            onClick={onClose}
+          >
+            {finished ? "完成" : "关闭"}
+          </button>
+          {pending.length > 0 && (
+            <>
+              <button
+                className="button ghost"
+                disabled={busy}
+                type="button"
+                onClick={() => onDecide("reject")}
+              >
+                全部拒绝
+              </button>
+              <button
+                className="button primary"
+                disabled={busy || candidateIds.length === 0}
+                type="button"
+                onClick={() => onDecide("import")}
+              >
+                {busy
+                  ? "导入并索引中..."
+                  : `导入所选 ${candidateIds.length} 项`}
+              </button>
+            </>
+          )}
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function ExternalCandidateCard({
+  candidate,
+  checked,
+  onToggle,
+}: {
+  candidate: ExternalResearchCandidate;
+  checked: boolean;
+  onToggle: () => void;
+}): React.JSX.Element {
+  const comparison =
+    candidate.status === "indexed" &&
+    "classification" in candidate.finalComparison
+      ? candidate.finalComparison
+      : candidate.initialComparison;
+  return (
+    <article className={`external-candidate-card ${candidate.status}`}>
+      <label>
+        <input
+          checked={checked}
+          disabled={candidate.status !== "candidate"}
+          type="checkbox"
+          onChange={onToggle}
+        />
+        <span>
+          <strong>{candidate.title}</strong>
+          <small>{candidate.url}</small>
+        </span>
+      </label>
+      <p>{candidate.snippet || candidate.content.slice(0, 220)}</p>
+      <div className="external-candidate-meta">
+        <span className={`comparison-badge ${comparison.classification}`}>
+          {comparison.label}
+        </span>
+        <span>{externalCandidateStatus(candidate.status)}</span>
+      </div>
+      {candidate.errorMessage && (
+        <div className="settings-error">{candidate.errorMessage}</div>
+      )}
+    </article>
+  );
+}
+
 function WebImportDialog({
   busy,
   error,
@@ -5551,6 +6180,37 @@ function formatAgentRunDuration(value: number): string {
   return hours > 0
     ? `${String(hours).padStart(2, "0")}h ${minutePart} ${secondPart}`
     : `${minutePart} ${secondPart}`;
+}
+
+function splitConfigValues(value: string, separator: string): string[] {
+  return value
+    .split(separator)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function externalCandidateStatus(
+  status: ExternalResearchCandidate["status"],
+): string {
+  return {
+    candidate: "待确认",
+    rejected: "已拒绝",
+    importing: "正在导入",
+    indexed: "已快照并索引",
+    failed: "处理失败",
+  }[status];
+}
+
+function delegationStatusLabel(
+  status: AgentRunDelegationRecord["status"],
+): string {
+  return {
+    pending: "等待",
+    running: "执行中",
+    completed: "已完成",
+    failed: "失败",
+    cancelled: "已取消",
+  }[status];
 }
 
 function formatDateTime(value: string): string {
