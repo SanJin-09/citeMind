@@ -19,6 +19,7 @@ from citemind_worker.model_catalog import (
     DEFAULT_EMBEDDING_MODEL,
 )
 from citemind_worker.model_service import SeedModelService
+from citemind_worker.research_brief_service import ResearchBriefService
 from citemind_worker.retrieval_service import HybridRetrievalService
 from citemind_worker.rpc import JsonValue, RpcError, RpcServer, require_object_params
 from citemind_worker.source_import_service import SourceImportService
@@ -41,6 +42,7 @@ def create_server(
     writing_workflow_service: WritingWorkflowService | None = None,
     agent_run_service: AgentRunService | None = None,
     agent_skill_service: AgentSkillService | None = None,
+    research_brief_service: ResearchBriefService | None = None,
     mcp_client_manager: McpClientManager | None = None,
     external_research_service: ExternalResearchService | None = None,
 ) -> RpcServer:
@@ -79,6 +81,15 @@ def create_server(
     agent_skills = agent_skill_service or (
         AgentSkillService(storage, retrieval=retrievals, agent_runs=agent_runs)
         if storage is not None and retrievals is not None and agent_runs is not None
+        else None
+    )
+    research_briefs = research_brief_service or (
+        ResearchBriefService(
+            storage,
+            agent_runs=agent_runs,
+            agent_skills=agent_skills,
+        )
+        if storage is not None and agent_runs is not None and agent_skills is not None
         else None
     )
     mcp_clients = mcp_client_manager or (
@@ -561,6 +572,97 @@ def create_server(
                 tool_name=tool_name,
                 params=tool_params,
             )  # type: ignore[return-value]
+        except ValueError as error:
+            raise RpcError(-32602, str(error)) from error
+
+    def list_research_briefs(params: JsonValue) -> JsonValue:
+        values = require_object_params(params)
+        service = _require_research_brief_service(research_briefs)
+        try:
+            return service.list_briefs(_required_str(values, "knowledgeBaseId"))  # type: ignore[return-value]
+        except ValueError as error:
+            raise RpcError(-32602, str(error)) from error
+
+    def get_research_brief(params: JsonValue) -> JsonValue:
+        values = require_object_params(params)
+        service = _require_research_brief_service(research_briefs)
+        try:
+            return service.get(_required_str(values, "runId"))  # type: ignore[return-value]
+        except ValueError as error:
+            raise RpcError(-32602, str(error)) from error
+
+    async def create_research_brief(params: JsonValue) -> JsonValue:
+        values = require_object_params(params)
+        service = _require_research_brief_service(research_briefs)
+        try:
+            return await service.create(
+                _required_str(values, "knowledgeBaseId"),
+                goal=_required_str(values, "goal"),
+                source_ids=_optional_string_list(values, "sourceIds"),
+                api_key=_optional_nullable_str(values, "apiKey"),
+                base_url=_optional_str(values, "baseUrl", DEFAULT_ARK_BASE_URL),
+                chat_model=_optional_str(values, "chatModel", DEFAULT_CHAT_MODEL),
+                embedding_model=_optional_str(
+                    values,
+                    "embeddingModel",
+                    DEFAULT_EMBEDDING_MODEL,
+                ),
+            )  # type: ignore[return-value]
+        except ValueError as error:
+            raise RpcError(-32602, str(error)) from error
+
+    def update_research_brief(params: JsonValue) -> JsonValue:
+        values = require_object_params(params)
+        service = _require_research_brief_service(research_briefs)
+        try:
+            return service.update(
+                _required_str(values, "runId"),
+                expected_revision=_required_int(values, "expectedRevision"),
+                patch=_optional_dict(values, "patch") or {},
+                source_ids=_optional_string_list(values, "sourceIds"),
+            )  # type: ignore[return-value]
+        except ValueError as error:
+            raise RpcError(-32602, str(error)) from error
+
+    async def operate_research_brief(params: JsonValue) -> JsonValue:
+        values = require_object_params(params)
+        service = _require_research_brief_service(research_briefs)
+        try:
+            return await service.operate(
+                _required_str(values, "runId"),
+                action=_required_str(values, "action"),
+                expected_revision=_required_int(values, "expectedRevision"),
+                selection_text=_optional_nullable_str(values, "selectionText"),
+                section_id=_optional_nullable_str(values, "sectionId"),
+                api_key=_optional_nullable_str(values, "apiKey"),
+                base_url=_optional_str(values, "baseUrl", DEFAULT_ARK_BASE_URL),
+                chat_model=_optional_str(values, "chatModel", DEFAULT_CHAT_MODEL),
+                embedding_model=_optional_str(
+                    values,
+                    "embeddingModel",
+                    DEFAULT_EMBEDDING_MODEL,
+                ),
+            )  # type: ignore[return-value]
+        except ValueError as error:
+            raise RpcError(-32602, str(error)) from error
+
+    def resolve_research_brief_pending(params: JsonValue) -> JsonValue:
+        values = require_object_params(params)
+        service = _require_research_brief_service(research_briefs)
+        try:
+            return service.resolve_pending(
+                _required_str(values, "runId"),
+                decision=_required_str(values, "decision"),
+                expected_revision=_required_int(values, "expectedRevision"),
+            )  # type: ignore[return-value]
+        except ValueError as error:
+            raise RpcError(-32602, str(error)) from error
+
+    def export_research_brief(params: JsonValue) -> JsonValue:
+        values = require_object_params(params)
+        service = _require_research_brief_service(research_briefs)
+        try:
+            return service.export_markdown(_required_str(values, "runId"))  # type: ignore[return-value]
         except ValueError as error:
             raise RpcError(-32602, str(error)) from error
 
@@ -1361,6 +1463,13 @@ def create_server(
     server.register("agent_skills.get", get_agent_skill)
     server.register("agent_skills.run", run_agent_skill)
     server.register("agent_tools.invoke", invoke_agent_tool)
+    server.register("research_briefs.list", list_research_briefs)
+    server.register("research_briefs.get", get_research_brief)
+    server.register("research_briefs.create", create_research_brief)
+    server.register("research_briefs.update", update_research_brief)
+    server.register("research_briefs.operate", operate_research_brief)
+    server.register("research_briefs.resolve_pending", resolve_research_brief_pending)
+    server.register("research_briefs.export_markdown", export_research_brief)
     server.register("mcp_servers.list", list_mcp_servers)
     server.register("mcp_servers.upsert", upsert_mcp_server)
     server.register("mcp_servers.delete", delete_mcp_server)
@@ -1481,6 +1590,14 @@ def _require_agent_skill_service(
     return service
 
 
+def _require_research_brief_service(
+    service: ResearchBriefService | None,
+) -> ResearchBriefService:
+    if service is None:
+        raise RpcError(-32024, "Research brief service is not available")
+    return service
+
+
 def _require_mcp_client_manager(
     service: McpClientManager | None,
 ) -> McpClientManager:
@@ -1589,6 +1706,13 @@ def _optional_int(values: dict[str, JsonValue], key: str, fallback: int) -> int:
     value = values.get(key)
     if value is None:
         return fallback
+    if not isinstance(value, int):
+        raise RpcError(-32602, f"{key} must be an integer")
+    return value
+
+
+def _required_int(values: dict[str, JsonValue], key: str) -> int:
+    value = values.get(key)
     if not isinstance(value, int):
         raise RpcError(-32602, f"{key} must be an integer")
     return value

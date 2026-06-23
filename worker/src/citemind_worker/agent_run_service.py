@@ -334,6 +334,32 @@ class AgentRunService:
         self._emit_event(event)
         return self.get(run_id)
 
+    def record_workspace_event(
+        self,
+        run_id: str,
+        *,
+        event_type: str,
+        title: str,
+        summary: str | None = None,
+        payload: Mapping[str, object] | None = None,
+    ) -> dict[str, object]:
+        """Record workspace activity without requiring the anchor run to be active."""
+        self._run_row(run_id)
+        with self.storage.database.connect() as connection:
+            event = self._insert_event(
+                connection,
+                run_id,
+                event_type=_required_text(event_type, "eventType"),
+                stage="drafting",
+                status=self._status_in_connection(connection, run_id),
+                title=_required_text(title, "title"),
+                summary=summary,
+                payload=dict(payload or {}),
+            )
+            connection.commit()
+        self._emit_event(event)
+        return self.get(run_id)
+
     def record_skill_loaded(
         self,
         run_id: str,

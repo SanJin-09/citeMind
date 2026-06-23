@@ -54,6 +54,11 @@ import {
   type ModelCapabilityStatus,
   type ParseChecksResponse,
   type RenameKnowledgeBaseRequest,
+  type ResearchBriefExportResult,
+  type ResearchBriefListResponse,
+  type ResearchBriefOperationRequest,
+  type ResearchBriefResponse,
+  type ResolveResearchBriefPendingRequest,
   type ResolveDuplicateRequest,
   type RunAgentSkillRequest,
   type SaveSeedCredentialRequest,
@@ -66,6 +71,7 @@ import {
   type SourceVersionsResponse,
   type SourceOrganizationResponse,
   type UpdateSourceMaintenanceRequest,
+  type UpdateResearchBriefRequest,
   type UsageSummary,
   type UpdateSeedDefaultsRequest,
   type UpdateBackgroundJobRequest,
@@ -97,6 +103,12 @@ interface WorkerWordExport {
   projectId: string;
   fileName: string;
   base64: string;
+}
+
+interface WorkerResearchBriefExport {
+  runId: string;
+  fileName: string;
+  markdown: string;
 }
 
 export function registerIpcHandlers(workerManager: PythonWorkerManager): void {
@@ -425,6 +437,88 @@ export function registerIpcHandlers(workerManager: PythonWorkerManager): void {
         },
         300_000,
       );
+    },
+  );
+  ipcMain.handle(IPC_CHANNELS.listResearchBriefs, (_event, knowledgeBaseId) =>
+    workerManager.call<ResearchBriefListResponse>("research_briefs.list", {
+      knowledgeBaseId: normalizeKnowledgeBaseId(knowledgeBaseId),
+    }),
+  );
+  ipcMain.handle(IPC_CHANNELS.getResearchBrief, (_event, runId) =>
+    workerManager.call<ResearchBriefResponse>("research_briefs.get", {
+      runId: normalizeAgentRunId(runId),
+    }),
+  );
+  ipcMain.handle(IPC_CHANNELS.createResearchBrief, async (_event, payload) => {
+    if (!isRecord(payload)) {
+      throw new Error("研究简报参数无效");
+    }
+    const summary = await seedStore.summary();
+    return workerManager.call<ResearchBriefResponse>(
+      "research_briefs.create",
+      {
+        knowledgeBaseId: normalizeKnowledgeBaseId(payload.knowledgeBaseId),
+        goal: normalizeNonEmptyString(payload.goal, "研究目标"),
+        sourceIds: normalizeOptionalStringArray(payload.sourceIds, "资料范围"),
+        apiKey: await seedStore.readApiKey(),
+        baseUrl: summary.baseUrl,
+        chatModel: summary.defaultChatModel,
+        embeddingModel: summary.defaultEmbeddingModel,
+      },
+      300_000,
+    );
+  });
+  ipcMain.handle(IPC_CHANNELS.updateResearchBrief, (_event, payload) => {
+    const request = normalizeUpdateResearchBriefRequest(payload);
+    return workerManager.call<ResearchBriefResponse>(
+      "research_briefs.update",
+      request,
+      30_000,
+    );
+  });
+  ipcMain.handle(IPC_CHANNELS.operateResearchBrief, async (_event, payload) => {
+    const request = normalizeResearchBriefOperationRequest(payload);
+    const summary = await seedStore.summary();
+    return workerManager.call<ResearchBriefResponse>(
+      "research_briefs.operate",
+      {
+        ...request,
+        apiKey: await seedStore.readApiKey(),
+        baseUrl: summary.baseUrl,
+        chatModel: summary.defaultChatModel,
+        embeddingModel: summary.defaultEmbeddingModel,
+      },
+      300_000,
+    );
+  });
+  ipcMain.handle(IPC_CHANNELS.resolveResearchBriefPending, (_event, payload) =>
+    workerManager.call<ResearchBriefResponse>(
+      "research_briefs.resolve_pending",
+      normalizeResolveResearchBriefPendingRequest(payload),
+      30_000,
+    ),
+  );
+  ipcMain.handle(
+    IPC_CHANNELS.exportResearchBriefMarkdown,
+    async (_event, runId) => {
+      const exported = await workerManager.call<WorkerResearchBriefExport>(
+        "research_briefs.export_markdown",
+        { runId: normalizeAgentRunId(runId) },
+        30_000,
+      );
+      const selection = await dialog.showSaveDialog({
+        title: "导出研究简报",
+        defaultPath: exported.fileName,
+        filters: [{ name: "Markdown", extensions: ["md"] }],
+      });
+      if (selection.canceled || !selection.filePath) {
+        return { cancelled: true } satisfies ResearchBriefExportResult;
+      }
+      await writeFile(selection.filePath, exported.markdown, "utf8");
+      return {
+        cancelled: false,
+        filePath: selection.filePath,
+      } satisfies ResearchBriefExportResult;
     },
   );
   ipcMain.handle(IPC_CHANNELS.startAgentRunToolCall, (_event, payload) => {
@@ -1938,6 +2032,73 @@ function normalizeAgentRunOutputRequest(
   };
 }
 
+function normalizeUpdateResearchBriefRequest(
+  payload: unknown,
+): UpdateResearchBriefRequest {
+  if (!isRecord(payload) || !isRecord(payload.patch)) {
+    throw new Error("研究简报更新参数无效");
+  }
+  return {
+    runId: normalizeAgentRunId(payload.runId),
+    expectedRevision: normalizeNonNegativeInteger(
+      payload.expectedRevision,
+      "研究简报修订号",
+    ),
+    sourceIds: normalizeOptionalStringArray(payload.sourceIds, "资料范围"),
+    patch: payload.patch,
+  };
+}
+
+function normalizeResearchBriefOperationRequest(
+  payload: unknown,
+): ResearchBriefOperationRequest {
+  if (!isRecord(payload)) {
+    throw new Error("研究简报操作参数无效");
+  }
+  const action = payload.action;
+  if (
+    action !== "continue_research" &&
+    action !== "supplement_evidence" &&
+    action !== "audit_citations" &&
+    action !== "regenerate_section"
+  ) {
+    throw new Error("研究简报操作无效");
+  }
+  return {
+    runId: normalizeAgentRunId(payload.runId),
+    action,
+    expectedRevision: normalizeNonNegativeInteger(
+      payload.expectedRevision,
+      "研究简报修订号",
+    ),
+    selectionText: normalizeOptionalNullableString(
+      payload.selectionText,
+      "选中文本",
+    ),
+    sectionId: normalizeOptionalNullableString(payload.sectionId, "章节 ID"),
+  };
+}
+
+function normalizeResolveResearchBriefPendingRequest(
+  payload: unknown,
+): ResolveResearchBriefPendingRequest {
+  if (!isRecord(payload)) {
+    throw new Error("研究简报合并参数无效");
+  }
+  const decision = payload.decision;
+  if (decision !== "apply" && decision !== "discard") {
+    throw new Error("研究简报合并决策无效");
+  }
+  return {
+    runId: normalizeAgentRunId(payload.runId),
+    decision,
+    expectedRevision: normalizeNonNegativeInteger(
+      payload.expectedRevision,
+      "研究简报修订号",
+    ),
+  };
+}
+
 function normalizeJobId(value: unknown): string {
   if (typeof value !== "string" || !value.trim()) {
     throw new Error("任务 ID 无效");
@@ -2036,6 +2197,13 @@ function normalizeOptionalNullableInteger(
 function normalizePositiveInteger(value: unknown, label: string): number {
   if (typeof value !== "number" || !Number.isInteger(value) || value < 1) {
     throw new Error(`${label}必须是正整数`);
+  }
+  return value;
+}
+
+function normalizeNonNegativeInteger(value: unknown, label: string): number {
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 0) {
+    throw new Error(`${label}必须是非负整数`);
   }
   return value;
 }

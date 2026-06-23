@@ -22,6 +22,10 @@ import type {
   ModelCapabilityStatus,
   ModelValidationStatus,
   ParseCheckItem,
+  ResearchBriefAction,
+  ResearchBriefResponse,
+  ResearchBriefSummary,
+  ResearchBriefWorkspace,
   SeedCredentialStatus,
   SeedModelDescriptor,
   SourceOrganizationResponse,
@@ -81,6 +85,9 @@ type EvidenceSelection =
       kind: "search";
       result: HybridSearchResult;
     };
+
+type WorkspaceMode = "chat" | "research";
+type ResearchEditorTab = "plan" | "outline" | "draft" | "final";
 
 const SUGGESTIONS = [
   "总结当前知识库的核心架构决策",
@@ -435,6 +442,27 @@ function App(): React.JSX.Element {
   const [writingBusy, setWritingBusy] = useState(false);
   const [writingError, setWritingError] = useState("");
   const [writingNotice, setWritingNotice] = useState("");
+  const [workspaceMode, setWorkspaceMode] = useState<WorkspaceMode>("chat");
+  const [researchBriefs, setResearchBriefs] = useState<ResearchBriefSummary[]>(
+    [],
+  );
+  const [researchBrief, setResearchBrief] =
+    useState<ResearchBriefResponse | null>(null);
+  const [researchWorkspace, setResearchWorkspace] =
+    useState<ResearchBriefWorkspace | null>(null);
+  const [researchLiveRun, setResearchLiveRun] =
+    useState<AgentRunResponse | null>(null);
+  const [researchGoal, setResearchGoal] = useState("");
+  const [researchEditorTab, setResearchEditorTab] =
+    useState<ResearchEditorTab>("draft");
+  const [researchPlanText, setResearchPlanText] = useState("");
+  const [researchOutlineText, setResearchOutlineText] = useState("");
+  const [researchSelectedSectionId, setResearchSelectedSectionId] =
+    useState("");
+  const [researchSelection, setResearchSelection] = useState("");
+  const [researchBusy, setResearchBusy] = useState(false);
+  const [researchError, setResearchError] = useState("");
+  const [researchNotice, setResearchNotice] = useState("");
 
   const checkHealth = useCallback(async () => {
     setWorker({ kind: "checking" });
@@ -573,6 +601,81 @@ function App(): React.JSX.Element {
       }
     }
   }, []);
+
+  const syncResearchBrief = useCallback(
+    (value: ResearchBriefResponse): void => {
+      setResearchBrief(value);
+      setResearchWorkspace(value.workspace);
+      setResearchLiveRun(value.latestRun);
+      setResearchPlanText(JSON.stringify(value.workspace.plan ?? {}, null, 2));
+      setResearchOutlineText(
+        JSON.stringify(value.workspace.outline ?? {}, null, 2),
+      );
+      setSelectedSourceIds(value.brief.sourceIds);
+      setResearchSelectedSectionId((current) =>
+        value.workspace.sections.some((section) => section.id === current)
+          ? current
+          : (value.workspace.sections[0]?.id ?? ""),
+      );
+      setResearchBriefs((items) => upsertResearchBrief(items, value.brief));
+    },
+    [],
+  );
+
+  const openResearchBrief = useCallback(
+    async (runId: string): Promise<void> => {
+      setResearchBusy(true);
+      setResearchError("");
+      setResearchNotice("");
+      try {
+        syncResearchBrief(await getDesktopApi().researchBriefs.get(runId));
+      } catch (error) {
+        setResearchError(
+          error instanceof Error ? error.message : "研究简报读取失败",
+        );
+      } finally {
+        setResearchBusy(false);
+      }
+    },
+    [syncResearchBrief],
+  );
+
+  const loadResearchBriefs = useCallback(
+    async (knowledgeBaseId: string): Promise<void> => {
+      if (!knowledgeBaseId) {
+        setResearchBriefs([]);
+        setResearchBrief(null);
+        setResearchWorkspace(null);
+        setResearchLiveRun(null);
+        return;
+      }
+      setResearchBusy(true);
+      setResearchError("");
+      try {
+        const result =
+          await getDesktopApi().researchBriefs.list(knowledgeBaseId);
+        setResearchBriefs(result.briefs);
+        if (result.briefs[0]) {
+          syncResearchBrief(
+            await getDesktopApi().researchBriefs.get(result.briefs[0].runId),
+          );
+        } else {
+          setResearchBrief(null);
+          setResearchWorkspace(null);
+          setResearchLiveRun(null);
+        }
+      } catch (error) {
+        const message =
+          error instanceof Error ? error.message : "研究任务读取失败";
+        if (!message.includes("Preload IPC")) {
+          setResearchError(message);
+        }
+      } finally {
+        setResearchBusy(false);
+      }
+    },
+    [syncResearchBrief],
+  );
 
   const showAppError = useCallback((message: string) => {
     setAppError(message);
@@ -777,6 +880,20 @@ function App(): React.JSX.Element {
   }, [activeKnowledgeBaseId, loadConversations]);
 
   useEffect(() => {
+    setResearchBriefs([]);
+    setResearchBrief(null);
+    setResearchWorkspace(null);
+    setResearchLiveRun(null);
+    setResearchGoal("");
+    setResearchSelection("");
+    setResearchError("");
+    setResearchNotice("");
+    if (workspaceMode === "research" && activeKnowledgeBaseId) {
+      void loadResearchBriefs(activeKnowledgeBaseId);
+    }
+  }, [activeKnowledgeBaseId, loadResearchBriefs, workspaceMode]);
+
+  useEffect(() => {
     setWritingOpen(false);
     setWritingProjects([]);
     setWritingProject(null);
@@ -827,11 +944,30 @@ function App(): React.JSX.Element {
           pendingTraceMessageIdRef.current,
           activeKnowledgeBaseId,
         );
+        if (workspaceMode === "research") {
+          void getDesktopApi()
+            .agentRuns.get(event.runId)
+            .then((response) => {
+              if (
+                response.run.knowledgeBaseId === activeKnowledgeBaseId &&
+                ["research_brief", "citation_conflict_audit"].includes(
+                  response.run.skillId,
+                )
+              ) {
+                setResearchLiveRun((current) =>
+                  current?.run.id === response.run.id
+                    ? mergeAgentRunResponse(current, response)
+                    : response,
+                );
+              }
+            })
+            .catch(() => undefined);
+        }
       });
     } catch {
       return undefined;
     }
-  }, [activeKnowledgeBaseId, openAgentRunTrace]);
+  }, [activeKnowledgeBaseId, openAgentRunTrace, workspaceMode]);
 
   useEffect(() => {
     if (!online || !activeKnowledgeBaseId) {
@@ -1552,6 +1688,11 @@ function App(): React.JSX.Element {
       if (activeKnowledgeBaseId) {
         await loadSources(activeKnowledgeBaseId);
       }
+      if (researchBrief) {
+        syncResearchBrief(
+          await getDesktopApi().researchBriefs.get(researchBrief.brief.runId),
+        );
+      }
     } catch (error) {
       setExternalResearchError(
         error instanceof Error ? error.message : "外部资料处理失败",
@@ -2132,8 +2273,204 @@ function App(): React.JSX.Element {
     }
   };
 
+  const createResearchBrief = async (): Promise<void> => {
+    if (!activeKnowledgeBaseId || !researchGoal.trim()) {
+      setResearchError("请输入研究目标");
+      return;
+    }
+    setResearchBusy(true);
+    setResearchError("");
+    setResearchNotice("");
+    try {
+      const value = await getDesktopApi().researchBriefs.create({
+        knowledgeBaseId: activeKnowledgeBaseId,
+        goal: researchGoal.trim(),
+        sourceIds: selectedSourceIds,
+      });
+      syncResearchBrief(value);
+      setResearchGoal("");
+      setResearchNotice("研究简报已生成，可直接人工编辑");
+    } catch (error) {
+      setResearchError(
+        error instanceof Error ? error.message : "研究简报生成失败",
+      );
+    } finally {
+      setResearchBusy(false);
+    }
+  };
+
+  const persistResearchBrief =
+    async (): Promise<ResearchBriefResponse | null> => {
+      if (!researchBrief || !researchWorkspace) {
+        return null;
+      }
+      if (
+        !isResearchWorkspaceDirty(
+          researchBrief.workspace,
+          researchWorkspace,
+          researchPlanText,
+          researchOutlineText,
+          researchBrief.brief.sourceIds,
+          selectedSourceIds,
+        )
+      ) {
+        return researchBrief;
+      }
+      let plan: Record<string, unknown>;
+      let outline: Record<string, unknown>;
+      try {
+        plan = parseStructuredEditor(researchPlanText, "计划");
+        outline = parseStructuredEditor(researchOutlineText, "大纲");
+      } catch (error) {
+        setResearchError(
+          error instanceof Error ? error.message : "结构化内容无效",
+        );
+        return null;
+      }
+      const value = await getDesktopApi().researchBriefs.update({
+        runId: researchBrief.brief.runId,
+        expectedRevision: researchBrief.brief.userRevision,
+        sourceIds: selectedSourceIds,
+        patch: {
+          title: researchWorkspace.title,
+          goal: researchWorkspace.goal,
+          plan,
+          outline,
+          draft: researchWorkspace.draft,
+          final: researchWorkspace.final,
+          sections: researchWorkspace.sections,
+        },
+      });
+      syncResearchBrief(value);
+      return value;
+    };
+
+  const saveResearchBrief = async (): Promise<void> => {
+    if (!researchBrief || researchBusy) {
+      return;
+    }
+    setResearchBusy(true);
+    setResearchError("");
+    setResearchNotice("");
+    try {
+      const value = await persistResearchBrief();
+      if (value) {
+        setResearchNotice("人工编辑已保存");
+      }
+    } catch (error) {
+      setResearchError(
+        error instanceof Error ? error.message : "研究简报保存失败",
+      );
+    } finally {
+      setResearchBusy(false);
+    }
+  };
+
+  const operateResearchBrief = async (
+    action: ResearchBriefAction,
+  ): Promise<void> => {
+    if (!researchBrief || !researchWorkspace || researchBusy) {
+      return;
+    }
+    if (action === "regenerate_section" && !researchSelectedSectionId) {
+      setResearchError("请先选择要重新生成的章节");
+      return;
+    }
+    setResearchBusy(true);
+    setResearchError("");
+    setResearchNotice("");
+    try {
+      const saved = await persistResearchBrief();
+      if (!saved) {
+        return;
+      }
+      const value = await getDesktopApi().researchBriefs.operate({
+        runId: saved.brief.runId,
+        action,
+        expectedRevision: saved.brief.userRevision,
+        selectionText: researchSelection || null,
+        sectionId:
+          action === "regenerate_section" ? researchSelectedSectionId : null,
+      });
+      syncResearchBrief(value);
+      setResearchSelection("");
+      setResearchNotice(
+        value.brief.hasPendingAgentUpdate
+          ? "检测到执行期间的人工编辑，Agent 结果正在等待合并"
+          : `${researchActionLabel(action)}完成`,
+      );
+    } catch (error) {
+      setResearchError(
+        error instanceof Error ? error.message : "研究任务执行失败",
+      );
+    } finally {
+      setResearchBusy(false);
+    }
+  };
+
+  const resolveResearchPending = async (
+    decision: "apply" | "discard",
+  ): Promise<void> => {
+    if (!researchBrief || researchBusy) {
+      return;
+    }
+    setResearchBusy(true);
+    setResearchError("");
+    setResearchNotice("");
+    try {
+      const value = await getDesktopApi().researchBriefs.resolvePending({
+        runId: researchBrief.brief.runId,
+        decision,
+        expectedRevision: researchBrief.brief.userRevision,
+      });
+      syncResearchBrief(value);
+      setResearchNotice(
+        decision === "apply" ? "Agent 更新已合并" : "Agent 更新已放弃",
+      );
+    } catch (error) {
+      setResearchError(
+        error instanceof Error ? error.message : "Agent 更新处理失败",
+      );
+    } finally {
+      setResearchBusy(false);
+    }
+  };
+
+  const exportResearchBrief = async (): Promise<void> => {
+    if (!researchBrief || researchBusy) {
+      return;
+    }
+    setResearchBusy(true);
+    setResearchError("");
+    setResearchNotice("");
+    try {
+      const saved = await persistResearchBrief();
+      if (!saved) {
+        return;
+      }
+      const result = await getDesktopApi().researchBriefs.exportMarkdown(
+        saved.brief.runId,
+      );
+      setResearchNotice(
+        result.cancelled
+          ? "已取消导出"
+          : `研究简报已导出到 ${result.filePath ?? "所选位置"}`,
+      );
+    } catch (error) {
+      setResearchError(
+        error instanceof Error ? error.message : "研究简报导出失败",
+      );
+    } finally {
+      setResearchBusy(false);
+    }
+  };
+
   return (
-    <main className={`app-shell ${evidenceOpen ? "" : "evidence-collapsed"}`}>
+    <main
+      className={`app-shell ${
+        workspaceMode === "chat" && !evidenceOpen ? "evidence-collapsed" : ""
+      }`}
+    >
       {appError && (
         <div aria-live="assertive" className="app-error-toast" role="alert">
           <span>{appError}</span>
@@ -2215,22 +2552,40 @@ function App(): React.JSX.Element {
             )}
           </div>
         </div>
-        <label className="global-search">
-          <Icon name="search" size={17} />
-          <input
-            aria-label="搜索知识库"
-            placeholder="关键词或自然语言搜索资料"
-            value={searchQuery}
-            onChange={(event) => setSearchQuery(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key === "Enter") {
-                event.preventDefault();
-                void runSearch();
-              }
-            }}
-          />
-          <kbd>{searchBusy ? "..." : "↵"}</kbd>
-        </label>
+        <div className="top-center">
+          <div className="workspace-mode-switch" aria-label="工作区模式">
+            <button
+              className={workspaceMode === "chat" ? "active" : ""}
+              type="button"
+              onClick={() => setWorkspaceMode("chat")}
+            >
+              对话
+            </button>
+            <button
+              className={workspaceMode === "research" ? "active" : ""}
+              type="button"
+              onClick={() => setWorkspaceMode("research")}
+            >
+              研究任务
+            </button>
+          </div>
+          <label className="global-search">
+            <Icon name="search" size={17} />
+            <input
+              aria-label="搜索知识库"
+              placeholder="关键词或自然语言搜索资料"
+              value={searchQuery}
+              onChange={(event) => setSearchQuery(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") {
+                  event.preventDefault();
+                  void runSearch();
+                }
+              }}
+            />
+            <kbd>{searchBusy ? "..." : "↵"}</kbd>
+          </label>
+        </div>
         <div className="top-actions">
           <button
             className="button ghost"
@@ -2244,11 +2599,16 @@ function App(): React.JSX.Element {
           </button>
           <button
             className="button primary"
-            disabled={chatBusy}
+            disabled={workspaceMode === "chat" ? chatBusy : researchBusy}
             type="button"
-            onClick={startNewConversation}
+            onClick={() =>
+              workspaceMode === "chat"
+                ? startNewConversation()
+                : void createResearchBrief()
+            }
           >
-            <Icon name="add" size={17} /> 新建对话
+            <Icon name="add" size={17} />{" "}
+            {workspaceMode === "chat" ? "新建对话" : "新建研究"}
           </button>
           <button className="avatar" aria-label="账户" type="button">
             S
@@ -2257,371 +2617,452 @@ function App(): React.JSX.Element {
       </header>
 
       <section className="workspace">
-        <aside className="panel sources-panel">
-          <PanelHeader icon="folder" title="来源资料" count={sources.length} />
-          <div className="source-actions">
-            <div className="source-action-row">
-              <button
-                className="button add-source"
-                disabled={importBusy}
-                type="button"
-                onClick={() => void importFiles()}
-              >
-                <Icon name="add" /> 添加文件
-              </button>
-              <button
-                className="button ghost"
-                disabled={importBusy}
-                type="button"
-                onClick={() => {
-                  setImportError("");
-                  setWebImportOpen(true);
-                }}
-              >
-                网页链接
-              </button>
-            </div>
-            <button
-              className="button external-research-button"
-              disabled={importBusy || !activeKnowledgeBaseId}
-              type="button"
-              onClick={() => void openExternalResearch()}
-            >
-              <Icon name="sparkle" size={16} />
-              寻找外部资料
-            </button>
-            <label className="panel-search">
-              <Icon name="search" size={16} />
-              <input aria-label="筛选来源" placeholder="筛选来源" />
-            </label>
-          </div>
-          <div className="source-toolbar">
-            <span>{selectedCount} 个来源已用于对话</span>
-            <button
-              className="text-button"
-              type="button"
-              onClick={() =>
-                setSelectedSourceIds(sources.map((source) => source.id))
-              }
-            >
-              全选
-            </button>
-          </div>
-          {knowledgeBaseError && (
-            <div className="inline-error">{knowledgeBaseError}</div>
-          )}
-          <div className="source-list">
-            {sources.length > 0 ? (
-              sources.map((source) => (
-                <article
-                  className={`source-item ${
-                    selectedSourceIds.includes(source.id) ? "selected" : ""
-                  } ${focusedSourceId === source.id ? "focused" : ""}`}
-                  id={`source-${source.id}`}
-                  key={source.id}
-                >
+        {workspaceMode === "research" ? (
+          <ResearchWorkspace
+            brief={researchBrief}
+            briefs={researchBriefs}
+            busy={researchBusy}
+            dirty={
+              researchBrief && researchWorkspace
+                ? isResearchWorkspaceDirty(
+                    researchBrief.workspace,
+                    researchWorkspace,
+                    researchPlanText,
+                    researchOutlineText,
+                    researchBrief.brief.sourceIds,
+                    selectedSourceIds,
+                  )
+                : false
+            }
+            editorTab={researchEditorTab}
+            error={researchError}
+            goal={researchGoal}
+            liveRun={researchLiveRun}
+            notice={researchNotice}
+            outlineText={researchOutlineText}
+            planText={researchPlanText}
+            selectedSectionId={researchSelectedSectionId}
+            selectedSourceIds={selectedSourceIds}
+            selection={researchSelection}
+            sources={sources}
+            workspace={researchWorkspace}
+            onAddFiles={() => void importFiles()}
+            onAddWeb={() => {
+              setImportError("");
+              setWebImportOpen(true);
+            }}
+            onCreate={() => void createResearchBrief()}
+            onEditorTabChange={setResearchEditorTab}
+            onExport={() => void exportResearchBrief()}
+            onExternalResearch={() => {
+              setExternalResearchQuery(researchWorkspace?.goal || researchGoal);
+              void openExternalResearch();
+            }}
+            onGoalChange={setResearchGoal}
+            onOpenBrief={(runId) => void openResearchBrief(runId)}
+            onOperation={(action) => void operateResearchBrief(action)}
+            onOutlineTextChange={setResearchOutlineText}
+            onPlanTextChange={setResearchPlanText}
+            onResolvePending={(decision) =>
+              void resolveResearchPending(decision)
+            }
+            onSave={() => void saveResearchBrief()}
+            onSectionSelect={setResearchSelectedSectionId}
+            onSelectAllSources={() =>
+              setSelectedSourceIds(sources.map((source) => source.id))
+            }
+            onSelectionChange={setResearchSelection}
+            onSourceToggle={toggleSource}
+            onTraceAction={(runId, action) =>
+              void handleAgentRunAction(runId, action)
+            }
+            onWorkspaceChange={setResearchWorkspace}
+          />
+        ) : (
+          <>
+            <aside className="panel sources-panel">
+              <PanelHeader
+                icon="folder"
+                title="来源资料"
+                count={sources.length}
+              />
+              <div className="source-actions">
+                <div className="source-action-row">
                   <button
-                    className="source-main"
+                    className="button add-source"
+                    disabled={importBusy}
                     type="button"
-                    onClick={() => toggleSource(source.id)}
+                    onClick={() => void importFiles()}
                   >
-                    <span className={`source-icon ${sourceTone(source)}`}>
-                      <Icon name="document" size={17} />
-                    </span>
-                    <span className="source-copy">
-                      <strong>{source.displayName}</strong>
-                      <small>{sourceMeta(source)}</small>
-                    </span>
-                    <span className="source-check">
-                      {selectedSourceIds.includes(source.id) && (
-                        <Icon name="check" size={14} />
-                      )}
-                    </span>
+                    <Icon name="add" /> 添加文件
                   </button>
                   <button
-                    aria-label={`维护来源版本 ${source.displayName}`}
-                    className="source-maintenance"
-                    disabled={sourceMaintenanceBusy}
-                    title="版本与时效维护"
-                    type="button"
-                    onClick={() => void openSourceMaintenance(source)}
-                  >
-                    <Icon name="refresh" size={15} />
-                  </button>
-                  <button
-                    aria-label={`删除来源 ${source.displayName}`}
-                    className="source-delete"
-                    disabled={Boolean(sourceDeleteBusyId)}
-                    title="删除来源"
+                    className="button ghost"
+                    disabled={importBusy}
                     type="button"
                     onClick={() => {
-                      setConfirmError("");
-                      setConfirmAction({ kind: "delete-source", source });
+                      setImportError("");
+                      setWebImportOpen(true);
                     }}
                   >
-                    <Icon name="trash" size={15} />
+                    网页链接
                   </button>
-                </article>
-              ))
-            ) : (
-              <div className="empty-source-state">
-                <strong>还没有来源</strong>
-                <span>导入功能完成后，文件和网页会按当前知识库隔离显示。</span>
-              </div>
-            )}
-          </div>
-        </aside>
-
-        <section className="panel chat-panel">
-          <PanelHeader
-            icon="chat"
-            title="对话"
-            subtitle={`${selectedCount} 个来源参与检索`}
-            action={
-              <div className="chat-header-actions">
-                <button
-                  className="writing-header-button"
-                  title="复习与写作工作流"
-                  type="button"
-                  onClick={() => void openWritingWorkspace()}
-                >
-                  <Icon name="book" size={15} />
-                  <span>写作</span>
-                </button>
-                <ConversationHistoryMenu
-                  activeConversationId={conversationId}
-                  busy={chatBusy || Boolean(conversationDeleteBusyId)}
-                  conversations={conversations}
-                  open={conversationMenuOpen}
-                  onDelete={(conversation) => {
-                    setConfirmError("");
-                    setConfirmAction({
-                      kind: "delete-conversation",
-                      conversation,
-                    });
-                  }}
-                  onOpen={(id) => void openConversation(id)}
-                  onToggle={() => setConversationMenuOpen((value) => !value)}
-                />
-                <button
-                  aria-label="导出当前对话"
-                  className="icon-button"
-                  disabled={!conversationId || Boolean(exportBusyId)}
-                  title="导出当前对话为 Markdown"
-                  type="button"
-                  onClick={() => void exportMarkdown()}
-                >
-                  <Icon name="download" size={17} />
-                </button>
-              </div>
-            }
-          />
-          <div
-            className={`chat-scroll ${
-              hasStartedConversation ? "conversation-active" : ""
-            }`}
-          >
-            {!hasStartedConversation && (
-              <div className="welcome-block">
-                <span className="welcome-icon">
-                  <Icon name="sparkle" size={25} />
-                </span>
-                <p className="eyebrow">
-                  {activeKnowledgeBase?.name ?? "知识库"}
-                </p>
-                <h1>从当前知识库获得可验证的答案</h1>
-                <p className="welcome-summary">
-                  文档、索引和对话都绑定到当前知识库。切换知识库后，来源列表、引用证据和后续检索上下文会随之隔离。
-                </p>
-                <div className="overview-metrics">
-                  <span>
-                    <strong>{sourceSummary.sourceCount}</strong> 个来源
-                  </span>
-                  <span>
-                    <strong>{selectedCount}</strong> 个已选择
-                  </span>
-                  <span>
-                    <strong>{sourceSummary.readyIndexCount}</strong> 个可用索引
-                  </span>
-                  <span>
-                    <strong>{sourceSummary.conversationCount}</strong> 个对话
-                  </span>
                 </div>
+                <button
+                  className="button external-research-button"
+                  disabled={importBusy || !activeKnowledgeBaseId}
+                  type="button"
+                  onClick={() => void openExternalResearch()}
+                >
+                  <Icon name="sparkle" size={16} />
+                  寻找外部资料
+                </button>
+                <label className="panel-search">
+                  <Icon name="search" size={16} />
+                  <input aria-label="筛选来源" placeholder="筛选来源" />
+                </label>
               </div>
-            )}
-
-            {!hasStartedConversation &&
-              (searchBusy || searchError || searchResults.length > 0) && (
-                <SearchResultsPanel
-                  busy={searchBusy}
-                  error={searchError}
-                  query={lastSearchQuery || searchQuery}
-                  results={searchResults}
-                  selectedChunkId={selectedEvidenceChunkId(selectedEvidence)}
-                  onSelect={selectSearchResult}
-                />
+              <div className="source-toolbar">
+                <span>{selectedCount} 个来源已用于对话</span>
+                <button
+                  className="text-button"
+                  type="button"
+                  onClick={() =>
+                    setSelectedSourceIds(sources.map((source) => source.id))
+                  }
+                >
+                  全选
+                </button>
+              </div>
+              {knowledgeBaseError && (
+                <div className="inline-error">{knowledgeBaseError}</div>
               )}
-
-            {chatError && (
-              <div className="message-flow">
-                <div className="inline-error">{chatError}</div>
-              </div>
-            )}
-            {exportNotice && (
-              <div className="message-flow">
-                <div className="inline-notice">{exportNotice}</div>
-              </div>
-            )}
-
-            {messages.length > 0 && (
-              <div className="message-flow">
-                {messages.map((message) => {
-                  const trace = agentRunTraces[message.id];
-                  if (message.role === "user") {
-                    return (
-                      <p className="user-message" key={message.id}>
-                        {message.content}
-                      </p>
-                    );
-                  }
-                  if (message.role === "assistant") {
-                    return (
-                      <div className="assistant-turn" key={message.id}>
-                        {trace && (
-                          <AgentRunTracePanel
-                            answerVisible={!isPendingAssistantMessage(message)}
-                            busyAction={agentTraceBusyId}
-                            error={agentTraceError}
-                            response={trace}
-                            onAction={(runId, action) =>
-                              void handleAgentRunAction(runId, action)
-                            }
-                          />
-                        )}
-                        {!trace && isPendingAssistantMessage(message) && (
-                          <PendingAgentRunTracePanel
-                            startedAt={message.createdAt}
-                          />
-                        )}
-                        <AssistantAnswerMessage
-                          message={message}
-                          response={answerResponses[message.id]}
-                          selectedChunkId={selectedEvidenceChunkId(
-                            selectedEvidence,
-                          )}
-                          onSelectCitation={selectCitation}
-                          exportBusy={exportBusyId === message.id}
-                          onExport={() => void exportMarkdown(message.id)}
-                        />
-                      </div>
-                    );
-                  }
-                  return null;
-                })}
-              </div>
-            )}
-
-            {!hasStartedConversation && (
-              <div className="suggestion-block">
-                <span className="section-label">建议提问</span>
-                <div className="suggestions">
-                  {SUGGESTIONS.map((suggestion) => (
-                    <button
-                      key={suggestion}
-                      type="button"
-                      onClick={() => setQuery(suggestion)}
+              <div className="source-list">
+                {sources.length > 0 ? (
+                  sources.map((source) => (
+                    <article
+                      className={`source-item ${
+                        selectedSourceIds.includes(source.id) ? "selected" : ""
+                      } ${focusedSourceId === source.id ? "focused" : ""}`}
+                      id={`source-${source.id}`}
+                      key={source.id}
                     >
-                      {suggestion}
-                      <Icon name="chevron" size={15} />
-                    </button>
-                  ))}
-                </div>
+                      <button
+                        className="source-main"
+                        type="button"
+                        onClick={() => toggleSource(source.id)}
+                      >
+                        <span className={`source-icon ${sourceTone(source)}`}>
+                          <Icon name="document" size={17} />
+                        </span>
+                        <span className="source-copy">
+                          <strong>{source.displayName}</strong>
+                          <small>{sourceMeta(source)}</small>
+                        </span>
+                        <span className="source-check">
+                          {selectedSourceIds.includes(source.id) && (
+                            <Icon name="check" size={14} />
+                          )}
+                        </span>
+                      </button>
+                      <button
+                        aria-label={`维护来源版本 ${source.displayName}`}
+                        className="source-maintenance"
+                        disabled={sourceMaintenanceBusy}
+                        title="版本与时效维护"
+                        type="button"
+                        onClick={() => void openSourceMaintenance(source)}
+                      >
+                        <Icon name="refresh" size={15} />
+                      </button>
+                      <button
+                        aria-label={`删除来源 ${source.displayName}`}
+                        className="source-delete"
+                        disabled={Boolean(sourceDeleteBusyId)}
+                        title="删除来源"
+                        type="button"
+                        onClick={() => {
+                          setConfirmError("");
+                          setConfirmAction({ kind: "delete-source", source });
+                        }}
+                      >
+                        <Icon name="trash" size={15} />
+                      </button>
+                    </article>
+                  ))
+                ) : (
+                  <div className="empty-source-state">
+                    <strong>还没有来源</strong>
+                    <span>
+                      导入功能完成后，文件和网页会按当前知识库隔离显示。
+                    </span>
+                  </div>
+                )}
               </div>
-            )}
-          </div>
-          <div className="composer-wrap">
-            <div className="composer">
-              <textarea
-                aria-label="向知识库提问"
-                placeholder="向知识库提问，回答将附带真实引用…"
-                rows={1}
-                value={query}
-                onChange={(event) => setQuery(event.target.value)}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter" && !event.shiftKey) {
-                    event.preventDefault();
-                    void submitQuestion();
-                  }
-                }}
+            </aside>
+
+            <section className="panel chat-panel">
+              <PanelHeader
+                icon="chat"
+                title="对话"
+                subtitle={`${selectedCount} 个来源参与检索`}
+                action={
+                  <div className="chat-header-actions">
+                    <button
+                      className="writing-header-button"
+                      title="复习与写作工作流"
+                      type="button"
+                      onClick={() => void openWritingWorkspace()}
+                    >
+                      <Icon name="book" size={15} />
+                      <span>写作</span>
+                    </button>
+                    <ConversationHistoryMenu
+                      activeConversationId={conversationId}
+                      busy={chatBusy || Boolean(conversationDeleteBusyId)}
+                      conversations={conversations}
+                      open={conversationMenuOpen}
+                      onDelete={(conversation) => {
+                        setConfirmError("");
+                        setConfirmAction({
+                          kind: "delete-conversation",
+                          conversation,
+                        });
+                      }}
+                      onOpen={(id) => void openConversation(id)}
+                      onToggle={() =>
+                        setConversationMenuOpen((value) => !value)
+                      }
+                    />
+                    <button
+                      aria-label="导出当前对话"
+                      className="icon-button"
+                      disabled={!conversationId || Boolean(exportBusyId)}
+                      title="导出当前对话为 Markdown"
+                      type="button"
+                      onClick={() => void exportMarkdown()}
+                    >
+                      <Icon name="download" size={17} />
+                    </button>
+                  </div>
+                }
               />
-              <span className="composer-meta">
-                {chatBusy ? "生成中" : `${selectedCount} 个来源`}
-              </span>
-              <label className="composer-model">
-                <select
-                  aria-label="当前对话模型"
-                  disabled={chatBusy}
-                  title="从下一条消息开始使用"
-                  value={chatModel}
-                  onChange={(event) => void changeChatModel(event.target.value)}
-                >
-                  {(seedStatus?.models ?? FALLBACK_SEED_MODELS)
-                    .filter((model) => model.role !== "embedding")
-                    .map((model) => (
-                      <option key={model.id} value={model.id}>
-                        {model.label}
-                      </option>
-                    ))}
-                </select>
-                <Icon name="chevron" size={13} />
-              </label>
-              <button
-                aria-label="发送问题"
-                className="send-button"
-                disabled={!query.trim() || chatBusy}
-                type="button"
-                onClick={() => void submitQuestion()}
+              <div
+                className={`chat-scroll ${
+                  hasStartedConversation ? "conversation-active" : ""
+                }`}
               >
-                <Icon name="send" size={17} />
-              </button>
-            </div>
-            <p>回答必须经过后端引用校验，证据不足时会明确提示。</p>
-          </div>
-        </section>
+                {!hasStartedConversation && (
+                  <div className="welcome-block">
+                    <span className="welcome-icon">
+                      <Icon name="sparkle" size={25} />
+                    </span>
+                    <p className="eyebrow">
+                      {activeKnowledgeBase?.name ?? "知识库"}
+                    </p>
+                    <h1>从当前知识库获得可验证的答案</h1>
+                    <p className="welcome-summary">
+                      文档、索引和对话都绑定到当前知识库。切换知识库后，来源列表、引用证据和后续检索上下文会随之隔离。
+                    </p>
+                    <div className="overview-metrics">
+                      <span>
+                        <strong>{sourceSummary.sourceCount}</strong> 个来源
+                      </span>
+                      <span>
+                        <strong>{selectedCount}</strong> 个已选择
+                      </span>
+                      <span>
+                        <strong>{sourceSummary.readyIndexCount}</strong>{" "}
+                        个可用索引
+                      </span>
+                      <span>
+                        <strong>{sourceSummary.conversationCount}</strong>{" "}
+                        个对话
+                      </span>
+                    </div>
+                  </div>
+                )}
 
-        <aside className="panel evidence-panel">
-          <PanelHeader
-            icon="evidence"
-            title="来源与证据"
-            action={
+                {!hasStartedConversation &&
+                  (searchBusy || searchError || searchResults.length > 0) && (
+                    <SearchResultsPanel
+                      busy={searchBusy}
+                      error={searchError}
+                      query={lastSearchQuery || searchQuery}
+                      results={searchResults}
+                      selectedChunkId={selectedEvidenceChunkId(
+                        selectedEvidence,
+                      )}
+                      onSelect={selectSearchResult}
+                    />
+                  )}
+
+                {chatError && (
+                  <div className="message-flow">
+                    <div className="inline-error">{chatError}</div>
+                  </div>
+                )}
+                {exportNotice && (
+                  <div className="message-flow">
+                    <div className="inline-notice">{exportNotice}</div>
+                  </div>
+                )}
+
+                {messages.length > 0 && (
+                  <div className="message-flow">
+                    {messages.map((message) => {
+                      const trace = agentRunTraces[message.id];
+                      if (message.role === "user") {
+                        return (
+                          <p className="user-message" key={message.id}>
+                            {message.content}
+                          </p>
+                        );
+                      }
+                      if (message.role === "assistant") {
+                        return (
+                          <div className="assistant-turn" key={message.id}>
+                            {trace && (
+                              <AgentRunTracePanel
+                                answerVisible={
+                                  !isPendingAssistantMessage(message)
+                                }
+                                busyAction={agentTraceBusyId}
+                                error={agentTraceError}
+                                response={trace}
+                                onAction={(runId, action) =>
+                                  void handleAgentRunAction(runId, action)
+                                }
+                              />
+                            )}
+                            {!trace && isPendingAssistantMessage(message) && (
+                              <PendingAgentRunTracePanel
+                                startedAt={message.createdAt}
+                              />
+                            )}
+                            <AssistantAnswerMessage
+                              message={message}
+                              response={answerResponses[message.id]}
+                              selectedChunkId={selectedEvidenceChunkId(
+                                selectedEvidence,
+                              )}
+                              onSelectCitation={selectCitation}
+                              exportBusy={exportBusyId === message.id}
+                              onExport={() => void exportMarkdown(message.id)}
+                            />
+                          </div>
+                        );
+                      }
+                      return null;
+                    })}
+                  </div>
+                )}
+
+                {!hasStartedConversation && (
+                  <div className="suggestion-block">
+                    <span className="section-label">建议提问</span>
+                    <div className="suggestions">
+                      {SUGGESTIONS.map((suggestion) => (
+                        <button
+                          key={suggestion}
+                          type="button"
+                          onClick={() => setQuery(suggestion)}
+                        >
+                          {suggestion}
+                          <Icon name="chevron" size={15} />
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+              <div className="composer-wrap">
+                <div className="composer">
+                  <textarea
+                    aria-label="向知识库提问"
+                    placeholder="向知识库提问，回答将附带真实引用…"
+                    rows={1}
+                    value={query}
+                    onChange={(event) => setQuery(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter" && !event.shiftKey) {
+                        event.preventDefault();
+                        void submitQuestion();
+                      }
+                    }}
+                  />
+                  <span className="composer-meta">
+                    {chatBusy ? "生成中" : `${selectedCount} 个来源`}
+                  </span>
+                  <label className="composer-model">
+                    <select
+                      aria-label="当前对话模型"
+                      disabled={chatBusy}
+                      title="从下一条消息开始使用"
+                      value={chatModel}
+                      onChange={(event) =>
+                        void changeChatModel(event.target.value)
+                      }
+                    >
+                      {(seedStatus?.models ?? FALLBACK_SEED_MODELS)
+                        .filter((model) => model.role !== "embedding")
+                        .map((model) => (
+                          <option key={model.id} value={model.id}>
+                            {model.label}
+                          </option>
+                        ))}
+                    </select>
+                    <Icon name="chevron" size={13} />
+                  </label>
+                  <button
+                    aria-label="发送问题"
+                    className="send-button"
+                    disabled={!query.trim() || chatBusy}
+                    type="button"
+                    onClick={() => void submitQuestion()}
+                  >
+                    <Icon name="send" size={17} />
+                  </button>
+                </div>
+                <p>回答必须经过后端引用校验，证据不足时会明确提示。</p>
+              </div>
+            </section>
+
+            <aside className="panel evidence-panel">
+              <PanelHeader
+                icon="evidence"
+                title="来源与证据"
+                action={
+                  <button
+                    aria-label="收起证据面板"
+                    className="icon-button"
+                    type="button"
+                    onClick={() => setEvidenceOpen(false)}
+                  >
+                    <Icon name="close" size={17} />
+                  </button>
+                }
+              />
+              <div className="evidence-content">
+                <EvidenceDetail
+                  jumpNotice={sourceJumpNotice}
+                  selection={selectedEvidence}
+                  onFocusSource={focusEvidenceSource}
+                />
+              </div>
+            </aside>
+
+            {!evidenceOpen && (
               <button
-                aria-label="收起证据面板"
-                className="icon-button"
+                className="evidence-restore"
                 type="button"
-                onClick={() => setEvidenceOpen(false)}
+                onClick={() => setEvidenceOpen(true)}
               >
-                <Icon name="close" size={17} />
+                <Icon name="panel" size={17} />
+                证据
               </button>
-            }
-          />
-          <div className="evidence-content">
-            <EvidenceDetail
-              jumpNotice={sourceJumpNotice}
-              selection={selectedEvidence}
-              onFocusSource={focusEvidenceSource}
-            />
-          </div>
-        </aside>
-
-        {!evidenceOpen && (
-          <button
-            className="evidence-restore"
-            type="button"
-            onClick={() => setEvidenceOpen(true)}
-          >
-            <Icon name="panel" size={17} />
-            证据
-          </button>
+            )}
+          </>
         )}
       </section>
 
@@ -2895,6 +3336,578 @@ function App(): React.JSX.Element {
         />
       )}
     </main>
+  );
+}
+
+function ResearchWorkspace({
+  brief,
+  briefs,
+  busy,
+  dirty,
+  editorTab,
+  error,
+  goal,
+  liveRun,
+  notice,
+  outlineText,
+  planText,
+  selectedSectionId,
+  selectedSourceIds,
+  selection,
+  sources,
+  workspace,
+  onAddFiles,
+  onAddWeb,
+  onCreate,
+  onEditorTabChange,
+  onExport,
+  onExternalResearch,
+  onGoalChange,
+  onOpenBrief,
+  onOperation,
+  onOutlineTextChange,
+  onPlanTextChange,
+  onResolvePending,
+  onSave,
+  onSectionSelect,
+  onSelectAllSources,
+  onSelectionChange,
+  onSourceToggle,
+  onTraceAction,
+  onWorkspaceChange,
+}: {
+  brief: ResearchBriefResponse | null;
+  briefs: ResearchBriefSummary[];
+  busy: boolean;
+  dirty: boolean;
+  editorTab: ResearchEditorTab;
+  error: string;
+  goal: string;
+  liveRun: AgentRunResponse | null;
+  notice: string;
+  outlineText: string;
+  planText: string;
+  selectedSectionId: string;
+  selectedSourceIds: string[];
+  selection: string;
+  sources: KnowledgeBaseSource[];
+  workspace: ResearchBriefWorkspace | null;
+  onAddFiles: () => void;
+  onAddWeb: () => void;
+  onCreate: () => void;
+  onEditorTabChange: (tab: ResearchEditorTab) => void;
+  onExport: () => void;
+  onExternalResearch: () => void;
+  onGoalChange: (value: string) => void;
+  onOpenBrief: (runId: string) => void;
+  onOperation: (action: ResearchBriefAction) => void;
+  onOutlineTextChange: (value: string) => void;
+  onPlanTextChange: (value: string) => void;
+  onResolvePending: (decision: "apply" | "discard") => void;
+  onSave: () => void;
+  onSectionSelect: (sectionId: string) => void;
+  onSelectAllSources: () => void;
+  onSelectionChange: (value: string) => void;
+  onSourceToggle: (sourceId: string) => void;
+  onTraceAction: (runId: string, action: "resume" | "cancel" | "retry") => void;
+  onWorkspaceChange: (value: ResearchBriefWorkspace) => void;
+}): React.JSX.Element {
+  const selectedSection = workspace?.sections.find(
+    (section) => section.id === selectedSectionId,
+  );
+  const pendingCandidates =
+    brief?.externalCandidates.filter(
+      (candidate) => candidate.status === "candidate",
+    ) ?? [];
+  const updateSection = (
+    patch: Partial<{ title: string; content: string }>,
+  ): void => {
+    if (!workspace || !selectedSection) {
+      return;
+    }
+    onWorkspaceChange({
+      ...workspace,
+      sections: workspace.sections.map((section) =>
+        section.id === selectedSection.id ? { ...section, ...patch } : section,
+      ),
+    });
+  };
+  const captureSelection = (
+    event: React.SyntheticEvent<HTMLTextAreaElement>,
+  ): void => {
+    const target = event.currentTarget;
+    onSelectionChange(
+      target.value.slice(target.selectionStart, target.selectionEnd).trim(),
+    );
+  };
+
+  return (
+    <>
+      <aside className="panel research-scope-panel">
+        <PanelHeader
+          icon="folder"
+          title="资料范围"
+          count={selectedSourceIds.length}
+        />
+        <div className="research-create-block">
+          <label>
+            <span>研究目标</span>
+            <textarea
+              disabled={busy}
+              placeholder="例如：梳理当前方案的核心结论、冲突与证据缺口"
+              rows={3}
+              value={goal}
+              onChange={(event) => onGoalChange(event.target.value)}
+            />
+          </label>
+          <button
+            className="button primary"
+            disabled={busy || !goal.trim()}
+            type="button"
+            onClick={onCreate}
+          >
+            <Icon name="sparkle" size={15} />
+            生成研究简报
+          </button>
+        </div>
+
+        {briefs.length > 0 && (
+          <div className="research-brief-list">
+            <div className="research-section-heading">
+              <strong>研究任务</strong>
+              <span>{briefs.length}</span>
+            </div>
+            {briefs.map((item) => (
+              <button
+                className={item.runId === brief?.brief.runId ? "active" : ""}
+                disabled={busy}
+                key={item.runId}
+                type="button"
+                onClick={() => onOpenBrief(item.runId)}
+              >
+                <strong>{item.title}</strong>
+                <small>
+                  人工 v{item.userRevision} · Agent v{item.agentRevision}
+                  {item.hasPendingAgentUpdate ? " · 待合并" : ""}
+                </small>
+              </button>
+            ))}
+          </div>
+        )}
+
+        <div className="research-section-heading source-scope-heading">
+          <strong>当前知识库来源</strong>
+          <button
+            className="text-button"
+            type="button"
+            onClick={onSelectAllSources}
+          >
+            全选
+          </button>
+        </div>
+        <div className="research-source-actions">
+          <button
+            className="button ghost"
+            disabled={busy}
+            type="button"
+            onClick={onAddFiles}
+          >
+            添加文件
+          </button>
+          <button
+            className="button ghost"
+            disabled={busy}
+            type="button"
+            onClick={onAddWeb}
+          >
+            网页链接
+          </button>
+        </div>
+        <div className="research-source-list">
+          {sources.map((source) => (
+            <button
+              className={
+                selectedSourceIds.includes(source.id) ? "selected" : ""
+              }
+              key={source.id}
+              type="button"
+              onClick={() => onSourceToggle(source.id)}
+            >
+              <span className={`source-icon ${sourceTone(source)}`}>
+                <Icon name="document" size={15} />
+              </span>
+              <span>
+                <strong>{source.displayName}</strong>
+                <small>{sourceMeta(source)}</small>
+              </span>
+              <span className="source-check">
+                {selectedSourceIds.includes(source.id) && (
+                  <Icon name="check" size={13} />
+                )}
+              </span>
+            </button>
+          ))}
+        </div>
+
+        <div className="research-external-block">
+          <div className="research-section-heading">
+            <strong>待确认外部资料</strong>
+            <span>{pendingCandidates.length}</span>
+          </div>
+          <button
+            className="button external-research-button"
+            disabled={busy}
+            type="button"
+            onClick={onExternalResearch}
+          >
+            <Icon name="sparkle" size={15} />
+            寻找外部资料
+          </button>
+          {pendingCandidates.map((candidate) => (
+            <a
+              href={candidate.url}
+              key={candidate.id}
+              rel="noreferrer"
+              target="_blank"
+            >
+              <strong>{candidate.title}</strong>
+              <small>{candidate.initialComparison.label ?? "等待确认"}</small>
+            </a>
+          ))}
+        </div>
+      </aside>
+
+      <section className="panel research-editor-panel">
+        <PanelHeader
+          icon="book"
+          title="可编辑研究简报"
+          subtitle={
+            workspace
+              ? `${dirty ? "有未保存修改" : "已保存"} · 人工编辑优先`
+              : "尚未创建"
+          }
+          action={
+            <div className="research-header-actions">
+              <button
+                className="button ghost"
+                disabled={!workspace || busy}
+                type="button"
+                onClick={onExport}
+              >
+                <Icon name="download" size={15} />
+                导出
+              </button>
+              <button
+                className="button primary"
+                disabled={!workspace || busy || !dirty}
+                type="button"
+                onClick={onSave}
+              >
+                {busy ? "处理中" : "保存"}
+              </button>
+            </div>
+          }
+        />
+        {!workspace ? (
+          <div className="research-empty-state">
+            <Icon name="sparkle" size={28} />
+            <h2>建立一个可持续编辑的研究任务</h2>
+            <p>
+              选择左侧资料并输入目标。Agent
+              会生成计划、大纲、草稿和最终稿，后续更新不会覆盖你的人工修改。
+            </p>
+          </div>
+        ) : (
+          <div className="research-editor-body">
+            {Object.keys(brief?.pendingAgentUpdate ?? {}).length > 0 && (
+              <div className="research-pending-banner">
+                <span>
+                  <strong>Agent 更新等待合并</strong>
+                  执行期间检测到人工编辑，当前内容未被覆盖。
+                </span>
+                <div>
+                  <button
+                    className="button ghost"
+                    disabled={busy}
+                    type="button"
+                    onClick={() => onResolvePending("discard")}
+                  >
+                    放弃
+                  </button>
+                  <button
+                    className="button primary"
+                    disabled={busy}
+                    type="button"
+                    onClick={() => onResolvePending("apply")}
+                  >
+                    合并更新
+                  </button>
+                </div>
+              </div>
+            )}
+            {error && <div className="inline-error">{error}</div>}
+            {notice && <div className="inline-notice">{notice}</div>}
+            <div className="research-title-fields">
+              <input
+                aria-label="研究简报标题"
+                value={workspace.title}
+                onChange={(event) =>
+                  onWorkspaceChange({
+                    ...workspace,
+                    title: event.target.value,
+                  })
+                }
+              />
+              <textarea
+                aria-label="研究简报目标"
+                rows={2}
+                value={workspace.goal}
+                onChange={(event) =>
+                  onWorkspaceChange({
+                    ...workspace,
+                    goal: event.target.value,
+                  })
+                }
+              />
+            </div>
+            <div className="research-editor-tabs">
+              {(
+                [
+                  ["plan", "计划"],
+                  ["outline", "大纲"],
+                  ["draft", "草稿"],
+                  ["final", "最终稿"],
+                ] as Array<[ResearchEditorTab, string]>
+              ).map(([tab, label]) => (
+                <button
+                  className={editorTab === tab ? "active" : ""}
+                  key={tab}
+                  type="button"
+                  onClick={() => onEditorTabChange(tab)}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+            {editorTab === "draft" && workspace.sections.length > 0 && (
+              <div className="research-section-tabs">
+                {workspace.sections.map((section) => (
+                  <button
+                    className={section.id === selectedSectionId ? "active" : ""}
+                    key={section.id}
+                    type="button"
+                    onClick={() => onSectionSelect(section.id)}
+                  >
+                    {section.title}
+                  </button>
+                ))}
+              </div>
+            )}
+            {editorTab === "plan" && (
+              <textarea
+                className="research-main-editor structured"
+                aria-label="研究计划"
+                spellCheck={false}
+                value={planText}
+                onChange={(event) => onPlanTextChange(event.target.value)}
+                onSelect={captureSelection}
+              />
+            )}
+            {editorTab === "outline" && (
+              <textarea
+                className="research-main-editor structured"
+                aria-label="研究大纲"
+                spellCheck={false}
+                value={outlineText}
+                onChange={(event) => onOutlineTextChange(event.target.value)}
+                onSelect={captureSelection}
+              />
+            )}
+            {editorTab === "draft" && (
+              <>
+                <textarea
+                  className="research-main-editor"
+                  aria-label="研究草稿"
+                  value={workspace.draft}
+                  onChange={(event) =>
+                    onWorkspaceChange({
+                      ...workspace,
+                      draft: event.target.value,
+                    })
+                  }
+                  onSelect={captureSelection}
+                />
+                {selectedSection && (
+                  <div className="research-section-editor">
+                    <label>
+                      <span>指定章节</span>
+                      <input
+                        value={selectedSection.title}
+                        onChange={(event) =>
+                          updateSection({ title: event.target.value })
+                        }
+                      />
+                    </label>
+                    <textarea
+                      aria-label="指定章节内容"
+                      rows={5}
+                      value={selectedSection.content}
+                      onChange={(event) =>
+                        updateSection({ content: event.target.value })
+                      }
+                      onSelect={captureSelection}
+                    />
+                  </div>
+                )}
+              </>
+            )}
+            {editorTab === "final" && (
+              <textarea
+                className="research-main-editor"
+                aria-label="研究最终稿"
+                value={workspace.final}
+                onChange={(event) =>
+                  onWorkspaceChange({
+                    ...workspace,
+                    final: event.target.value,
+                  })
+                }
+                onSelect={captureSelection}
+              />
+            )}
+            <div className="research-operation-bar">
+              <span>
+                {selection
+                  ? `已选中 ${selection.length} 个字符`
+                  : "未选中文本时将作用于当前研究目标"}
+              </span>
+              <div>
+                <button
+                  className="button ghost"
+                  disabled={busy}
+                  type="button"
+                  onClick={() => onOperation("continue_research")}
+                >
+                  继续研究
+                </button>
+                <button
+                  className="button ghost"
+                  disabled={busy}
+                  type="button"
+                  onClick={() => onOperation("supplement_evidence")}
+                >
+                  补充证据
+                </button>
+                <button
+                  className="button ghost"
+                  disabled={busy}
+                  type="button"
+                  onClick={() => onOperation("audit_citations")}
+                >
+                  审计引用
+                </button>
+                <button
+                  className="button ghost"
+                  disabled={busy || !selectedSectionId}
+                  type="button"
+                  onClick={() => onOperation("regenerate_section")}
+                >
+                  重生成章节
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+      </section>
+
+      <aside className="panel research-evidence-panel">
+        <PanelHeader icon="evidence" title="执行、确认与证据" />
+        <div className="research-evidence-scroll">
+          {busy && (
+            <div className="research-running-notice">
+              <span className="status-dot online" />
+              Agent 正在执行，人工编辑仍可保存为新修订。
+            </div>
+          )}
+          {liveRun ? (
+            <AgentRunTracePanel
+              answerVisible
+              busyAction=""
+              error=""
+              response={liveRun}
+              onAction={onTraceAction}
+            />
+          ) : (
+            <div className="research-side-empty">
+              执行后将在这里显示 Trace。
+            </div>
+          )}
+          {(liveRun?.confirmations.length ?? 0) > 0 && (
+            <ResearchSideSection title="确认记录">
+              {liveRun?.confirmations.map((confirmation) => (
+                <article key={confirmation.id}>
+                  <strong>{confirmation.prompt}</strong>
+                  <small>{confirmationStatusLabel(confirmation.status)}</small>
+                </article>
+              ))}
+            </ResearchSideSection>
+          )}
+          {(liveRun?.toolCalls.length ?? 0) > 0 && (
+            <ResearchSideSection title="Tool 摘要">
+              {liveRun?.toolCalls.slice(0, 6).map((tool) => (
+                <article key={tool.id}>
+                  <strong>{tool.toolName}</strong>
+                  <small>
+                    {tool.status} · {tool.stdoutSummary ?? tool.actionSummary}
+                  </small>
+                </article>
+              ))}
+            </ResearchSideSection>
+          )}
+          {(workspace?.evidenceChunkIds.length ?? 0) > 0 && (
+            <ResearchSideSection title="引用证据">
+              <div className="research-evidence-chips">
+                {workspace?.evidenceChunkIds.map((chunkId) => (
+                  <code key={chunkId}>{chunkId}</code>
+                ))}
+              </div>
+            </ResearchSideSection>
+          )}
+          {(workspace?.conflicts.length ?? 0) > 0 && (
+            <ResearchSideSection title="来源冲突">
+              {workspace?.conflicts.map((conflict, index) => (
+                <article key={`conflict-${index}`}>
+                  <strong>
+                    {researchRecordLabel(conflict, `冲突 ${index + 1}`)}
+                  </strong>
+                  <small>{JSON.stringify(conflict)}</small>
+                </article>
+              ))}
+            </ResearchSideSection>
+          )}
+          {workspace && Object.keys(workspace.latestAudit).length > 0 && (
+            <ResearchSideSection title="引用审计">
+              <pre>{JSON.stringify(workspace.latestAudit, null, 2)}</pre>
+            </ResearchSideSection>
+          )}
+        </div>
+      </aside>
+    </>
+  );
+}
+
+function ResearchSideSection({
+  children,
+  title,
+}: {
+  children: React.ReactNode;
+  title: string;
+}): React.JSX.Element {
+  return (
+    <section className="research-side-section">
+      <h3>{title}</h3>
+      <div>{children}</div>
+    </section>
   );
 }
 
@@ -6223,6 +7236,83 @@ function formatDateTime(value: string): string {
         hour: "2-digit",
         minute: "2-digit",
       }).format(date);
+}
+
+function upsertResearchBrief(
+  briefs: ResearchBriefSummary[],
+  value: ResearchBriefSummary,
+): ResearchBriefSummary[] {
+  return [value, ...briefs.filter((brief) => brief.runId !== value.runId)].sort(
+    (left, right) => right.updatedAt.localeCompare(left.updatedAt),
+  );
+}
+
+function isResearchWorkspaceDirty(
+  saved: ResearchBriefWorkspace,
+  current: ResearchBriefWorkspace,
+  planText: string,
+  outlineText: string,
+  savedSourceIds: string[],
+  currentSourceIds: string[],
+): boolean {
+  return (
+    saved.title !== current.title ||
+    saved.goal !== current.goal ||
+    saved.draft !== current.draft ||
+    saved.final !== current.final ||
+    JSON.stringify(saved.sections) !== JSON.stringify(current.sections) ||
+    JSON.stringify(saved.plan, null, 2) !== planText ||
+    JSON.stringify(saved.outline, null, 2) !== outlineText ||
+    JSON.stringify(savedSourceIds) !== JSON.stringify(currentSourceIds)
+  );
+}
+
+function parseStructuredEditor(
+  value: string,
+  label: string,
+): Record<string, unknown> {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value || "{}");
+  } catch {
+    throw new Error(`${label}必须是有效 JSON`);
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error(`${label}必须是 JSON 对象`);
+  }
+  return parsed as Record<string, unknown>;
+}
+
+function researchActionLabel(action: ResearchBriefAction): string {
+  return {
+    continue_research: "继续研究",
+    supplement_evidence: "补充证据",
+    audit_citations: "引用审计",
+    regenerate_section: "章节重生成",
+  }[action];
+}
+
+function confirmationStatusLabel(
+  status: AgentRunConfirmationRecord["status"],
+): string {
+  return {
+    pending: "等待确认",
+    confirmed: "已确认",
+    rejected: "已拒绝",
+    cancelled: "已取消",
+  }[status];
+}
+
+function researchRecordLabel(
+  value: Record<string, unknown>,
+  fallback: string,
+): string {
+  for (const key of ["summary", "message", "reason", "claim"]) {
+    if (typeof value[key] === "string" && value[key]) {
+      return value[key] as string;
+    }
+  }
+  return fallback;
 }
 
 function upsertWritingProject(

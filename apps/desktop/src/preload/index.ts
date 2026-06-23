@@ -139,6 +139,21 @@ const api: DesktopApi = {
     decide: (request) =>
       ipcRenderer.invoke(IPC_CHANNELS.decideExternalCandidates, request),
   },
+  researchBriefs: {
+    list: (knowledgeBaseId) =>
+      ipcRenderer.invoke(IPC_CHANNELS.listResearchBriefs, knowledgeBaseId),
+    get: (runId) => ipcRenderer.invoke(IPC_CHANNELS.getResearchBrief, runId),
+    create: (request) =>
+      ipcRenderer.invoke(IPC_CHANNELS.createResearchBrief, request),
+    update: (request) =>
+      ipcRenderer.invoke(IPC_CHANNELS.updateResearchBrief, request),
+    operate: (request) =>
+      ipcRenderer.invoke(IPC_CHANNELS.operateResearchBrief, request),
+    resolvePending: (request) =>
+      ipcRenderer.invoke(IPC_CHANNELS.resolveResearchBriefPending, request),
+    exportMarkdown: (runId) =>
+      ipcRenderer.invoke(IPC_CHANNELS.exportResearchBriefMarkdown, runId),
+  },
   sources: {
     importFiles: (knowledgeBaseId) =>
       ipcRenderer.invoke(IPC_CHANNELS.importSourceFiles, knowledgeBaseId),

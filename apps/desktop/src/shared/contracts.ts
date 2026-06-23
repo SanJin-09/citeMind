@@ -1155,6 +1155,102 @@ export interface ExternalResearchDecisionRequest {
   decision: "import" | "reject";
 }
 
+export type ResearchBriefAction =
+  | "continue_research"
+  | "supplement_evidence"
+  | "audit_citations"
+  | "regenerate_section";
+
+export interface ResearchBriefSection {
+  id: string;
+  title: string;
+  content: string;
+  evidenceChunkIds: string[];
+  origin: "agent" | "user" | string;
+}
+
+export interface ResearchBriefWorkspace {
+  title: string;
+  goal: string;
+  plan: Record<string, unknown>;
+  outline: Record<string, unknown>;
+  draft: string;
+  final: string;
+  sections: ResearchBriefSection[];
+  latestAudit: Record<string, unknown>;
+  conflicts: Array<Record<string, unknown>>;
+  gaps: Array<Record<string, unknown>>;
+  evidenceChunkIds: string[];
+  relatedRunIds: string[];
+  lastEditOrigin: "agent" | "user" | string;
+  lastEditedAt?: string;
+}
+
+export interface ResearchBriefSummary {
+  runId: string;
+  knowledgeBaseId: string;
+  title: string;
+  goal: string;
+  status: AgentRunStatus;
+  sourceIds: string[];
+  userRevision: number;
+  agentRevision: number;
+  hasPendingAgentUpdate: boolean;
+  latestRunId: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ResearchBriefResponse {
+  brief: ResearchBriefSummary;
+  workspace: ResearchBriefWorkspace;
+  pendingAgentUpdate: Record<string, unknown>;
+  latestRun: AgentRunResponse;
+  externalCandidates: ExternalResearchCandidate[];
+}
+
+export interface ResearchBriefListResponse {
+  knowledgeBaseId: string;
+  briefs: ResearchBriefSummary[];
+}
+
+export interface CreateResearchBriefRequest {
+  knowledgeBaseId: string;
+  goal: string;
+  sourceIds?: string[];
+}
+
+export interface UpdateResearchBriefRequest {
+  runId: string;
+  expectedRevision: number;
+  sourceIds?: string[];
+  patch: Partial<
+    Pick<
+      ResearchBriefWorkspace,
+      "title" | "goal" | "plan" | "outline" | "draft" | "final" | "sections"
+    >
+  >;
+}
+
+export interface ResearchBriefOperationRequest {
+  runId: string;
+  action: ResearchBriefAction;
+  expectedRevision: number;
+  selectionText?: string | null;
+  sectionId?: string | null;
+}
+
+export interface ResolveResearchBriefPendingRequest {
+  runId: string;
+  decision: "apply" | "discard";
+  expectedRevision: number;
+}
+
+export interface ResearchBriefExportResult {
+  cancelled: boolean;
+  filePath?: string;
+}
+
 export interface CreateWritingProjectRequest {
   knowledgeBaseId: string;
   goal: string;
@@ -1351,6 +1447,23 @@ export interface DesktopApi {
       request: ExternalResearchDecisionRequest,
     ) => Promise<ExternalResearchResponse>;
   };
+  researchBriefs: {
+    list: (knowledgeBaseId: string) => Promise<ResearchBriefListResponse>;
+    get: (runId: string) => Promise<ResearchBriefResponse>;
+    create: (
+      request: CreateResearchBriefRequest,
+    ) => Promise<ResearchBriefResponse>;
+    update: (
+      request: UpdateResearchBriefRequest,
+    ) => Promise<ResearchBriefResponse>;
+    operate: (
+      request: ResearchBriefOperationRequest,
+    ) => Promise<ResearchBriefResponse>;
+    resolvePending: (
+      request: ResolveResearchBriefPendingRequest,
+    ) => Promise<ResearchBriefResponse>;
+    exportMarkdown: (runId: string) => Promise<ResearchBriefExportResult>;
+  };
   sources: {
     importFiles: (knowledgeBaseId: string) => Promise<ImportFilesResponse>;
     importWeb: (request: ImportWebRequest) => Promise<ImportSourceResult>;
@@ -1502,6 +1615,13 @@ export const IPC_CHANNELS = {
   searchExternalResearch: "citemind:external-research:search",
   listExternalCandidates: "citemind:external-research:candidates",
   decideExternalCandidates: "citemind:external-research:decide",
+  listResearchBriefs: "citemind:research-briefs:list",
+  getResearchBrief: "citemind:research-briefs:get",
+  createResearchBrief: "citemind:research-briefs:create",
+  updateResearchBrief: "citemind:research-briefs:update",
+  operateResearchBrief: "citemind:research-briefs:operate",
+  resolveResearchBriefPending: "citemind:research-briefs:resolve-pending",
+  exportResearchBriefMarkdown: "citemind:research-briefs:export-markdown",
   importSourceFiles: "citemind:sources:import-files",
   importWebSource: "citemind:sources:import-web",
   listParseChecks: "citemind:sources:parse-checks",
