@@ -27,6 +27,8 @@ import {
   type ConversationExportResult,
   type ConversationListResponse,
   type ConversationMessagesResponse,
+  type ConversationSubmitRequest,
+  type ConversationSubmitResponse,
   type CreateAgentRunRequest,
   type CreateBackgroundJobRequest,
   type DeleteSourceResponse,
@@ -950,6 +952,22 @@ export function registerIpcHandlers(workerManager: PythonWorkerManager): void {
       180_000,
     );
   });
+  ipcMain.handle(IPC_CHANNELS.submitConversation, async (_event, payload) => {
+    const request = normalizeConversationSubmitRequest(payload);
+    const summary = await seedStore.summary();
+    const apiKey = await seedStore.readApiKey();
+    return workerManager.call<ConversationSubmitResponse>(
+      "conversations.submit",
+      {
+        ...request,
+        chatModel: request.chatModel ?? summary.defaultChatModel,
+        apiKey,
+        baseUrl: summary.baseUrl,
+        embeddingModel: summary.defaultEmbeddingModel,
+      },
+      300_000,
+    );
+  });
   ipcMain.handle(IPC_CHANNELS.listWritingProjects, (_event, knowledgeBaseId) =>
     workerManager.call<WritingProjectListResponse>(
       "writing.list",
@@ -1452,6 +1470,33 @@ function normalizeConversationAnswerRequest(
       payload.maxOutputTokens,
       "最大输出 Token 数",
     ),
+  };
+}
+
+function normalizeConversationSubmitRequest(
+  payload: unknown,
+): ConversationSubmitRequest {
+  if (!isRecord(payload)) {
+    throw new Error("对话提交参数无效");
+  }
+  const request = normalizeConversationAnswerRequest(payload);
+  const routeHint = payload.routeHint;
+  if (
+    routeHint !== undefined &&
+    routeHint !== "auto" &&
+    routeHint !== "answer" &&
+    routeHint !== "research_brief"
+  ) {
+    throw new Error("对话路由提示无效");
+  }
+  return {
+    ...request,
+    routeHint,
+    currentBriefRunId: normalizeOptionalNullableString(
+      payload.currentBriefRunId,
+      "当前简报 ID",
+    ),
+    sourceIds: normalizeOptionalStringArray(payload.sourceIds, "资料范围"),
   };
 }
 

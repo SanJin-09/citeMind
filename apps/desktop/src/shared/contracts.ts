@@ -576,6 +576,12 @@ export interface AnswerCitation {
   };
 }
 
+export interface ConversationArtifact {
+  type: "research_brief";
+  runId: string;
+  display: "full" | "reference";
+}
+
 export interface ConversationMessageRecord {
   id: string;
   conversationId: string;
@@ -586,6 +592,7 @@ export interface ConversationMessageRecord {
   indexVersionId: string | null;
   createdAt: string;
   citations: AnswerCitation[];
+  artifact?: ConversationArtifact | Record<string, never>;
 }
 
 export interface ConversationListResponse {
@@ -606,6 +613,14 @@ export interface ConversationAnswerRequest {
   limit?: number;
   candidateLimit?: number;
   maxOutputTokens?: number;
+}
+
+export type ConversationRouteHint = "auto" | "answer" | "research_brief";
+
+export interface ConversationSubmitRequest extends ConversationAnswerRequest {
+  routeHint?: ConversationRouteHint;
+  currentBriefRunId?: string | null;
+  sourceIds?: string[];
 }
 
 export interface ConversationAnswerResponse {
@@ -640,6 +655,26 @@ export interface ConversationAnswerResponse {
   };
   events: Array<Record<string, unknown>>;
 }
+
+export type ConversationSubmitResponse =
+  | {
+      kind: "answer";
+      answer: ConversationAnswerResponse;
+    }
+  | {
+      kind: "research_brief_created" | "research_brief_updated";
+      conversation: ConversationRecord;
+      userMessage: ConversationMessageRecord;
+      assistantMessage: ConversationMessageRecord;
+      agentRunId: string | null;
+      brief: ResearchBriefResponse;
+    }
+  | {
+      kind: "clarification";
+      conversation: ConversationRecord;
+      userMessage: ConversationMessageRecord;
+      assistantMessage: ConversationMessageRecord;
+    };
 
 export interface ConversationExportResult {
   cancelled: boolean;
@@ -1159,7 +1194,8 @@ export type ResearchBriefAction =
   | "continue_research"
   | "supplement_evidence"
   | "audit_citations"
-  | "regenerate_section";
+  | "regenerate_section"
+  | "revise_document";
 
 export interface ResearchBriefSection {
   id: string;
@@ -1189,6 +1225,8 @@ export interface ResearchBriefWorkspace {
 export interface ResearchBriefSummary {
   runId: string;
   knowledgeBaseId: string;
+  conversationId: string | null;
+  assistantMessageId: string | null;
   title: string;
   goal: string;
   status: AgentRunStatus;
@@ -1207,6 +1245,7 @@ export interface ResearchBriefResponse {
   pendingAgentUpdate: Record<string, unknown>;
   latestRun: AgentRunResponse;
   externalCandidates: ExternalResearchCandidate[];
+  citations: AnswerCitation[];
 }
 
 export interface ResearchBriefListResponse {
@@ -1534,6 +1573,9 @@ export interface DesktopApi {
     answer: (
       request: ConversationAnswerRequest,
     ) => Promise<ConversationAnswerResponse>;
+    submit: (
+      request: ConversationSubmitRequest,
+    ) => Promise<ConversationSubmitResponse>;
     exportMarkdown: (
       conversationId: string,
       messageId?: string,
@@ -1653,6 +1695,7 @@ export const IPC_CHANNELS = {
   deleteConversation: "citemind:conversations:delete",
   setConversationModel: "citemind:conversations:set-model",
   answerConversation: "citemind:conversations:answer",
+  submitConversation: "citemind:conversations:submit",
   exportConversationMarkdown: "citemind:conversations:export-markdown",
   conversationUsageSummary: "citemind:conversations:usage-summary",
   listWritingProjects: "citemind:writing:list",

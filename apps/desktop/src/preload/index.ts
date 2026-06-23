@@ -241,6 +241,8 @@ const api: DesktopApi = {
       }),
     answer: (request) =>
       ipcRenderer.invoke(IPC_CHANNELS.answerConversation, request),
+    submit: (request) =>
+      ipcRenderer.invoke(IPC_CHANNELS.submitConversation, request),
     exportMarkdown: (conversationId, messageId) =>
       ipcRenderer.invoke(IPC_CHANNELS.exportConversationMarkdown, {
         conversationId,
