@@ -18,6 +18,7 @@ RESEARCH_ACTIONS = {
     "supplement_evidence",
     "audit_citations",
     "regenerate_section",
+    "revise_document",
 }
 EDITABLE_WORKSPACE_KEYS = {"title", "goal", "plan", "outline", "draft", "final", "sections"}
 
@@ -71,6 +72,7 @@ class ResearchBriefService:
         base_url: str = DEFAULT_ARK_BASE_URL,
         chat_model: str = DEFAULT_CHAT_MODEL,
         embedding_model: str = DEFAULT_EMBEDDING_MODEL,
+        conversation_id: str | None = None,
     ) -> dict[str, object]:
         response = await self.agent_skills.run_skill(
             knowledge_base_id=knowledge_base_id,
@@ -93,10 +95,11 @@ class ResearchBriefService:
                     research_user_revision = 0,
                     research_agent_revision = 1,
                     research_pending_update_json = '{}',
+                    conversation_id = ?,
                     updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
                 WHERE id = ?
                 """,
-                (_json(workspace), run_id),
+                (_json(workspace), conversation_id, run_id),
             )
             connection.commit()
         self.agent_runs.record_workspace_event(
@@ -126,7 +129,62 @@ class ResearchBriefService:
                 str(row["knowledge_base_id"]),
                 related_run_ids,
             ),
+            "citations": self._citations(related_run_ids),
         }
+
+    def bind_to_message(
+        self,
+        run_id: str,
+        *,
+        conversation_id: str,
+        assistant_message_id: str,
+    ) -> dict[str, object]:
+        row = self._workspace_row(run_id)
+        if row["conversation_id"] not in {None, conversation_id}:
+            raise ValueError("Research brief already belongs to another conversation")
+        with self.storage.database.connect() as connection:
+            message = connection.execute(
+                """
+                SELECT m.id, m.conversation_id, c.knowledge_base_id
+                FROM messages m
+                JOIN conversations c ON c.id = m.conversation_id
+                WHERE m.id = ?
+                """,
+                (assistant_message_id,),
+            ).fetchone()
+            if (
+                message is None
+                or str(message["conversation_id"]) != conversation_id
+                or str(message["knowledge_base_id"]) != str(row["knowledge_base_id"])
+            ):
+                raise ValueError("Artifact message does not match research brief scope")
+            connection.execute(
+                """
+                UPDATE agent_runs
+                SET conversation_id = ?,
+                    assistant_message_id = ?,
+                    updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                WHERE id = ?
+                """,
+                (conversation_id, assistant_message_id, run_id),
+            )
+            connection.commit()
+        return self.get(run_id)
+
+    def ensure_conversation_scope(
+        self,
+        run_id: str,
+        *,
+        knowledge_base_id: str,
+        conversation_id: str,
+    ) -> dict[str, object]:
+        row = self._workspace_row(run_id)
+        if (
+            str(row["knowledge_base_id"]) != knowledge_base_id
+            or str(row["conversation_id"] or "") != conversation_id
+        ):
+            raise ValueError("Current research brief does not belong to this conversation")
+        return self.get(run_id)
 
     def update(
         self,
@@ -242,6 +300,7 @@ class ResearchBriefService:
         )
         latest = self._workspace_row(run_id)
         related_run_id = _required_text(_mapping(result.get("run")).get("id"), "AgentRun id")
+        self._bind_related_run(related_run_id, anchor)
         if int(latest["research_user_revision"]) != expected_revision:
             self._save_pending_update(
                 run_id,
@@ -413,11 +472,29 @@ class ResearchBriefService:
             },
         )
 
+    def _bind_related_run(self, related_run_id: str, anchor: sqlite3.Row) -> None:
+        conversation_id = anchor["conversation_id"]
+        if conversation_id is None:
+            return
+        with self.storage.database.connect() as connection:
+            connection.execute(
+                """
+                UPDATE agent_runs
+                SET conversation_id = ?,
+                    updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                WHERE id = ?
+                """,
+                (conversation_id, related_run_id),
+            )
+            connection.commit()
+
     def _brief_summary(self, row: sqlite3.Row) -> dict[str, object]:
         workspace = _json_object(row["research_workspace_json"])
         return {
             "runId": str(row["id"]),
             "knowledgeBaseId": str(row["knowledge_base_id"]),
+            "conversationId": row["conversation_id"],
+            "assistantMessageId": row["assistant_message_id"],
             "title": str(workspace.get("title") or row["title"]),
             "goal": str(workspace.get("goal") or row["goal"]),
             "status": str(row["status"]),
@@ -471,6 +548,60 @@ class ResearchBriefService:
                 "errorMessage": row["error_message"],
                 "createdAt": str(row["created_at"]),
                 "updatedAt": str(row["updated_at"]),
+            }
+            for row in rows
+        ]
+
+    def _citations(self, related_run_ids: Sequence[str]) -> list[dict[str, object]]:
+        placeholders = ",".join("?" for _ in related_run_ids)
+        with self.storage.database.connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT
+                    arc.paragraph_index,
+                    arc.chunk_id,
+                    c.page_number,
+                    c.bounding_box_json,
+                    c.heading_path_json,
+                    c.anchor,
+                    c.original_text,
+                    c.normalized_text,
+                    sv.id AS source_version_id,
+                    s.id AS source_id,
+                    s.source_type,
+                    s.display_name,
+                    s.uri
+                FROM agent_run_citations arc
+                JOIN chunks c ON c.id = arc.chunk_id
+                JOIN source_versions sv ON sv.id = c.source_version_id
+                JOIN sources s ON s.id = sv.source_id
+                WHERE arc.run_id IN ({placeholders})
+                ORDER BY arc.paragraph_index, arc.chunk_id
+                """,
+                tuple(related_run_ids),
+            ).fetchall()
+        return [
+            {
+                "paragraphIndex": int(row["paragraph_index"]),
+                "chunkId": str(row["chunk_id"]),
+                "source": {
+                    "id": str(row["source_id"]),
+                    "type": str(row["source_type"]),
+                    "displayName": str(row["display_name"]),
+                    "uri": row["uri"],
+                    "versionId": str(row["source_version_id"]),
+                },
+                "location": {
+                    "pageNumber": row["page_number"],
+                    "boundingBox": _json_object(row["bounding_box_json"]) or None,
+                    "headingPath": _json_string_list(row["heading_path_json"]),
+                    "anchor": row["anchor"],
+                },
+                "text": {
+                    "preview": str(row["normalized_text"])[:220],
+                    "normalized": str(row["normalized_text"]),
+                    "original": str(row["original_text"]),
+                },
             }
             for row in rows
         ]
@@ -565,6 +696,10 @@ def _apply_proposal(
                 section["origin"] = "agent"
                 break
         updated["draft"] = _sections_markdown(sections)
+    elif action == "revise_document":
+        updated["draft"] = content
+        updated["final"] = content
+        sections = _sections_from_markdown(content)
     elif action in {"continue_research", "supplement_evidence"}:
         title = "继续研究" if action == "continue_research" else "补充证据"
         sections.append(
@@ -616,6 +751,9 @@ def _operation_goal(
         return f"为以下内容补充可引用证据：{selected or goal}"
     if action == "audit_citations":
         return f"审计以下研究简报内容的引用与来源冲突：{selected or goal}"
+    if action == "revise_document":
+        current = str(workspace.get("final") or workspace.get("draft") or "")
+        return f"根据用户要求修订整份研究简报：{selected or goal}\n\n当前简报：\n{current}"
     section = next(
         (item for item in _object_list(workspace.get("sections")) if item.get("id") == section_id),
         {},
@@ -710,6 +848,7 @@ def _action_label(action: str) -> str:
         "supplement_evidence": "补充证据",
         "audit_citations": "引用审计",
         "regenerate_section": "重新生成指定章节",
+        "revise_document": "修订整份简报",
     }.get(action, action)
 
 
@@ -764,6 +903,16 @@ def _json_string_list(value: object) -> list[str]:
     except json.JSONDecodeError:
         return []
     return [item for item in parsed if isinstance(item, str)] if isinstance(parsed, list) else []
+
+
+def _json_list(value: object) -> list[object]:
+    if not isinstance(value, str) or not value:
+        return []
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError:
+        return []
+    return parsed if isinstance(parsed, list) else []
 
 
 def _database_now(storage: StorageRuntime) -> str:

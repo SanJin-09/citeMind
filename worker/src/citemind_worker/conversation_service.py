@@ -107,6 +107,59 @@ class ConversationService:
             "messages": self._message_records(conversation_id),
         }
 
+    def ensure_conversation(
+        self,
+        *,
+        knowledge_base_id: str,
+        conversation_id: str | None,
+        title: str,
+        model_id: str,
+    ) -> dict[str, object]:
+        return self._ensure_conversation(
+            knowledge_base_id=knowledge_base_id,
+            conversation_id=conversation_id,
+            title=title,
+            model_id=model_id,
+        )
+
+    def append_message(
+        self,
+        *,
+        conversation_id: str,
+        role: str,
+        content: str,
+        model_id: str | None = None,
+        model_params: Mapping[str, object] | None = None,
+        index_version_id: str | None = None,
+        artifact: Mapping[str, object] | None = None,
+    ) -> dict[str, object]:
+        if role not in {"system", "user", "assistant"}:
+            raise ValueError("Unsupported conversation message role")
+        self._conversation_record(conversation_id)
+        message = self._insert_message(
+            conversation_id=conversation_id,
+            role=role,
+            content=content,
+            model_id=model_id,
+            model_params=dict(model_params or {}),
+            index_version_id=index_version_id,
+            artifact=artifact,
+        )
+        if model_id is None:
+            with self.storage.database.connect() as connection:
+                connection.execute(
+                    """
+                    UPDATE conversations
+                    SET updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                    WHERE id = ?
+                    """,
+                    (conversation_id,),
+                )
+                connection.commit()
+        else:
+            self._touch_conversation(conversation_id, model_id=model_id)
+        return message
+
     def delete(self, conversation_id: str) -> dict[str, object]:
         conversation = self._conversation_record(conversation_id)
         knowledge_base_id = str(conversation["knowledgeBaseId"])
@@ -983,6 +1036,7 @@ class ConversationService:
         model_id: str | None,
         model_params: dict[str, object],
         index_version_id: str | None,
+        artifact: Mapping[str, object] | None = None,
     ) -> dict[str, object]:
         message_id = f"message-{uuid4().hex}"
         with self.storage.database.connect() as connection:
@@ -990,9 +1044,9 @@ class ConversationService:
                 """
                 INSERT INTO messages(
                     id, conversation_id, role, content, model_id,
-                    model_params_json, index_version_id
+                    model_params_json, index_version_id, artifact_json
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     message_id,
@@ -1002,6 +1056,7 @@ class ConversationService:
                     model_id,
                     json.dumps(model_params, ensure_ascii=False),
                     index_version_id,
+                    json.dumps(dict(artifact or {}), ensure_ascii=False),
                 ),
             )
             connection.commit()
@@ -1073,7 +1128,7 @@ class ConversationService:
             row = connection.execute(
                 """
                 SELECT id, conversation_id, role, content, model_id,
-                       model_params_json, index_version_id, created_at
+                       model_params_json, index_version_id, artifact_json, created_at
                 FROM messages
                 WHERE id = ?
                 """,
@@ -1088,7 +1143,7 @@ class ConversationService:
             rows = connection.execute(
                 """
                 SELECT id, conversation_id, role, content, model_id,
-                       model_params_json, index_version_id, created_at
+                       model_params_json, index_version_id, artifact_json, created_at
                 FROM messages
                 WHERE conversation_id = ?
                 ORDER BY created_at ASC
@@ -1599,6 +1654,7 @@ def _message_record_from_row(
         "modelId": row["model_id"],
         "modelParams": _json_object(row["model_params_json"]),
         "indexVersionId": row["index_version_id"],
+        "artifact": _json_object(row["artifact_json"]),
         "createdAt": str(row["created_at"]),
         "citations": list(citations),
     }

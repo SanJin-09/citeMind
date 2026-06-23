@@ -1,3 +1,4 @@
+import json
 import sqlite3
 from pathlib import Path
 
@@ -59,7 +60,7 @@ def test_sqlite_migration_creates_required_tables_and_accepts_null_page_number(
 ) -> None:
     database = SqliteDatabase(AppDataPaths(tmp_path))
 
-    assert database.initialize() == 10
+    assert database.initialize() == 11
     status = database.status()
     assert status["fts5Enabled"] is True
     assert set(status["tables"]) >= REQUIRED_TABLES
@@ -140,7 +141,7 @@ def test_source_version_migration_marks_only_latest_existing_version_current(
         connection.commit()
 
     database = SqliteDatabase(paths)
-    assert database.initialize() == 10
+    assert database.initialize() == 11
 
     with database.connect() as connection:
         source = connection.execute(
@@ -161,6 +162,99 @@ def test_source_version_migration_marks_only_latest_existing_version_current(
         ("source-version-1", "superseded"),
         ("source-version-2", "current"),
     ]
+
+
+def test_v11_archives_legacy_research_brief_into_deterministic_conversation(
+    tmp_path: Path,
+) -> None:
+    paths = AppDataPaths(tmp_path)
+    paths.ensure()
+    with sqlite3.connect(paths.database) as connection:
+        connection.execute(
+            """
+            CREATE TABLE schema_migrations (
+                version INTEGER PRIMARY KEY,
+                name TEXT NOT NULL,
+                applied_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+            )
+            """
+        )
+        for migration in MigrationManager._load_migrations()[:10]:
+            connection.executescript(migration.sql)
+            connection.execute(
+                "INSERT INTO schema_migrations(version, name) VALUES (?, ?)",
+                (migration.version, migration.name),
+            )
+        connection.execute("INSERT INTO knowledge_bases(id, name) VALUES ('kb-legacy', '旧研究库')")
+        connection.execute(
+            """
+            INSERT INTO agent_runs(
+                id, knowledge_base_id, title, goal, skill_id, skill_version, status,
+                models_json, research_workspace_json, research_agent_revision
+            )
+            VALUES (
+                'run-legacy', 'kb-legacy', '旧标题', '梳理旧资料',
+                'research_brief', '1.0', 'completed', ?,
+                ?, 1
+            )
+            """,
+            (
+                json.dumps({"chat": "legacy-chat"}),
+                json.dumps(
+                    {
+                        "title": "历史研究简报",
+                        "goal": "梳理旧资料",
+                        "draft": "旧草稿",
+                        "final": "旧最终稿",
+                    },
+                    ensure_ascii=False,
+                ),
+            ),
+        )
+        connection.commit()
+
+    database = SqliteDatabase(paths)
+    assert database.initialize() == 11
+    assert database.initialize() == 11
+
+    with database.connect() as connection:
+        conversation = connection.execute(
+            """
+            SELECT id, title
+            FROM conversations
+            WHERE id = 'conversation-legacy-research-run-legacy'
+            """
+        ).fetchone()
+        messages = connection.execute(
+            """
+            SELECT id, role, artifact_json
+            FROM messages
+            WHERE conversation_id = 'conversation-legacy-research-run-legacy'
+            ORDER BY created_at, role DESC
+            """
+        ).fetchall()
+        run = connection.execute(
+            """
+            SELECT conversation_id, assistant_message_id
+            FROM agent_runs
+            WHERE id = 'run-legacy'
+            """
+        ).fetchone()
+
+    assert conversation is not None
+    assert conversation["title"] == "历史研究简报"
+    assert len(messages) == 2
+    artifact = json.loads(
+        next(row["artifact_json"] for row in messages if row["role"] == "assistant")
+    )
+    assert artifact == {
+        "type": "research_brief",
+        "runId": "run-legacy",
+        "display": "full",
+    }
+    assert run is not None
+    assert run["conversation_id"] == "conversation-legacy-research-run-legacy"
+    assert run["assistant_message_id"] == "message-legacy-research-assistant-run-legacy"
 
 
 def test_chinese_fts_search_and_index_version_isolation(tmp_path: Path) -> None:
@@ -229,7 +323,7 @@ def test_storage_runtime_initializes_all_backends(tmp_path: Path) -> None:
     summary = storage.health_summary()
     assert summary == {
         "ready": True,
-        "schemaVersion": 10,
+        "schemaVersion": 11,
         "fts5Enabled": True,
         "vectorDimension": 3,
     }

@@ -95,6 +95,7 @@ def test_research_brief_persists_manual_edits_and_exports(tmp_path: Path) -> Non
 
     assert created["brief"]["agentRevision"] == 1
     assert created["workspace"]["sections"]
+    assert created["citations"][0]["location"]["pageNumber"] is None
     assert service.list_briefs(knowledge_base_id)["briefs"][0]["runId"] == run_id
 
     updated = service.update(

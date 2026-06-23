@@ -7,6 +7,7 @@ from citemind_worker.agent_run_service import AgentRunService
 from citemind_worker.agent_skill_service import AgentSkillService
 from citemind_worker.background_job_service import BackgroundJobService
 from citemind_worker.conversation_service import ConversationService
+from citemind_worker.conversation_submit_service import ConversationSubmitService
 from citemind_worker.indexing_service import IndexingService
 from citemind_worker.knowledge_base_service import KnowledgeBaseService
 from citemind_worker.logging_config import configure_logging
@@ -43,6 +44,7 @@ def create_server(
     agent_run_service: AgentRunService | None = None,
     agent_skill_service: AgentSkillService | None = None,
     research_brief_service: ResearchBriefService | None = None,
+    conversation_submit_service: ConversationSubmitService | None = None,
     mcp_client_manager: McpClientManager | None = None,
     external_research_service: ExternalResearchService | None = None,
 ) -> RpcServer:
@@ -90,6 +92,11 @@ def create_server(
             agent_skills=agent_skills,
         )
         if storage is not None and agent_runs is not None and agent_skills is not None
+        else None
+    )
+    conversation_submit = conversation_submit_service or (
+        ConversationSubmitService(conversations, research_briefs)
+        if conversations is not None and research_briefs is not None
         else None
     )
     mcp_clients = mcp_client_manager or (
@@ -1425,6 +1432,35 @@ def create_server(
         except ValueError as error:
             raise RpcError(-32602, str(error)) from error
 
+    async def submit_conversation(params: JsonValue) -> JsonValue:
+        values = require_object_params(params)
+        service = _require_conversation_submit_service(conversation_submit)
+        try:
+            return await service.submit(
+                knowledge_base_id=_required_str(values, "knowledgeBaseId"),
+                query=_required_str(values, "query"),
+                conversation_id=_optional_nullable_str(values, "conversationId"),
+                route_hint=_optional_str(values, "routeHint", "auto"),
+                current_brief_run_id=_optional_nullable_str(
+                    values,
+                    "currentBriefRunId",
+                ),
+                source_ids=_optional_string_list(values, "sourceIds"),
+                api_key=_optional_nullable_str(values, "apiKey"),
+                base_url=_optional_str(values, "baseUrl", DEFAULT_ARK_BASE_URL),
+                chat_model=_optional_str(values, "chatModel", DEFAULT_CHAT_MODEL),
+                embedding_model=_optional_str(
+                    values,
+                    "embeddingModel",
+                    DEFAULT_EMBEDDING_MODEL,
+                ),
+                limit=_optional_int(values, "limit", 8),
+                candidate_limit=_optional_int(values, "candidateLimit", 24),
+                max_output_tokens=_optional_int(values, "maxOutputTokens", 1200),
+            )  # type: ignore[return-value]
+        except ValueError as error:
+            raise RpcError(-32602, str(error)) from error
+
     server.register("system.health", health)
     server.register("system.storage_status", storage_status)
     server.register("system.maintenance_status", maintenance_status)
@@ -1526,6 +1562,7 @@ def create_server(
     server.register("conversations.export_markdown", export_conversation)
     server.register("conversations.usage_summary", usage_summary)
     server.register("conversations.answer", answer_conversation)
+    server.register("conversations.submit", submit_conversation)
     return server
 
 
@@ -1595,6 +1632,14 @@ def _require_research_brief_service(
 ) -> ResearchBriefService:
     if service is None:
         raise RpcError(-32024, "Research brief service is not available")
+    return service
+
+
+def _require_conversation_submit_service(
+    service: ConversationSubmitService | None,
+) -> ConversationSubmitService:
+    if service is None:
+        raise RpcError(-32025, "Conversation submit service is not available")
     return service
 
 
