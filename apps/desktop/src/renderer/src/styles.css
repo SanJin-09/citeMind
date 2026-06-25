@@ -1191,13 +1191,39 @@ kbd {
   font-size: 12px;
 }
 
+.panel-search-clear {
+  display: grid;
+  flex: 0 0 auto;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 0;
+  border-radius: 7px;
+  color: #6d7871;
+  background: transparent;
+  place-items: center;
+}
+
+.panel-search-clear:hover {
+  color: #2d6f4d;
+  background: #e9f1ec;
+}
+
 .source-toolbar {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 10px;
   padding: 4px 14px 8px;
   color: #838c86;
   font-size: 11px;
+}
+
+.source-toolbar span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .text-button {
@@ -1497,6 +1523,29 @@ kbd {
   gap: 18px;
 }
 
+.chat-search-region {
+  width: min(720px, calc(100% - 48px));
+  margin: 0 auto 22px;
+}
+
+.chat-search-region.sticky {
+  position: sticky;
+  z-index: 5;
+  top: 0;
+  padding: 10px 0 12px;
+  background: linear-gradient(
+    180deg,
+    #f7f8f5 0%,
+    rgb(247 248 245 / 96%) 72%,
+    rgb(247 248 245 / 0%) 100%
+  );
+}
+
+.chat-search-region .search-results-panel {
+  width: 100%;
+  margin: 0;
+}
+
 .search-results-panel {
   width: min(720px, calc(100% - 48px));
   margin: 0 auto 22px;
@@ -1517,6 +1566,13 @@ kbd {
 .search-results-heading small {
   color: #8c958f;
   font-size: 10px;
+}
+
+.search-results-actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 10px;
 }
 
 .search-results-heading strong {

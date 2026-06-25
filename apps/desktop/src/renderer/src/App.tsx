@@ -303,6 +303,7 @@ function App(): React.JSX.Element {
   const [activeKnowledgeBaseId, setActiveKnowledgeBaseId] = useState("");
   const [sources, setSources] =
     useState<KnowledgeBaseSource[]>(FALLBACK_SOURCES);
+  const [sourceFilter, setSourceFilter] = useState("");
   const [selectedSourceIds, setSelectedSourceIds] = useState(
     FALLBACK_SOURCES.map((source) => source.id),
   );
@@ -981,6 +982,31 @@ function App(): React.JSX.Element {
     activeKnowledgeBase?.summary ?? emptyKnowledgeBaseSummary();
   const focusedSourceId = evidenceSourceId(selectedEvidence);
   const hasStartedConversation = messages.length > 0 || chatBusy;
+  const hasSearchOutput =
+    searchBusy || Boolean(searchError) || searchResults.length > 0;
+  const activeSearchQuery = lastSearchQuery || searchQuery;
+  const normalizedSourceFilter = sourceFilter.trim().toLowerCase();
+  const hasSourceFilter = normalizedSourceFilter.length > 0;
+  const visibleSources = hasSourceFilter
+    ? sources.filter((source) =>
+        [
+          source.displayName,
+          source.uri ?? "",
+          sourceTypeLabel(source.sourceType),
+          sourceStatusLabel(source.status),
+          source.latestVersionStatus
+            ? sourceStatusLabel(source.latestVersionStatus)
+            : "",
+          source.expiryStatus !== "active"
+            ? expiryStatusLabel(source.expiryStatus)
+            : "",
+          source.chunkCount > 0 ? `${source.chunkCount} 块` : "",
+        ]
+          .join(" ")
+          .toLowerCase()
+          .includes(normalizedSourceFilter),
+      )
+    : sources;
   const focusedResearchBrief = researchArtifacts[focusedResearchRunId] ?? null;
   const researchDirty =
     researchBrief && researchWorkspace
@@ -1397,6 +1423,7 @@ function App(): React.JSX.Element {
     setKnowledgeBaseMenuOpen(false);
     setConversationMenuOpen(false);
     setKnowledgeBaseError("");
+    setSourceFilter("");
     resetConversationWorkspace();
     setSearchResults([]);
     setLastSearchQuery("");
@@ -2723,21 +2750,42 @@ function App(): React.JSX.Element {
               <Icon name="sparkle" size={16} />
               寻找外部资料
             </button>
-            <label className="panel-search">
+            <div className="panel-search">
               <Icon name="search" size={16} />
-              <input aria-label="筛选来源" placeholder="筛选来源" />
-            </label>
+              <input
+                aria-label="筛选来源"
+                placeholder="筛选来源"
+                value={sourceFilter}
+                onChange={(event) => setSourceFilter(event.target.value)}
+              />
+              {hasSourceFilter && (
+                <button
+                  aria-label="清除来源筛选"
+                  className="panel-search-clear"
+                  title="清除筛选"
+                  type="button"
+                  onClick={() => setSourceFilter("")}
+                >
+                  <Icon name="close" size={13} />
+                </button>
+              )}
+            </div>
           </div>
           <div className="source-toolbar">
-            <span>{selectedCount} 个来源已用于对话</span>
+            <span>
+              {hasSourceFilter
+                ? `${visibleSources.length}/${sources.length} 个来源匹配，${selectedCount} 个用于对话`
+                : `${selectedCount} 个来源已用于对话`}
+            </span>
             <button
               className="text-button"
+              disabled={visibleSources.length === 0}
               type="button"
               onClick={() =>
-                setSelectedSourceIds(sources.map((source) => source.id))
+                setSelectedSourceIds(visibleSources.map((source) => source.id))
               }
             >
-              全选
+              {hasSourceFilter ? "全选结果" : "全选"}
             </button>
           </div>
           {knowledgeBaseError && (
@@ -2745,57 +2793,64 @@ function App(): React.JSX.Element {
           )}
           <div className="source-list">
             {sources.length > 0 ? (
-              sources.map((source) => (
-                <article
-                  className={`source-item ${
-                    selectedSourceIds.includes(source.id) ? "selected" : ""
-                  } ${focusedSourceId === source.id ? "focused" : ""}`}
-                  id={`source-${source.id}`}
-                  key={source.id}
-                >
-                  <button
-                    className="source-main"
-                    type="button"
-                    onClick={() => toggleSource(source.id)}
+              visibleSources.length > 0 ? (
+                visibleSources.map((source) => (
+                  <article
+                    className={`source-item ${
+                      selectedSourceIds.includes(source.id) ? "selected" : ""
+                    } ${focusedSourceId === source.id ? "focused" : ""}`}
+                    id={`source-${source.id}`}
+                    key={source.id}
                   >
-                    <span className={`source-icon ${sourceTone(source)}`}>
-                      <Icon name="document" size={17} />
-                    </span>
-                    <span className="source-copy">
-                      <strong>{source.displayName}</strong>
-                      <small>{sourceMeta(source)}</small>
-                    </span>
-                    <span className="source-check">
-                      {selectedSourceIds.includes(source.id) && (
-                        <Icon name="check" size={14} />
-                      )}
-                    </span>
-                  </button>
-                  <button
-                    aria-label={`维护来源版本 ${source.displayName}`}
-                    className="source-maintenance"
-                    disabled={sourceMaintenanceBusy}
-                    title="版本与时效维护"
-                    type="button"
-                    onClick={() => void openSourceMaintenance(source)}
-                  >
-                    <Icon name="refresh" size={15} />
-                  </button>
-                  <button
-                    aria-label={`删除来源 ${source.displayName}`}
-                    className="source-delete"
-                    disabled={Boolean(sourceDeleteBusyId)}
-                    title="删除来源"
-                    type="button"
-                    onClick={() => {
-                      setConfirmError("");
-                      setConfirmAction({ kind: "delete-source", source });
-                    }}
-                  >
-                    <Icon name="trash" size={15} />
-                  </button>
-                </article>
-              ))
+                    <button
+                      className="source-main"
+                      type="button"
+                      onClick={() => toggleSource(source.id)}
+                    >
+                      <span className={`source-icon ${sourceTone(source)}`}>
+                        <Icon name="document" size={17} />
+                      </span>
+                      <span className="source-copy">
+                        <strong>{source.displayName}</strong>
+                        <small>{sourceMeta(source)}</small>
+                      </span>
+                      <span className="source-check">
+                        {selectedSourceIds.includes(source.id) && (
+                          <Icon name="check" size={14} />
+                        )}
+                      </span>
+                    </button>
+                    <button
+                      aria-label={`维护来源版本 ${source.displayName}`}
+                      className="source-maintenance"
+                      disabled={sourceMaintenanceBusy}
+                      title="版本与时效维护"
+                      type="button"
+                      onClick={() => void openSourceMaintenance(source)}
+                    >
+                      <Icon name="refresh" size={15} />
+                    </button>
+                    <button
+                      aria-label={`删除来源 ${source.displayName}`}
+                      className="source-delete"
+                      disabled={Boolean(sourceDeleteBusyId)}
+                      title="删除来源"
+                      type="button"
+                      onClick={() => {
+                        setConfirmError("");
+                        setConfirmAction({ kind: "delete-source", source });
+                      }}
+                    >
+                      <Icon name="trash" size={15} />
+                    </button>
+                  </article>
+                ))
+              ) : (
+                <div className="empty-source-state">
+                  <strong>没有匹配来源</strong>
+                  <span>换个关键词，或清除筛选后查看全部来源。</span>
+                </div>
+              )
             ) : (
               <div className="empty-source-state">
                 <strong>还没有来源</strong>
@@ -2883,17 +2938,32 @@ function App(): React.JSX.Element {
               </div>
             )}
 
-            {!hasStartedConversation &&
-              (searchBusy || searchError || searchResults.length > 0) && (
+            {hasSearchOutput && (
+              <div
+                className={`chat-search-region ${
+                  hasStartedConversation ? "sticky" : ""
+                }`}
+              >
                 <SearchResultsPanel
                   busy={searchBusy}
                   error={searchError}
-                  query={lastSearchQuery || searchQuery}
+                  query={activeSearchQuery}
                   results={searchResults}
                   selectedChunkId={selectedEvidenceChunkId(selectedEvidence)}
+                  onClear={() => {
+                    setSearchQuery("");
+                    setLastSearchQuery("");
+                    setSearchResults([]);
+                    setSearchError("");
+                    setSelectedEvidence((value) =>
+                      value?.kind === "search" ? null : value,
+                    );
+                    setSourceJumpNotice("");
+                  }}
                   onSelect={selectSearchResult}
                 />
-              )}
+              </div>
+            )}
 
             {chatError && (
               <div className="message-flow">
@@ -5380,6 +5450,7 @@ function SearchResultsPanel({
   query,
   results,
   selectedChunkId,
+  onClear,
   onSelect,
 }: {
   busy: boolean;
@@ -5387,16 +5458,31 @@ function SearchResultsPanel({
   query: string;
   results: HybridSearchResult[];
   selectedChunkId?: string;
+  onClear: () => void;
   onSelect: (result: HybridSearchResult) => void;
 }): React.JSX.Element {
   return (
-    <section className="search-results-panel" aria-label="资料搜索结果">
+    <section
+      className="search-results-panel"
+      aria-label="资料搜索结果"
+      aria-live="polite"
+    >
       <div className="search-results-heading">
         <div>
           <span className="section-label">资料搜索</span>
           <strong>{query ? `“${query}”` : "关键词 / 自然语言检索"}</strong>
         </div>
-        <small>FTS5 + 向量混合召回</small>
+        <div className="search-results-actions">
+          <small>FTS5 + 向量混合召回</small>
+          <button
+            className="text-button"
+            disabled={busy}
+            type="button"
+            onClick={onClear}
+          >
+            清除
+          </button>
+        </div>
       </div>
       {busy && <p className="search-status">正在检索当前知识库...</p>}
       {error && <div className="inline-error">{error}</div>}
