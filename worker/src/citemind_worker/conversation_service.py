@@ -24,6 +24,8 @@ from citemind_worker.storage import StorageRuntime
 DEFAULT_REFUSAL = "当前知识库中没有足够证据回答这个问题。"
 DEFAULT_MAX_OUTPUT_TOKENS = 2400
 HISTORY_SUMMARY_LINE_CHARS = 240
+DENSE_PARAGRAPH_MIN_CHARS = 180
+MAX_AUTO_PARAGRAPHS = 6
 PLAIN_CITATION_PATTERN = re.compile(r"\[([A-Za-z0-9_.:-]+)\]")
 
 ANSWER_SCHEMA: dict[str, object] = {
@@ -517,7 +519,10 @@ class ConversationService:
                     status="completed",
                     stdout_summary=f"生成候选完成：{generation_meta['mode']}",
                 )
-                answer = _normalize_answer(raw_answer)
+                answer = _shape_answer_paragraphs(
+                    _normalize_answer(raw_answer),
+                    retrieval=retrieval,
+                )
                 self._record_trace_stage(
                     trace_run_id,
                     stage="citation_validation",
@@ -898,6 +903,7 @@ class ConversationService:
                     "valid": validation["valid"],
                     "invalidCitations": validation["invalidCitations"],
                 },
+                "answerParagraphs": paragraphs,
                 "historyContext": history_context,
             },
             index_version_id=_index_version_id(retrieval),
@@ -1255,7 +1261,11 @@ def _answer_prompt(
         "\n只允许使用候选证据回答用户问题，不得使用外部知识或自行补全事实。"
         "\n如果候选证据不足，必须将 evidence_sufficient 设为 false，"
         "并用一句话说明当前知识库没有足够证据。"
-        "\n每个回答段落都必须给出 evidence_chunk_ids，且只能引用候选证据中的 chunk_id。"
+        "\n必须把不同要点拆成多个 paragraphs 数组项；"
+        "不要把多条事实、多个追问或多个建议塞进同一个段落。"
+        "\n每个段落建议 1-3 句，按自然阅读顺序组织。"
+        "\n每个回答段落都必须给出支撑该段内容的 evidence_chunk_ids，"
+        "且只能引用候选证据中的 chunk_id。"
         "\n输出必须符合 JSON Schema，不要输出 Markdown 或额外解释。"
         f"{retry_text}"
         f"\n\n对话历史：\n{_history_prompt(history_context)}"
@@ -1477,6 +1487,7 @@ def _plain_answer_prompt(
         "\n如果候选证据不足，只输出："
         f"{DEFAULT_REFUSAL}"
         "\n如果可以回答，请输出自然语言段落，不要输出 JSON、Markdown 表格或额外说明。"
+        "\n不同要点之间必须空一行分段；不要输出一整段密集长文本。"
         "\n每个事实段落末尾必须使用方括号引用至少一个候选 chunk_id，例如 [chunk-xxx]。"
         "\n引用只能来自候选证据中的 chunk_id。"
         f"{retry_text}"
@@ -1499,9 +1510,12 @@ def _normalize_answer(raw: dict[str, object]) -> dict[str, object]:
             if not isinstance(text, str):
                 continue
             evidence_ids = evidence if isinstance(evidence, list) else []
+            clean_text = _clean_model_text(text)
+            if not clean_text:
+                continue
             paragraphs.append(
                 {
-                    "text": " ".join(text.split()),
+                    "text": clean_text,
                     "evidenceChunkIds": [
                         chunk_id
                         for chunk_id in evidence_ids
@@ -1517,6 +1531,243 @@ def _normalize_answer(raw: dict[str, object]) -> dict[str, object]:
         "refusalReason": refusal_reason if isinstance(refusal_reason, str) else None,
         "paragraphs": paragraphs,
     }
+
+
+def _shape_answer_paragraphs(
+    answer: dict[str, object],
+    *,
+    retrieval: dict[str, object],
+) -> dict[str, object]:
+    raw_paragraphs = answer.get("paragraphs")
+    if not isinstance(raw_paragraphs, list):
+        return answer
+    chunk_texts = _retrieval_text_by_chunk_id(retrieval)
+    shaped: list[dict[str, object]] = []
+    for paragraph in raw_paragraphs:
+        if not isinstance(paragraph, dict):
+            continue
+        text = paragraph.get("text")
+        raw_evidence_ids = paragraph.get("evidenceChunkIds")
+        if not isinstance(text, str):
+            continue
+        evidence_ids = (
+            [item for item in raw_evidence_ids if isinstance(item, str) and item]
+            if isinstance(raw_evidence_ids, list)
+            else []
+        )
+        shaped.extend(_shape_single_answer_paragraph(text, evidence_ids, chunk_texts))
+    return {
+        **answer,
+        "paragraphs": shaped,
+    }
+
+
+def _shape_single_answer_paragraph(
+    text: str,
+    evidence_ids: Sequence[str],
+    chunk_texts: Mapping[str, str],
+) -> list[dict[str, object]]:
+    clean_text = _clean_inline_text(text)
+    if not clean_text:
+        return []
+
+    explicit_blocks = _explicit_text_blocks(text)
+    if len(explicit_blocks) > 1:
+        return _assign_evidence_to_segments(explicit_blocks, evidence_ids, chunk_texts)
+
+    sentences = _sentence_units(clean_text)
+    unique_evidence_ids = list(dict.fromkeys(evidence_ids))
+    should_split = len(clean_text) >= DENSE_PARAGRAPH_MIN_CHARS or (
+        len(unique_evidence_ids) > 1 and len(sentences) >= len(unique_evidence_ids)
+    )
+    if len(sentences) < 2 or not should_split:
+        return [{"text": clean_text, "evidenceChunkIds": list(dict.fromkeys(evidence_ids))}]
+
+    target_count = _auto_paragraph_count(clean_text, sentences, evidence_ids)
+    if target_count < 2:
+        return [{"text": clean_text, "evidenceChunkIds": list(dict.fromkeys(evidence_ids))}]
+    segments = _group_sentence_units(sentences, target_count)
+    return _assign_evidence_to_segments(segments, evidence_ids, chunk_texts)
+
+
+def _clean_model_text(text: str) -> str:
+    normalized = text.replace("\r\n", "\n").replace("\r", "\n").strip()
+    normalized = re.sub(r"[ \t\f\v]+", " ", normalized)
+    normalized = re.sub(r" *\n{2,} *", "\n\n", normalized)
+    normalized = re.sub(r" *\n *", "\n", normalized)
+    return normalized
+
+
+def _clean_inline_text(text: str) -> str:
+    normalized = " ".join(text.replace("\n", " ").split())
+    normalized = re.sub(r"([。！？!?；;])\s+([\u4e00-\u9fff])", r"\1\2", normalized)
+    return normalized
+
+
+def _explicit_text_blocks(text: str) -> list[str]:
+    clean_text = _clean_model_text(text)
+    if "\n" not in clean_text:
+        return []
+    blocks = re.split(r"\n+", clean_text)
+    return [_clean_inline_text(block) for block in blocks if block.strip()]
+
+
+def _sentence_units(text: str) -> list[str]:
+    units = re.findall(r"[^。！？!?；;]+[。！？!?；;]?", text)
+    return [_clean_inline_text(unit) for unit in units if unit.strip()]
+
+
+def _auto_paragraph_count(
+    text: str,
+    sentences: Sequence[str],
+    evidence_ids: Sequence[str],
+) -> int:
+    length_target = max(2, math.ceil(len(text) / DENSE_PARAGRAPH_MIN_CHARS))
+    citation_target = len(list(dict.fromkeys(evidence_ids))) if evidence_ids else 1
+    return min(
+        len(sentences),
+        MAX_AUTO_PARAGRAPHS,
+        max(length_target, citation_target),
+    )
+
+
+def _group_sentence_units(sentences: Sequence[str], target_count: int) -> list[str]:
+    if target_count <= 1 or len(sentences) <= 1:
+        return [_clean_inline_text(" ".join(sentences))]
+    groups: list[str] = []
+    total = len(sentences)
+    for group_index in range(target_count):
+        start = math.floor(group_index * total / target_count)
+        end = math.floor((group_index + 1) * total / target_count)
+        if group_index == target_count - 1:
+            end = total
+        if end <= start:
+            end = start + 1
+        group = _clean_inline_text(" ".join(sentences[start:end]))
+        if group:
+            groups.append(group)
+    return groups
+
+
+def _assign_evidence_to_segments(
+    segments: Sequence[str],
+    evidence_ids: Sequence[str],
+    chunk_texts: Mapping[str, str],
+) -> list[dict[str, object]]:
+    clean_segments = [_clean_inline_text(segment) for segment in segments if segment.strip()]
+    unique_evidence_ids = list(dict.fromkeys(evidence_ids))
+    if not clean_segments:
+        return []
+    if not unique_evidence_ids:
+        return [{"text": segment, "evidenceChunkIds": []} for segment in clean_segments]
+
+    assigned: list[list[str]] = [[] for _segment in clean_segments]
+    for evidence_index, chunk_id in enumerate(unique_evidence_ids):
+        segment_index = _best_evidence_segment(chunk_id, clean_segments, chunk_texts)
+        if segment_index is None:
+            segment_index = _proportional_index(
+                evidence_index,
+                len(unique_evidence_ids),
+                len(clean_segments),
+            )
+        if chunk_id not in assigned[segment_index]:
+            assigned[segment_index].append(chunk_id)
+
+    for segment_index, segment_evidence_ids in enumerate(assigned):
+        if segment_evidence_ids:
+            continue
+        donor_index = _donor_segment_index(assigned, segment_index)
+        if donor_index is not None:
+            segment_evidence_ids.append(assigned[donor_index].pop())
+            continue
+        fallback_index = _proportional_index(
+            segment_index,
+            len(clean_segments),
+            len(unique_evidence_ids),
+        )
+        segment_evidence_ids.append(unique_evidence_ids[fallback_index])
+
+    return [
+        {
+            "text": segment,
+            "evidenceChunkIds": segment_evidence_ids,
+        }
+        for segment, segment_evidence_ids in zip(clean_segments, assigned, strict=True)
+    ]
+
+
+def _best_evidence_segment(
+    chunk_id: str,
+    segments: Sequence[str],
+    chunk_texts: Mapping[str, str],
+) -> int | None:
+    evidence_text = chunk_texts.get(chunk_id, "")
+    if not evidence_text:
+        return None
+    scores = [_text_overlap_score(segment, evidence_text) for segment in segments]
+    best_score = max(scores, default=0.0)
+    if best_score <= 0:
+        return None
+    return scores.index(best_score)
+
+
+def _donor_segment_index(assigned: Sequence[Sequence[str]], target_index: int) -> int | None:
+    donors = [
+        (abs(index - target_index), index)
+        for index, evidence_ids in enumerate(assigned)
+        if len(evidence_ids) > 1
+    ]
+    if not donors:
+        return None
+    return min(donors)[1]
+
+
+def _text_overlap_score(left: str, right: str) -> float:
+    left_terms = _text_terms(left)
+    right_terms = _text_terms(right)
+    if not left_terms or not right_terms:
+        return 0.0
+    return len(left_terms & right_terms) / max(1, min(len(left_terms), len(right_terms)))
+
+
+def _text_terms(text: str) -> set[str]:
+    normalized = text.lower()
+    terms = {
+        token
+        for token in re.findall(r"[a-z0-9_+-]{2,}|[\u4e00-\u9fff]", normalized)
+        if token not in _CJK_STOP_TERMS
+    }
+    return terms
+
+
+_CJK_STOP_TERMS = set("的一是在了和与及或并把将为以于中上下面这那其从等到")
+
+
+def _proportional_index(index: int, source_count: int, target_count: int) -> int:
+    if target_count <= 1 or source_count <= 1:
+        return 0
+    return min(target_count - 1, math.floor(index * target_count / source_count))
+
+
+def _retrieval_text_by_chunk_id(retrieval: dict[str, object]) -> dict[str, str]:
+    results = retrieval.get("results")
+    if not isinstance(results, list):
+        return {}
+    chunk_texts: dict[str, str] = {}
+    for item in results:
+        if not isinstance(item, dict) or not isinstance(item.get("chunkId"), str):
+            continue
+        text = item.get("text")
+        text_record = text if isinstance(text, dict) else {}
+        value = (
+            text_record.get("normalized")
+            or text_record.get("original")
+            or text_record.get("preview")
+            or ""
+        )
+        if isinstance(value, str) and value.strip():
+            chunk_texts[str(item["chunkId"])] = value
+    return chunk_texts
 
 
 def _paragraphs_for_validation(answer: dict[str, object]) -> list[dict[str, object]]:

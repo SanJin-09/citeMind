@@ -2037,8 +2037,8 @@ kbd {
 
 .answer-paragraphs {
   display: grid;
-  gap: 12px;
-  margin-top: 10px;
+  gap: 14px;
+  margin-top: 12px;
 }
 
 .answer-paragraph {
@@ -2050,7 +2050,8 @@ kbd {
 }
 
 .answer-paragraph p {
-  margin: 0 0 10px;
+  margin: 0;
+  line-height: 1.85;
 }
 
 .inline-citation-list {

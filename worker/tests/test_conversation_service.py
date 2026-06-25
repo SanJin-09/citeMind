@@ -171,6 +171,65 @@ def test_conversation_answer_persists_messages_and_valid_citations(tmp_path: Pat
     assert messages["messages"][1]["citations"][0]["chunkId"] == "chunk-pdf-valid"
 
 
+def test_conversation_splits_dense_answer_and_persists_paragraph_citations(
+    tmp_path: Path,
+) -> None:
+    storage = StorageRuntime(tmp_path, vector_dimension=3)
+    storage.initialize()
+    knowledge_base_id = _seed_answer_fixture(storage)
+    gateway = FakeAnswerGateway(
+        [
+            {
+                "evidence_sufficient": True,
+                "refusal_reason": None,
+                "paragraphs": [
+                    {
+                        "text": (
+                            "Alpha 第一项结论来自当前 PDF 证据，说明候选人的核心经历、"
+                            "项目职责和可追问方向，回答时应先聚焦最有代表性的项目背景，"
+                            "再把问题落到具体技术取舍与结果验证上。"
+                            "Alpha 第二项结论同样来自当前 PDF 证据，说明后续追问可以围绕"
+                            "性能优化、工程协作、异常处理和业务影响展开，避免把所有问题"
+                            "堆在一个难以阅读的密集段落里。"
+                        ),
+                        "evidence_chunk_ids": ["chunk-pdf-valid", "chunk-pdf-valid-2"],
+                    }
+                ],
+            }
+        ]
+    )
+
+    response = asyncio.run(
+        ConversationService(
+            storage,
+            retrieval=HybridRetrievalService(storage, embedder=QueryEmbedder()),
+            gateway_factory=lambda _key, _base, _embedding: gateway,
+        ).answer(
+            knowledge_base_id=knowledge_base_id,
+            query="Alpha 面试怎么追问？",
+            api_key="ark-test",
+            chat_model="doubao-test-chat",
+            embedding_model="doubao-test-embedding",
+        )
+    )
+
+    assert response["answer"]["evidenceSufficient"] is True
+    assert len(response["answer"]["paragraphs"]) == 2
+    assert "\n\n" in response["content"]
+    assert [citation["paragraphIndex"] for citation in response["citations"]] == [0, 1]
+    assert [citation["chunkId"] for citation in response["citations"]] == [
+        "chunk-pdf-valid",
+        "chunk-pdf-valid-2",
+    ]
+
+    messages = ConversationService(storage).messages(str(response["conversation"]["id"]))
+    assistant = messages["messages"][1]
+    stored_paragraphs = assistant["modelParams"]["answerParagraphs"]
+    assert isinstance(stored_paragraphs, list)
+    assert len(stored_paragraphs) == 2
+    assert assistant["citations"][1]["paragraphIndex"] == 1
+
+
 def test_conversation_answer_emits_agent_run_trace_events(tmp_path: Path) -> None:
     emitted: list[dict[str, object]] = []
     storage = StorageRuntime(tmp_path, vector_dimension=3)
@@ -639,6 +698,19 @@ def _seed_answer_fixture(storage: StorageRuntime) -> str:
                     "hash-alpha",
                 ),
                 (
+                    "chunk-pdf-valid-2",
+                    knowledge_base_id,
+                    "version-pdf",
+                    "index-current",
+                    6,
+                    json.dumps({"x": 3, "y": 4, "width": 5, "height": 6}),
+                    json.dumps(["Alpha", "Follow up"]),
+                    "pdf-follow-up",
+                    "Alpha follow up evidence for conversation",
+                    "Alpha follow up evidence for conversation",
+                    "hash-alpha-follow-up",
+                ),
+                (
                     "chunk-noncandidate",
                     knowledge_base_id,
                     "version-pdf",
@@ -687,8 +759,20 @@ def _seed_answer_fixture(storage: StorageRuntime) -> str:
         index_version_id="index-current",
         text="Alpha evidence for conversation",
     )
+    FullTextIndex(storage.database).upsert(
+        chunk_id="chunk-pdf-valid-2",
+        knowledge_base_id=knowledge_base_id,
+        index_version_id="index-current",
+        text="Alpha follow up evidence for conversation",
+    )
     storage.vector_index.add(
         chunk_id="chunk-pdf-valid",
+        knowledge_base_id=knowledge_base_id,
+        index_version_id="index-current",
+        vector=[1.0, 0.0, 0.0],
+    )
+    storage.vector_index.add(
+        chunk_id="chunk-pdf-valid-2",
         knowledge_base_id=knowledge_base_id,
         index_version_id="index-current",
         vector=[1.0, 0.0, 0.0],

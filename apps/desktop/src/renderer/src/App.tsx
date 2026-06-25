@@ -5546,18 +5546,19 @@ function AssistantAnswerMessage({
   }
 
   const citations = response?.citations ?? message.citations;
-  const paragraphs = response
-    ? response.answer.paragraphs
-    : message.content
-        .split(/\n{2,}/)
-        .filter(Boolean)
-        .map((text, index) => ({
-          index,
-          text,
-          evidenceChunkIds: citations
-            .filter((citation) => citation.paragraphIndex === index)
-            .map((citation) => citation.chunkId),
-        }));
+  const paragraphs =
+    response?.answer.paragraphs ??
+    answerParagraphsFromMessage(message) ??
+    message.content
+      .split(/\n{2,}/)
+      .filter(Boolean)
+      .map((text, index) => ({
+        index,
+        text,
+        evidenceChunkIds: citations
+          .filter((citation) => citation.paragraphIndex === index)
+          .map((citation) => citation.chunkId),
+      }));
   const evidenceSufficient = response
     ? response.answer.evidenceSufficient
     : citations.length > 0;
@@ -7476,14 +7477,50 @@ function citationsForParagraph(
   paragraphIndex: number,
   evidenceChunkIds: string[],
 ): AnswerCitation[] {
+  const directCitations = uniqueCitations(
+    citations.filter((citation) => citation.paragraphIndex === paragraphIndex),
+  );
+  if (directCitations.length > 0) {
+    return directCitations;
+  }
   const evidenceIds = new Set(evidenceChunkIds);
   return uniqueCitations(
-    citations.filter(
-      (citation) =>
-        citation.paragraphIndex === paragraphIndex ||
-        evidenceIds.has(citation.chunkId),
-    ),
+    citations.filter((citation) => evidenceIds.has(citation.chunkId)),
   );
+}
+
+function answerParagraphsFromMessage(
+  message: ConversationMessageRecord,
+): ConversationAnswerResponse["answer"]["paragraphs"] | null {
+  const raw = message.modelParams.answerParagraphs;
+  if (!Array.isArray(raw)) {
+    return null;
+  }
+  const paragraphs = raw.flatMap((item, fallbackIndex) => {
+    if (!isRecord(item) || typeof item.text !== "string" || !item.text.trim()) {
+      return [];
+    }
+    const rawEvidenceIds = item.evidenceChunkIds;
+    return [
+      {
+        index: Number.isInteger(item.index)
+          ? Number(item.index)
+          : fallbackIndex,
+        text: item.text,
+        evidenceChunkIds: Array.isArray(rawEvidenceIds)
+          ? rawEvidenceIds.filter(
+              (chunkId): chunkId is string =>
+                typeof chunkId === "string" && chunkId.length > 0,
+            )
+          : [],
+      },
+    ];
+  });
+  return paragraphs.length > 0 ? paragraphs : null;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function citationNumberMap(citations: AnswerCitation[]): Map<string, number> {
