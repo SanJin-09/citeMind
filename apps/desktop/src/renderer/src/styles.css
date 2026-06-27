@@ -374,6 +374,85 @@ kbd {
   place-items: center;
 }
 
+.account-menu-wrap {
+  position: relative;
+  -webkit-app-region: no-drag;
+}
+
+.account-menu {
+  position: absolute;
+  z-index: 30;
+  top: calc(100% + 9px);
+  right: 0;
+  display: grid;
+  width: 220px;
+  overflow: hidden;
+  border: 1px solid #dde4de;
+  border-radius: 14px;
+  background: #fff;
+  box-shadow: 0 18px 45px rgb(25 44 32 / 14%);
+  -webkit-app-region: no-drag;
+}
+
+.account-menu-heading,
+.account-menu-status {
+  display: grid;
+  gap: 3px;
+  padding: 11px 13px;
+}
+
+.account-menu-heading {
+  border-bottom: 1px solid #edf0ed;
+  background: #fbfcfa;
+}
+
+.account-menu-heading strong,
+.account-menu-status strong {
+  overflow: hidden;
+  color: #24362c;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.account-menu-heading span,
+.account-menu-status span {
+  overflow: hidden;
+  color: #7c8881;
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.account-menu-status {
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  padding-block: 9px;
+}
+
+.account-menu-status strong {
+  color: #2d6f4d;
+}
+
+.account-menu button {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 10px 13px;
+  border: 0;
+  border-top: 1px solid #edf0ed;
+  color: #34483b;
+  background: #fff;
+  font-size: 12px;
+  font-weight: 650;
+  text-align: left;
+}
+
+.account-menu button:hover {
+  background: #f5f8f5;
+}
+
 .workspace {
   position: relative;
   display: grid;

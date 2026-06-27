@@ -398,6 +398,7 @@ function App(): React.JSX.Element {
   const [evidenceOpen, setEvidenceOpen] = useState(true);
   const [systemOpen, setSystemOpen] = useState(false);
   const [knowledgeBaseMenuOpen, setKnowledgeBaseMenuOpen] = useState(false);
+  const [accountMenuOpen, setAccountMenuOpen] = useState(false);
   const [knowledgeBaseDialog, setKnowledgeBaseDialog] =
     useState<KnowledgeBaseDialogMode | null>(null);
   const [knowledgeBaseForm, setKnowledgeBaseForm] = useState({
@@ -2697,6 +2698,7 @@ function App(): React.JSX.Element {
             type="button"
             onClick={() => {
               setSettingsOpen(true);
+              setAccountMenuOpen(false);
               void loadSeedStatus();
             }}
           >
@@ -2710,9 +2712,59 @@ function App(): React.JSX.Element {
           >
             <Icon name="add" size={17} /> 新建对话
           </button>
-          <button className="avatar" aria-label="账户" type="button">
-            S
-          </button>
+          <div className="account-menu-wrap">
+            <button
+              aria-expanded={accountMenuOpen}
+              aria-haspopup="menu"
+              aria-label="打开账户菜单"
+              className="avatar"
+              type="button"
+              onClick={() => setAccountMenuOpen((value) => !value)}
+            >
+              S
+            </button>
+            {accountMenuOpen && (
+              <div className="account-menu" role="menu">
+                <div className="account-menu-heading">
+                  <strong>本地账户</strong>
+                  <span>citeMind Desktop</span>
+                </div>
+                <div className="account-menu-status">
+                  <span>模型服务</span>
+                  <strong>
+                    {seedStatus?.configured ? "已配置" : "未配置"}
+                  </strong>
+                </div>
+                <div className="account-menu-status">
+                  <span>当前知识库</span>
+                  <strong>{activeKnowledgeBase?.name ?? "未选择"}</strong>
+                </div>
+                <button
+                  role="menuitem"
+                  type="button"
+                  onClick={() => {
+                    setSettingsOpen(true);
+                    setAccountMenuOpen(false);
+                    void loadSeedStatus();
+                  }}
+                >
+                  <Icon name="settings" size={15} />
+                  打开设置
+                </button>
+                <button
+                  role="menuitem"
+                  type="button"
+                  onClick={() => {
+                    startNewConversation();
+                    setAccountMenuOpen(false);
+                  }}
+                >
+                  <Icon name="add" size={15} />
+                  新建对话
+                </button>
+              </div>
+            )}
+          </div>
         </div>
       </header>
 
@@ -2940,9 +2992,11 @@ function App(): React.JSX.Element {
 
             {hasSearchOutput && (
               <div
+                aria-label="资料搜索结果"
                 className={`chat-search-region ${
                   hasStartedConversation ? "sticky" : ""
                 }`}
+                role="region"
               >
                 <SearchResultsPanel
                   busy={searchBusy}
@@ -7220,15 +7274,7 @@ function PanelHeader({
         {count !== undefined && <span className="count-badge">{count}</span>}
       </div>
       {subtitle && <small>{subtitle}</small>}
-      {action ?? (
-        <button
-          aria-label={`${title}菜单`}
-          className="icon-button"
-          type="button"
-        >
-          <Icon name="menu" size={17} />
-        </button>
-      )}
+      {action}
     </header>
   );
 }
