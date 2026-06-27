@@ -1,4 +1,10 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  type ReactNode,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 import type {
   AnswerCitation,
   AgentRunConfirmationRecord,
@@ -99,6 +105,15 @@ const SUGGESTIONS = [
 const PENDING_CONVERSATION_ID = "pending-conversation";
 const PENDING_USER_MESSAGE_PREFIX = "pending-user:";
 const PENDING_ASSISTANT_MESSAGE_PREFIX = "pending-assistant:";
+const CHAT_BOTTOM_THRESHOLD_PX = 96;
+const DIALOG_FOCUSABLE_SELECTOR = [
+  "a[href]",
+  "button:not([disabled])",
+  "input:not([disabled])",
+  "select:not([disabled])",
+  "textarea:not([disabled])",
+  "[tabindex]:not([tabindex='-1'])",
+].join(",");
 
 const FALLBACK_SEED_MODELS: SeedModelDescriptor[] = [
   {
@@ -392,6 +407,10 @@ function App(): React.JSX.Element {
   const [agentTraceError, setAgentTraceError] = useState("");
   const [chatBusy, setChatBusy] = useState(false);
   const [chatError, setChatError] = useState("");
+  const chatScrollRef = useRef<HTMLDivElement>(null);
+  const chatAutoScrollRef = useRef(true);
+  const chatProgrammaticScrollRef = useRef(false);
+  const [chatAtBottom, setChatAtBottom] = useState(true);
   const [exportBusyId, setExportBusyId] = useState("");
   const [exportNotice, setExportNotice] = useState("");
   const [chatModel, setChatModel] = useState<string>(
@@ -703,6 +722,49 @@ function App(): React.JSX.Element {
   const showAppError = useCallback((message: string) => {
     setAppError(message);
   }, []);
+
+  const updateChatScrollState = useCallback((element: HTMLDivElement): void => {
+    const distanceFromBottom =
+      element.scrollHeight - element.scrollTop - element.clientHeight;
+    const atBottom = distanceFromBottom <= CHAT_BOTTOM_THRESHOLD_PX;
+    setChatAtBottom(atBottom);
+    if (atBottom) {
+      chatAutoScrollRef.current = true;
+      return;
+    }
+    if (!chatProgrammaticScrollRef.current) {
+      chatAutoScrollRef.current = false;
+    }
+  }, []);
+
+  const scrollChatToBottom = useCallback(
+    (behavior: ScrollBehavior = "smooth"): void => {
+      const element = chatScrollRef.current;
+      if (!element) {
+        return;
+      }
+      chatAutoScrollRef.current = true;
+      chatProgrammaticScrollRef.current = true;
+      element.scrollTo({ top: element.scrollHeight, behavior });
+      window.setTimeout(
+        () => {
+          chatProgrammaticScrollRef.current = false;
+          if (chatScrollRef.current) {
+            updateChatScrollState(chatScrollRef.current);
+          }
+        },
+        behavior === "smooth" ? 360 : 0,
+      );
+    },
+    [updateChatScrollState],
+  );
+
+  const handleChatScroll = useCallback(
+    (event: React.UIEvent<HTMLDivElement>): void => {
+      updateChatScrollState(event.currentTarget);
+    },
+    [updateChatScrollState],
+  );
 
   const rememberBackgroundJob = useCallback((job: BackgroundJobRecord) => {
     setBackgroundJobs((items) => {
@@ -1027,6 +1089,25 @@ function App(): React.JSX.Element {
     (job) => !isTerminalJobStatus(job.status),
   );
   const taskCenterJobs = taskCenterOpen ? backgroundJobs : activeBackgroundJobs;
+  const chatScrollSignature = [
+    messages
+      .map(
+        (message) =>
+          `${message.id}:${message.role}:${message.content.length}:${message.citations.length}`,
+      )
+      .join("|"),
+    chatBusy ? "busy" : "idle",
+    chatError.length,
+    exportNotice.length,
+    Object.values(agentRunTraces)
+      .map(
+        (trace) =>
+          `${trace.run.id}:${trace.run.status}:${trace.events.length}:${trace.toolCalls.length}`,
+      )
+      .join("|"),
+    Object.keys(answerResponses).length,
+    Object.keys(researchArtifacts).length,
+  ].join("::");
   const normalizedSourceFilter = sourceFilter.trim().toLowerCase();
   const hasSourceFilter = normalizedSourceFilter.length > 0;
   const visibleSources = hasSourceFilter
@@ -1049,6 +1130,17 @@ function App(): React.JSX.Element {
           .includes(normalizedSourceFilter),
       )
     : sources;
+
+  useEffect(() => {
+    if (!hasStartedConversation || !chatAutoScrollRef.current) {
+      return;
+    }
+    const frame = window.requestAnimationFrame(() =>
+      scrollChatToBottom("auto"),
+    );
+    return () => window.cancelAnimationFrame(frame);
+  }, [chatScrollSignature, hasStartedConversation, scrollChatToBottom]);
+
   const focusedResearchBrief = researchArtifacts[focusedResearchRunId] ?? null;
   const researchDirty =
     researchBrief && researchWorkspace
@@ -1069,6 +1161,9 @@ function App(): React.JSX.Element {
   };
 
   const resetConversationWorkspace = (): void => {
+    chatAutoScrollRef.current = true;
+    chatProgrammaticScrollRef.current = false;
+    setChatAtBottom(true);
     setConversationId(null);
     setMessages([]);
     setAnswerResponses({});
@@ -1155,6 +1250,8 @@ function App(): React.JSX.Element {
     targetConversationId: string,
   ): Promise<void> => {
     setConversationMenuOpen(false);
+    chatAutoScrollRef.current = true;
+    setChatAtBottom(true);
     setChatBusy(true);
     setChatError("");
     try {
@@ -1357,6 +1454,8 @@ function App(): React.JSX.Element {
       return;
     }
     setChatBusy(true);
+    chatAutoScrollRef.current = true;
+    setChatAtBottom(true);
     setChatError("");
     setQuery("");
     setSearchQuery("");
@@ -3059,6 +3158,8 @@ function App(): React.JSX.Element {
             className={`chat-scroll ${
               hasStartedConversation ? "conversation-active" : ""
             }`}
+            ref={chatScrollRef}
+            onScroll={handleChatScroll}
           >
             {apiSetupBlocked && !hasStartedConversation && (
               <SetupGuide
@@ -3253,6 +3354,15 @@ function App(): React.JSX.Element {
               </div>
             )}
           </div>
+          {hasStartedConversation && !chatAtBottom && (
+            <button
+              className="chat-scroll-bottom"
+              type="button"
+              onClick={() => scrollChatToBottom("smooth")}
+            >
+              回到底部 <Icon name="chevron" size={14} />
+            </button>
+          )}
           <div className="composer-wrap">
             {apiSetupBlocked && (
               <div className="composer-blocker" role="status">
@@ -3964,283 +4074,278 @@ function ResearchBriefEditorDialog({
     });
   };
   return (
-    <div
-      className="modal-backdrop research-editor-backdrop"
-      role="presentation"
+    <AppDialog
+      backdropClassName="research-editor-backdrop"
+      className="research-editor-dialog"
+      closeDisabled={saveState === "saving"}
+      labelledBy="research-editor-title"
+      onClose={onClose}
     >
-      <section
-        aria-modal="true"
-        className="research-editor-dialog"
-        role="dialog"
-      >
-        <header className="research-editor-heading">
-          <div>
-            <span className="eyebrow">对话内研究简报</span>
-            <h2>{workspace.title}</h2>
-          </div>
-          <div>
-            <span className={`research-save-state ${saveState}`}>
-              {researchSaveStateLabel(saveState)}
-            </span>
-            <button className="button ghost" type="button" onClick={onExport}>
-              <Icon name="download" size={15} />
-              导出
-            </button>
-            <button
-              aria-label="关闭研究简报编辑器"
-              className="icon-button"
-              disabled={saveState === "saving"}
-              type="button"
-              onClick={onClose}
-            >
-              <Icon name="close" size={17} />
-            </button>
-          </div>
-        </header>
-        <div className="research-editor-layout">
-          <main className="research-editor-main">
-            {Object.keys(brief.pendingAgentUpdate).length > 0 && (
-              <div className="research-pending-banner">
-                <span>
-                  <strong>Agent 更新等待合并</strong>
-                  执行期间检测到人工编辑，当前内容未被覆盖。
-                </span>
-                <div>
-                  <button
-                    className="button ghost"
-                    disabled={busy}
-                    type="button"
-                    onClick={() => onResolvePending("discard")}
-                  >
-                    放弃
-                  </button>
-                  <button
-                    className="button primary"
-                    disabled={busy}
-                    type="button"
-                    onClick={() => onResolvePending("apply")}
-                  >
-                    合并更新
-                  </button>
-                </div>
-              </div>
-            )}
-            {error && <div className="inline-error">{error}</div>}
-            {notice && <div className="inline-notice">{notice}</div>}
-            <div className="research-title-fields">
-              <input
-                aria-label="研究简报标题"
-                value={workspace.title}
-                onChange={(event) =>
-                  onWorkspaceChange({ ...workspace, title: event.target.value })
-                }
-              />
-              <textarea
-                aria-label="研究简报目标"
-                rows={2}
-                value={workspace.goal}
-                onChange={(event) =>
-                  onWorkspaceChange({ ...workspace, goal: event.target.value })
-                }
-              />
-            </div>
-            <div className="research-editor-tabs">
-              {(
-                [
-                  ["final", "最终稿"],
-                  ["draft", "草稿"],
-                  ["outline", "大纲"],
-                  ["plan", "计划"],
-                ] as Array<[ResearchEditorTab, string]>
-              ).map(([tab, label]) => (
-                <button
-                  className={editorTab === tab ? "active" : ""}
-                  key={tab}
-                  type="button"
-                  onClick={() => onEditorTabChange(tab)}
-                >
-                  {label}
-                </button>
-              ))}
-            </div>
-            {editorTab === "plan" && (
-              <textarea
-                aria-label="研究计划"
-                className="research-main-editor structured"
-                spellCheck={false}
-                value={planText}
-                onChange={(event) => onPlanTextChange(event.target.value)}
-                onSelect={captureSelection}
-              />
-            )}
-            {editorTab === "outline" && (
-              <textarea
-                aria-label="研究大纲"
-                className="research-main-editor structured"
-                spellCheck={false}
-                value={outlineText}
-                onChange={(event) => onOutlineTextChange(event.target.value)}
-                onSelect={captureSelection}
-              />
-            )}
-            {editorTab === "draft" && (
-              <>
-                <div className="research-section-tabs">
-                  {workspace.sections.map((section) => (
-                    <button
-                      className={
-                        section.id === selectedSectionId ? "active" : ""
-                      }
-                      key={section.id}
-                      type="button"
-                      onClick={() => onSectionSelect(section.id)}
-                    >
-                      {section.title}
-                    </button>
-                  ))}
-                </div>
-                <textarea
-                  aria-label="研究草稿"
-                  className="research-main-editor"
-                  value={workspace.draft}
-                  onChange={(event) =>
-                    onWorkspaceChange({
-                      ...workspace,
-                      draft: event.target.value,
-                    })
-                  }
-                  onSelect={captureSelection}
-                />
-                {selectedSection && (
-                  <div className="research-section-editor">
-                    <input
-                      aria-label="章节标题"
-                      value={selectedSection.title}
-                      onChange={(event) =>
-                        updateSection({ title: event.target.value })
-                      }
-                    />
-                    <textarea
-                      aria-label="章节内容"
-                      rows={5}
-                      value={selectedSection.content}
-                      onChange={(event) =>
-                        updateSection({ content: event.target.value })
-                      }
-                      onSelect={captureSelection}
-                    />
-                  </div>
-                )}
-              </>
-            )}
-            {editorTab === "final" && (
-              <textarea
-                aria-label="研究最终稿"
-                className="research-main-editor"
-                value={workspace.final}
-                onChange={(event) =>
-                  onWorkspaceChange({
-                    ...workspace,
-                    final: event.target.value,
-                  })
-                }
-                onSelect={captureSelection}
-              />
-            )}
-            <div className="research-operation-bar">
+      <header className="research-editor-heading">
+        <div>
+          <span className="eyebrow">对话内研究简报</span>
+          <h2 id="research-editor-title">{workspace.title}</h2>
+        </div>
+        <div>
+          <span className={`research-save-state ${saveState}`}>
+            {researchSaveStateLabel(saveState)}
+          </span>
+          <button className="button ghost" type="button" onClick={onExport}>
+            <Icon name="download" size={15} />
+            导出
+          </button>
+          <button
+            aria-label="关闭研究简报编辑器"
+            className="icon-button"
+            disabled={saveState === "saving"}
+            type="button"
+            onClick={onClose}
+          >
+            <Icon name="close" size={17} />
+          </button>
+        </div>
+      </header>
+      <div className="research-editor-layout">
+        <main className="research-editor-main">
+          {Object.keys(brief.pendingAgentUpdate).length > 0 && (
+            <div className="research-pending-banner">
               <span>
-                {selection
-                  ? `已选中 ${selection.length} 个字符`
-                  : "未选中文本时作用于整份简报"}
+                <strong>Agent 更新等待合并</strong>
+                执行期间检测到人工编辑，当前内容未被覆盖。
               </span>
               <div>
                 <button
                   className="button ghost"
                   disabled={busy}
                   type="button"
-                  onClick={() => onOperation("continue_research")}
+                  onClick={() => onResolvePending("discard")}
                 >
-                  继续研究
+                  放弃
                 </button>
                 <button
-                  className="button ghost"
+                  className="button primary"
                   disabled={busy}
                   type="button"
-                  onClick={() => onOperation("supplement_evidence")}
+                  onClick={() => onResolvePending("apply")}
                 >
-                  补充证据
-                </button>
-                <button
-                  className="button ghost"
-                  disabled={busy}
-                  type="button"
-                  onClick={() => onOperation("audit_citations")}
-                >
-                  审计引用
-                </button>
-                <button
-                  className="button ghost"
-                  disabled={busy || !selectedSectionId}
-                  type="button"
-                  onClick={() => onOperation("regenerate_section")}
-                >
-                  重生成章节
+                  合并更新
                 </button>
               </div>
             </div>
-          </main>
-          <aside className="research-editor-audit">
-            {busy && (
-              <div className="research-running-notice">
-                <span className="status-dot online" />
-                Agent 正在执行
-              </div>
-            )}
-            {liveRun && (
-              <AgentRunTracePanel
-                answerVisible
-                busyAction=""
-                error=""
-                response={liveRun}
-                onAction={() => undefined}
-              />
-            )}
-            {brief.citations.length > 0 && (
-              <ResearchSideSection title="引用证据">
-                <div className="research-artifact-citations">
-                  {uniqueCitations(brief.citations).map((citation, index) => (
-                    <InlineCitationButton
-                      citation={citation}
-                      citationNumber={index + 1}
-                      key={`${citation.chunkId}:${index}`}
-                      selected={selectedChunkId === citation.chunkId}
-                      onSelect={onSelectCitation}
-                    />
-                  ))}
-                </div>
-              </ResearchSideSection>
-            )}
-            {workspace.conflicts.length > 0 && (
-              <ResearchSideSection title="来源冲突">
-                {workspace.conflicts.map((conflict, index) => (
-                  <article key={`editor-conflict-${index}`}>
-                    <strong>
-                      {researchRecordLabel(conflict, `冲突 ${index + 1}`)}
-                    </strong>
-                    <small>{JSON.stringify(conflict)}</small>
-                  </article>
+          )}
+          {error && <div className="inline-error">{error}</div>}
+          {notice && <div className="inline-notice">{notice}</div>}
+          <div className="research-title-fields">
+            <input
+              aria-label="研究简报标题"
+              value={workspace.title}
+              onChange={(event) =>
+                onWorkspaceChange({ ...workspace, title: event.target.value })
+              }
+            />
+            <textarea
+              aria-label="研究简报目标"
+              rows={2}
+              value={workspace.goal}
+              onChange={(event) =>
+                onWorkspaceChange({ ...workspace, goal: event.target.value })
+              }
+            />
+          </div>
+          <div className="research-editor-tabs">
+            {(
+              [
+                ["final", "最终稿"],
+                ["draft", "草稿"],
+                ["outline", "大纲"],
+                ["plan", "计划"],
+              ] as Array<[ResearchEditorTab, string]>
+            ).map(([tab, label]) => (
+              <button
+                className={editorTab === tab ? "active" : ""}
+                key={tab}
+                type="button"
+                onClick={() => onEditorTabChange(tab)}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+          {editorTab === "plan" && (
+            <textarea
+              aria-label="研究计划"
+              className="research-main-editor structured"
+              spellCheck={false}
+              value={planText}
+              onChange={(event) => onPlanTextChange(event.target.value)}
+              onSelect={captureSelection}
+            />
+          )}
+          {editorTab === "outline" && (
+            <textarea
+              aria-label="研究大纲"
+              className="research-main-editor structured"
+              spellCheck={false}
+              value={outlineText}
+              onChange={(event) => onOutlineTextChange(event.target.value)}
+              onSelect={captureSelection}
+            />
+          )}
+          {editorTab === "draft" && (
+            <>
+              <div className="research-section-tabs">
+                {workspace.sections.map((section) => (
+                  <button
+                    className={section.id === selectedSectionId ? "active" : ""}
+                    key={section.id}
+                    type="button"
+                    onClick={() => onSectionSelect(section.id)}
+                  >
+                    {section.title}
+                  </button>
                 ))}
-              </ResearchSideSection>
-            )}
-            {Object.keys(workspace.latestAudit).length > 0 && (
-              <ResearchSideSection title="引用审计">
-                <pre>{JSON.stringify(workspace.latestAudit, null, 2)}</pre>
-              </ResearchSideSection>
-            )}
-          </aside>
-        </div>
-      </section>
-    </div>
+              </div>
+              <textarea
+                aria-label="研究草稿"
+                className="research-main-editor"
+                value={workspace.draft}
+                onChange={(event) =>
+                  onWorkspaceChange({
+                    ...workspace,
+                    draft: event.target.value,
+                  })
+                }
+                onSelect={captureSelection}
+              />
+              {selectedSection && (
+                <div className="research-section-editor">
+                  <input
+                    aria-label="章节标题"
+                    value={selectedSection.title}
+                    onChange={(event) =>
+                      updateSection({ title: event.target.value })
+                    }
+                  />
+                  <textarea
+                    aria-label="章节内容"
+                    rows={5}
+                    value={selectedSection.content}
+                    onChange={(event) =>
+                      updateSection({ content: event.target.value })
+                    }
+                    onSelect={captureSelection}
+                  />
+                </div>
+              )}
+            </>
+          )}
+          {editorTab === "final" && (
+            <textarea
+              aria-label="研究最终稿"
+              className="research-main-editor"
+              value={workspace.final}
+              onChange={(event) =>
+                onWorkspaceChange({
+                  ...workspace,
+                  final: event.target.value,
+                })
+              }
+              onSelect={captureSelection}
+            />
+          )}
+          <div className="research-operation-bar">
+            <span>
+              {selection
+                ? `已选中 ${selection.length} 个字符`
+                : "未选中文本时作用于整份简报"}
+            </span>
+            <div>
+              <button
+                className="button ghost"
+                disabled={busy}
+                type="button"
+                onClick={() => onOperation("continue_research")}
+              >
+                继续研究
+              </button>
+              <button
+                className="button ghost"
+                disabled={busy}
+                type="button"
+                onClick={() => onOperation("supplement_evidence")}
+              >
+                补充证据
+              </button>
+              <button
+                className="button ghost"
+                disabled={busy}
+                type="button"
+                onClick={() => onOperation("audit_citations")}
+              >
+                审计引用
+              </button>
+              <button
+                className="button ghost"
+                disabled={busy || !selectedSectionId}
+                type="button"
+                onClick={() => onOperation("regenerate_section")}
+              >
+                重生成章节
+              </button>
+            </div>
+          </div>
+        </main>
+        <aside className="research-editor-audit">
+          {busy && (
+            <div className="research-running-notice">
+              <span className="status-dot online" />
+              Agent 正在执行
+            </div>
+          )}
+          {liveRun && (
+            <AgentRunTracePanel
+              answerVisible
+              busyAction=""
+              error=""
+              response={liveRun}
+              onAction={() => undefined}
+            />
+          )}
+          {brief.citations.length > 0 && (
+            <ResearchSideSection title="引用证据">
+              <div className="research-artifact-citations">
+                {uniqueCitations(brief.citations).map((citation, index) => (
+                  <InlineCitationButton
+                    citation={citation}
+                    citationNumber={index + 1}
+                    key={`${citation.chunkId}:${index}`}
+                    selected={selectedChunkId === citation.chunkId}
+                    onSelect={onSelectCitation}
+                  />
+                ))}
+              </div>
+            </ResearchSideSection>
+          )}
+          {workspace.conflicts.length > 0 && (
+            <ResearchSideSection title="来源冲突">
+              {workspace.conflicts.map((conflict, index) => (
+                <article key={`editor-conflict-${index}`}>
+                  <strong>
+                    {researchRecordLabel(conflict, `冲突 ${index + 1}`)}
+                  </strong>
+                  <small>{JSON.stringify(conflict)}</small>
+                </article>
+              ))}
+            </ResearchSideSection>
+          )}
+          {Object.keys(workspace.latestAudit).length > 0 && (
+            <ResearchSideSection title="引用审计">
+              <pre>{JSON.stringify(workspace.latestAudit, null, 2)}</pre>
+            </ResearchSideSection>
+          )}
+        </aside>
+      </div>
+    </AppDialog>
   );
 }
 
@@ -5250,285 +5355,280 @@ function WritingWorkspaceDialog({
     section?.audit.citationValidation?.invalidCitations ?? [];
 
   return (
-    <div className="modal-backdrop" role="presentation">
-      <section
-        aria-modal="true"
-        className="writing-workspace-dialog"
-        role="dialog"
-      >
-        <header className="writing-workspace-heading">
-          <div>
-            <span className="eyebrow">LangGraph 写作工作流</span>
-            <h2>复习与写作</h2>
-            <p>大纲、逐节内容和检查点均绑定到当前知识库证据。</p>
-          </div>
-          <div>
-            <button
-              className="button ghost"
-              disabled={!project || busy}
-              type="button"
-              onClick={onRunNext}
-            >
-              <Icon name="sparkle" size={15} /> 逐节继续
-            </button>
-            <button
-              className="button ghost"
-              disabled={!project || busy}
-              type="button"
-              onClick={onExport}
-            >
-              <Icon name="download" size={15} /> 导出 Word
-            </button>
-            <button
-              aria-label="关闭写作工作区"
-              className="icon-button"
-              disabled={busy}
-              type="button"
-              onClick={onClose}
-            >
-              <Icon name="close" size={17} />
-            </button>
-          </div>
-        </header>
+    <AppDialog
+      className="writing-workspace-dialog"
+      closeDisabled={busy}
+      labelledBy="writing-workspace-title"
+      onClose={onClose}
+    >
+      <header className="writing-workspace-heading">
+        <div>
+          <span className="eyebrow">LangGraph 写作工作流</span>
+          <h2 id="writing-workspace-title">复习与写作</h2>
+          <p>大纲、逐节内容和检查点均绑定到当前知识库证据。</p>
+        </div>
+        <div>
+          <button
+            className="button ghost"
+            disabled={!project || busy}
+            type="button"
+            onClick={onRunNext}
+          >
+            <Icon name="sparkle" size={15} /> 逐节继续
+          </button>
+          <button
+            className="button ghost"
+            disabled={!project || busy}
+            type="button"
+            onClick={onExport}
+          >
+            <Icon name="download" size={15} /> 导出 Word
+          </button>
+          <button
+            aria-label="关闭写作工作区"
+            className="icon-button"
+            disabled={busy}
+            type="button"
+            onClick={onClose}
+          >
+            <Icon name="close" size={17} />
+          </button>
+        </div>
+      </header>
 
-        <div className="writing-workspace-body">
-          <aside className="writing-projects">
-            <div className="writing-create">
-              <strong>创建工作流</strong>
-              <div className="writing-mode-switch" role="group">
-                <button
-                  className={workflowType === "review" ? "active" : ""}
-                  disabled={busy}
-                  type="button"
-                  onClick={() => onWorkflowTypeChange("review")}
-                >
-                  复习提纲
-                </button>
-                <button
-                  className={workflowType === "article" ? "active" : ""}
-                  disabled={busy}
-                  type="button"
-                  onClick={() => onWorkflowTypeChange("article")}
-                >
-                  写作大纲
-                </button>
-              </div>
-              <textarea
-                aria-label="写作或复习目标"
-                disabled={busy}
-                placeholder="例如：整理产品架构的复习提纲"
-                value={goal}
-                onChange={(event) => onGoalChange(event.target.value)}
-              />
+      <div className="writing-workspace-body">
+        <aside className="writing-projects">
+          <div className="writing-create">
+            <strong>创建工作流</strong>
+            <div className="writing-mode-switch" role="group">
               <button
-                className="button primary"
-                disabled={busy || !goal.trim()}
+                className={workflowType === "review" ? "active" : ""}
+                disabled={busy}
                 type="button"
-                onClick={onCreate}
+                onClick={() => onWorkflowTypeChange("review")}
               >
-                <Icon name="sparkle" size={15} /> 生成证据大纲
+                复习提纲
+              </button>
+              <button
+                className={workflowType === "article" ? "active" : ""}
+                disabled={busy}
+                type="button"
+                onClick={() => onWorkflowTypeChange("article")}
+              >
+                写作大纲
               </button>
             </div>
-            <div className="writing-project-list">
-              <div className="writing-column-heading">
-                <strong>工作流</strong>
-                <span>{projects.length}</span>
-              </div>
-              {projects.map((item) => (
-                <button
-                  className={item.id === project?.project.id ? "active" : ""}
-                  disabled={busy}
-                  key={item.id}
-                  type="button"
-                  onClick={() => onOpenProject(item.id)}
-                >
-                  <strong>{item.title}</strong>
-                  <span>
-                    {writingWorkflowLabel(item.workflowType)} ·{" "}
-                    {writingStatusLabel(item.status)}
-                  </span>
-                </button>
-              ))}
-              {projects.length === 0 && (
-                <p className="writing-empty">还没有写作工作流</p>
-              )}
-            </div>
-          </aside>
-
-          <section className="writing-editor">
-            {project ? (
-              <>
-                <div className="writing-project-summary">
-                  <div>
-                    <span>
-                      {writingWorkflowLabel(project.project.workflowType)}
-                    </span>
-                    <h3>{project.project.title}</h3>
-                    <p>{project.project.goal}</p>
-                  </div>
-                  <span className={`writing-status ${project.project.status}`}>
-                    {writingStatusLabel(project.project.status)}
-                  </span>
-                </div>
-                <div className="writing-section-tabs">
-                  {project.sections.map((item) => (
-                    <button
-                      className={item.id === section?.id ? "active" : ""}
-                      disabled={busy}
-                      key={item.id}
-                      type="button"
-                      onClick={() => onSelectSection(item.id)}
-                    >
-                      <span>{item.position + 1}</span>
-                      <strong>{item.title}</strong>
-                      <small>{writingStatusLabel(item.status)}</small>
-                    </button>
-                  ))}
-                </div>
-                {section && (
-                  <div className="writing-section-editor">
-                    <div className="writing-section-heading">
-                      <div>
-                        <h4>{section.title}</h4>
-                        <p>{section.purpose}</p>
-                      </div>
-                      <span>{section.citations.length} 条引用</span>
-                    </div>
-                    {section.reviewPoints.length > 0 && (
-                      <ul className="writing-review-points">
-                        {section.reviewPoints.map((point) => (
-                          <li key={point}>{point}</li>
-                        ))}
-                      </ul>
-                    )}
-                    <textarea
-                      aria-label={`编辑章节 ${section.title}`}
-                      disabled={busy}
-                      placeholder="生成章节后可在此编辑内容"
-                      value={drafts[section.id] ?? section.content}
-                      onChange={(event) =>
-                        onDraftChange(section.id, event.target.value)
-                      }
-                    />
-                    <div className="writing-editor-actions">
-                      <button
-                        className="button primary"
-                        disabled={busy}
-                        type="button"
-                        onClick={() => onRun(section.id)}
-                      >
-                        <Icon name="sparkle" size={15} />
-                        {section.status === "failed"
-                          ? "从检查点恢复"
-                          : "生成章节"}
-                      </button>
-                      <button
-                        className="button ghost"
-                        disabled={busy || !(drafts[section.id] ?? "").trim()}
-                        type="button"
-                        onClick={() => onSave(section.id)}
-                      >
-                        保存编辑
-                      </button>
-                      <button
-                        className="button ghost"
-                        disabled={busy || !section.content}
-                        type="button"
-                        onClick={() => onAudit(section.id)}
-                      >
-                        <Icon name="check" size={15} /> 检查引用
-                      </button>
-                      <button
-                        className="button ghost"
-                        disabled={busy || suggestions.length === 0}
-                        type="button"
-                        onClick={() => onRevise(section.id)}
-                      >
-                        <Icon name="refresh" size={15} /> 自动修订
-                      </button>
-                    </div>
-                  </div>
-                )}
-              </>
-            ) : (
-              <div className="writing-empty-main">
-                <Icon name="book" size={30} />
-                <strong>创建复习提纲或证据写作大纲</strong>
-                <span>生成后可逐节写作，并从失败检查点继续。</span>
-              </div>
-            )}
-          </section>
-
-          <aside className="writing-audit">
+            <textarea
+              aria-label="写作或复习目标"
+              disabled={busy}
+              placeholder="例如：整理产品架构的复习提纲"
+              value={goal}
+              onChange={(event) => onGoalChange(event.target.value)}
+            />
+            <button
+              className="button primary"
+              disabled={busy || !goal.trim()}
+              type="button"
+              onClick={onCreate}
+            >
+              <Icon name="sparkle" size={15} /> 生成证据大纲
+            </button>
+          </div>
+          <div className="writing-project-list">
             <div className="writing-column-heading">
-              <strong>引用与检查</strong>
-              <span>{section?.audit.valid ? "通过" : "待处理"}</span>
+              <strong>工作流</strong>
+              <span>{projects.length}</span>
             </div>
-            {section ? (
-              <>
-                <div className="writing-audit-metrics">
-                  <span>
-                    <strong>{section.citations.length}</strong>
-                    引用证据
-                  </span>
-                  <span>
-                    <strong>{invalidCitations.length}</strong>
-                    无效引用
-                  </span>
-                  <span>
-                    <strong>{conflicts.length}</strong>
-                    证据冲突
-                  </span>
-                </div>
-                <WritingAuditList
-                  empty="当前没有修订建议"
-                  items={suggestions.map((item) => item.message)}
-                  title="自动修订建议"
-                />
-                <WritingAuditList
-                  empty="当前没有确认的证据冲突"
-                  items={conflicts.map(writingConflictLabel)}
-                  title="冲突检查"
-                />
-                <div className="writing-checkpoints">
-                  <div className="writing-column-heading">
-                    <strong>最近检查点</strong>
-                    <span>{project?.checkpoints.length ?? 0}</span>
-                  </div>
-                  {project?.checkpoints.slice(0, 8).map((checkpoint) => (
-                    <div key={checkpoint.id}>
-                      <Icon
-                        name={
-                          checkpoint.status === "completed"
-                            ? "check"
-                            : "refresh"
-                        }
-                        size={13}
-                      />
-                      <span>
-                        <strong>
-                          {writingCheckpointLabel(checkpoint.step)}
-                        </strong>
-                        <small>{formatDateTime(checkpoint.createdAt)}</small>
-                      </span>
-                    </div>
-                  ))}
-                </div>
-              </>
-            ) : (
-              <p className="writing-empty">选择工作流后显示检查结果</p>
+            {projects.map((item) => (
+              <button
+                className={item.id === project?.project.id ? "active" : ""}
+                disabled={busy}
+                key={item.id}
+                type="button"
+                onClick={() => onOpenProject(item.id)}
+              >
+                <strong>{item.title}</strong>
+                <span>
+                  {writingWorkflowLabel(item.workflowType)} ·{" "}
+                  {writingStatusLabel(item.status)}
+                </span>
+              </button>
+            ))}
+            {projects.length === 0 && (
+              <p className="writing-empty">还没有写作工作流</p>
             )}
-          </aside>
-        </div>
-        {(error || notice) && (
-          <footer
-            className={error ? "writing-feedback error" : "writing-feedback"}
-          >
-            {error || notice}
-          </footer>
-        )}
-      </section>
-    </div>
+          </div>
+        </aside>
+
+        <section className="writing-editor">
+          {project ? (
+            <>
+              <div className="writing-project-summary">
+                <div>
+                  <span>
+                    {writingWorkflowLabel(project.project.workflowType)}
+                  </span>
+                  <h3>{project.project.title}</h3>
+                  <p>{project.project.goal}</p>
+                </div>
+                <span className={`writing-status ${project.project.status}`}>
+                  {writingStatusLabel(project.project.status)}
+                </span>
+              </div>
+              <div className="writing-section-tabs">
+                {project.sections.map((item) => (
+                  <button
+                    className={item.id === section?.id ? "active" : ""}
+                    disabled={busy}
+                    key={item.id}
+                    type="button"
+                    onClick={() => onSelectSection(item.id)}
+                  >
+                    <span>{item.position + 1}</span>
+                    <strong>{item.title}</strong>
+                    <small>{writingStatusLabel(item.status)}</small>
+                  </button>
+                ))}
+              </div>
+              {section && (
+                <div className="writing-section-editor">
+                  <div className="writing-section-heading">
+                    <div>
+                      <h4>{section.title}</h4>
+                      <p>{section.purpose}</p>
+                    </div>
+                    <span>{section.citations.length} 条引用</span>
+                  </div>
+                  {section.reviewPoints.length > 0 && (
+                    <ul className="writing-review-points">
+                      {section.reviewPoints.map((point) => (
+                        <li key={point}>{point}</li>
+                      ))}
+                    </ul>
+                  )}
+                  <textarea
+                    aria-label={`编辑章节 ${section.title}`}
+                    disabled={busy}
+                    placeholder="生成章节后可在此编辑内容"
+                    value={drafts[section.id] ?? section.content}
+                    onChange={(event) =>
+                      onDraftChange(section.id, event.target.value)
+                    }
+                  />
+                  <div className="writing-editor-actions">
+                    <button
+                      className="button primary"
+                      disabled={busy}
+                      type="button"
+                      onClick={() => onRun(section.id)}
+                    >
+                      <Icon name="sparkle" size={15} />
+                      {section.status === "failed"
+                        ? "从检查点恢复"
+                        : "生成章节"}
+                    </button>
+                    <button
+                      className="button ghost"
+                      disabled={busy || !(drafts[section.id] ?? "").trim()}
+                      type="button"
+                      onClick={() => onSave(section.id)}
+                    >
+                      保存编辑
+                    </button>
+                    <button
+                      className="button ghost"
+                      disabled={busy || !section.content}
+                      type="button"
+                      onClick={() => onAudit(section.id)}
+                    >
+                      <Icon name="check" size={15} /> 检查引用
+                    </button>
+                    <button
+                      className="button ghost"
+                      disabled={busy || suggestions.length === 0}
+                      type="button"
+                      onClick={() => onRevise(section.id)}
+                    >
+                      <Icon name="refresh" size={15} /> 自动修订
+                    </button>
+                  </div>
+                </div>
+              )}
+            </>
+          ) : (
+            <div className="writing-empty-main">
+              <Icon name="book" size={30} />
+              <strong>创建复习提纲或证据写作大纲</strong>
+              <span>生成后可逐节写作，并从失败检查点继续。</span>
+            </div>
+          )}
+        </section>
+
+        <aside className="writing-audit">
+          <div className="writing-column-heading">
+            <strong>引用与检查</strong>
+            <span>{section?.audit.valid ? "通过" : "待处理"}</span>
+          </div>
+          {section ? (
+            <>
+              <div className="writing-audit-metrics">
+                <span>
+                  <strong>{section.citations.length}</strong>
+                  引用证据
+                </span>
+                <span>
+                  <strong>{invalidCitations.length}</strong>
+                  无效引用
+                </span>
+                <span>
+                  <strong>{conflicts.length}</strong>
+                  证据冲突
+                </span>
+              </div>
+              <WritingAuditList
+                empty="当前没有修订建议"
+                items={suggestions.map((item) => item.message)}
+                title="自动修订建议"
+              />
+              <WritingAuditList
+                empty="当前没有确认的证据冲突"
+                items={conflicts.map(writingConflictLabel)}
+                title="冲突检查"
+              />
+              <div className="writing-checkpoints">
+                <div className="writing-column-heading">
+                  <strong>最近检查点</strong>
+                  <span>{project?.checkpoints.length ?? 0}</span>
+                </div>
+                {project?.checkpoints.slice(0, 8).map((checkpoint) => (
+                  <div key={checkpoint.id}>
+                    <Icon
+                      name={
+                        checkpoint.status === "completed" ? "check" : "refresh"
+                      }
+                      size={13}
+                    />
+                    <span>
+                      <strong>{writingCheckpointLabel(checkpoint.step)}</strong>
+                      <small>{formatDateTime(checkpoint.createdAt)}</small>
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </>
+          ) : (
+            <p className="writing-empty">选择工作流后显示检查结果</p>
+          )}
+        </aside>
+      </div>
+      {(error || notice) && (
+        <footer
+          className={error ? "writing-feedback error" : "writing-feedback"}
+        >
+          {error || notice}
+        </footer>
+      )}
+    </AppDialog>
   );
 }
 
@@ -5709,6 +5809,78 @@ function SearchResultsPanel({
         </div>
       )}
     </section>
+  );
+}
+
+function AppDialog({
+  backdropClassName = "",
+  children,
+  className,
+  closeDisabled = false,
+  labelledBy,
+  onClose,
+}: {
+  backdropClassName?: string;
+  children: ReactNode;
+  className: string;
+  closeDisabled?: boolean;
+  labelledBy: string;
+  onClose: () => void;
+}): React.JSX.Element {
+  const dialogRef = useRef<HTMLElement>(null);
+  const previousFocusRef = useRef<HTMLElement | null>(null);
+
+  useEffect(() => {
+    previousFocusRef.current =
+      document.activeElement instanceof HTMLElement
+        ? document.activeElement
+        : null;
+    const timer = window.setTimeout(() => {
+      const dialog = dialogRef.current;
+      if (!dialog) {
+        return;
+      }
+      const focusable = getDialogFocusableElements(dialog);
+      (focusable[0] ?? dialog).focus({ preventScroll: true });
+    }, 0);
+    return () => {
+      window.clearTimeout(timer);
+      const previous = previousFocusRef.current;
+      if (previous?.isConnected) {
+        previous.focus({ preventScroll: true });
+      }
+    };
+  }, []);
+
+  const handleKeyDown = (event: React.KeyboardEvent<HTMLElement>): void => {
+    if (event.key === "Escape" && !closeDisabled) {
+      event.preventDefault();
+      event.stopPropagation();
+      onClose();
+      return;
+    }
+    if (event.key === "Tab") {
+      trapDialogFocus(event, dialogRef.current);
+    }
+  };
+
+  return (
+    <div
+      className={`modal-backdrop ${backdropClassName}`.trim()}
+      role="presentation"
+    >
+      <section
+        aria-labelledby={labelledBy}
+        aria-modal="true"
+        className={className}
+        ref={dialogRef}
+        role="dialog"
+        tabIndex={-1}
+        onKeyDown={handleKeyDown}
+      >
+        {children}
+      </section>
+    </div>
   );
 }
 
@@ -6213,229 +6385,302 @@ function SourceMaintenanceDialog({
       (relation) => relation.status !== "dismissed",
     ) ?? [];
   return (
-    <div className="modal-backdrop" role="presentation">
-      <section
-        aria-modal="true"
-        className="source-maintenance-dialog"
-        role="dialog"
-      >
-        <header className="settings-heading">
-          <div>
-            <p className="eyebrow">Source Maintenance</p>
-            <h2>{value.source.displayName}</h2>
-            <span>
-              当前 v{value.source.currentVersionNumber} ·{" "}
-              {expiryStatusLabel(value.source.expiryStatus)}
-            </span>
-          </div>
+    <AppDialog
+      className="source-maintenance-dialog"
+      closeDisabled={busy}
+      labelledBy="source-maintenance-title"
+      onClose={onClose}
+    >
+      <header className="settings-heading">
+        <div>
+          <p className="eyebrow">Source Maintenance</p>
+          <h2 id="source-maintenance-title">{value.source.displayName}</h2>
+          <span>
+            当前 v{value.source.currentVersionNumber} ·{" "}
+            {expiryStatusLabel(value.source.expiryStatus)}
+          </span>
+        </div>
+        <button
+          aria-label="关闭来源版本维护"
+          className="icon-button"
+          disabled={busy}
+          type="button"
+          onClick={onClose}
+        >
+          <Icon name="close" size={17} />
+        </button>
+      </header>
+
+      <div className="source-maintenance-body">
+        <section className="source-maintenance-settings">
+          <label>
+            <span>时效状态</span>
+            <select
+              value={form.expiryStatus}
+              onChange={(event) =>
+                onFormChange({
+                  ...form,
+                  expiryStatus: event.target
+                    .value as KnowledgeBaseSource["expiryStatus"],
+                })
+              }
+            >
+              <option value="active">有效</option>
+              <option value="expired">已过期</option>
+              <option value="replaced">已替代</option>
+            </select>
+          </label>
+          <label>
+            <span>复查时间</span>
+            <input
+              type="datetime-local"
+              value={form.reviewAt}
+              onChange={(event) =>
+                onFormChange({ ...form, reviewAt: event.target.value })
+              }
+            />
+          </label>
+          <label>
+            <span>替代文档</span>
+            <select
+              value={form.replacementSourceId}
+              onChange={(event) =>
+                onFormChange({
+                  ...form,
+                  replacementSourceId: event.target.value,
+                })
+              }
+            >
+              <option value="">未指定</option>
+              {sources
+                .filter((source) => source.id !== value.source.id)
+                .map((source) => (
+                  <option key={source.id} value={source.id}>
+                    {source.displayName}
+                  </option>
+                ))}
+            </select>
+          </label>
           <button
-            aria-label="关闭来源版本维护"
-            className="icon-button"
+            className="button ghost"
             disabled={busy}
             type="button"
-            onClick={onClose}
+            onClick={onSave}
           >
-            <Icon name="close" size={17} />
+            保存维护设置
           </button>
-        </header>
-
-        <div className="source-maintenance-body">
-          <section className="source-maintenance-settings">
-            <label>
-              <span>时效状态</span>
-              <select
-                value={form.expiryStatus}
-                onChange={(event) =>
-                  onFormChange({
-                    ...form,
-                    expiryStatus: event.target
-                      .value as KnowledgeBaseSource["expiryStatus"],
-                  })
-                }
-              >
-                <option value="active">有效</option>
-                <option value="expired">已过期</option>
-                <option value="replaced">已替代</option>
-              </select>
-            </label>
-            <label>
-              <span>复查时间</span>
-              <input
-                type="datetime-local"
-                value={form.reviewAt}
-                onChange={(event) =>
-                  onFormChange({ ...form, reviewAt: event.target.value })
-                }
-              />
-            </label>
-            <label>
-              <span>替代文档</span>
-              <select
-                value={form.replacementSourceId}
-                onChange={(event) =>
-                  onFormChange({
-                    ...form,
-                    replacementSourceId: event.target.value,
-                  })
-                }
-              >
-                <option value="">未指定</option>
-                {sources
-                  .filter((source) => source.id !== value.source.id)
-                  .map((source) => (
-                    <option key={source.id} value={source.id}>
-                      {source.displayName}
-                    </option>
-                  ))}
-              </select>
-            </label>
+          {value.source.sourceType === "web" && (
             <button
-              className="button ghost"
+              className="button primary"
               disabled={busy}
               type="button"
-              onClick={onSave}
+              onClick={onCheck}
             >
-              保存维护设置
+              <Icon name="refresh" size={15} />
+              检查网页更新
             </button>
-            {value.source.sourceType === "web" && (
-              <button
-                className="button primary"
-                disabled={busy}
-                type="button"
-                onClick={onCheck}
-              >
-                <Icon name="refresh" size={15} />
-                检查网页更新
-              </button>
-            )}
-          </section>
-
-          {suggestion?.status === "pending_confirmation" && (
-            <section className="source-suggestion">
-              <strong>
-                待确认建议：{sourceSuggestionLabel(suggestion.suggestion)}
-              </strong>
-              <span>{suggestion.reason}</span>
-              <small>置信度 {Math.round(suggestion.confidence * 100)}%</small>
-              <div>
-                <button
-                  className="text-button"
-                  disabled={busy}
-                  type="button"
-                  onClick={() => onDecideSuggestion("dismiss")}
-                >
-                  忽略
-                </button>
-                <button
-                  className="button ghost"
-                  disabled={busy}
-                  type="button"
-                  onClick={() => onDecideSuggestion("accept")}
-                >
-                  确认建议
-                </button>
-              </div>
-            </section>
           )}
+        </section>
 
-          <section className="source-organization-section">
-            <div className="source-version-heading">
-              <strong>规则分类</strong>
+        {suggestion?.status === "pending_confirmation" && (
+          <section className="source-suggestion">
+            <strong>
+              待确认建议：{sourceSuggestionLabel(suggestion.suggestion)}
+            </strong>
+            <span>{suggestion.reason}</span>
+            <small>置信度 {Math.round(suggestion.confidence * 100)}%</small>
+            <div>
               <button
                 className="text-button"
                 disabled={busy}
                 type="button"
-                onClick={onClassify}
+                onClick={() => onDecideSuggestion("dismiss")}
               >
-                重新分析
+                忽略
               </button>
-            </div>
-            {organization?.classification ? (
-              <>
-                <div className="source-classification-grid">
-                  <div>
-                    <span>分类</span>
-                    <strong>{organization.classification.category}</strong>
-                  </div>
-                  <div>
-                    <span>标题</span>
-                    <strong>
-                      {organization.classification.title || "未识别"}
-                    </strong>
-                  </div>
-                  <div>
-                    <span>作者</span>
-                    <strong>
-                      {organization.classification.author || "未识别"}
-                    </strong>
-                  </div>
-                  <div>
-                    <span>文档时间</span>
-                    <strong>
-                      {organization.classification.documentTime || "未识别"}
-                    </strong>
-                  </div>
-                </div>
-                {organization.classification.ruleBasis.rules &&
-                  organization.classification.ruleBasis.rules.length > 0 && (
-                    <p className="source-organization-basis">
-                      分类依据：
-                      {organization.classification.ruleBasis.rules
-                        .map((rule) => `${rule.field}=${rule.value}`)
-                        .join(" · ")}
-                    </p>
-                  )}
-              </>
-            ) : (
-              <p className="source-organization-empty">正在读取分类结果...</p>
-            )}
-          </section>
-
-          <section className="source-organization-section">
-            <div className="source-version-heading">
-              <strong>主题标签</strong>
               <button
                 className="button ghost"
                 disabled={busy}
                 type="button"
-                onClick={onSuggestTags}
+                onClick={() => onDecideSuggestion("accept")}
               >
-                <Icon name="sparkle" size={14} />
-                生成标签建议
+                确认建议
               </button>
             </div>
-            {confirmedTags.length > 0 && (
-              <div className="source-confirmed-tags">
-                {confirmedTags.map((tag) => (
-                  <span key={tag.id}>{tag.tag}</span>
-                ))}
+          </section>
+        )}
+
+        <section className="source-organization-section">
+          <div className="source-version-heading">
+            <strong>规则分类</strong>
+            <button
+              className="text-button"
+              disabled={busy}
+              type="button"
+              onClick={onClassify}
+            >
+              重新分析
+            </button>
+          </div>
+          {organization?.classification ? (
+            <>
+              <div className="source-classification-grid">
+                <div>
+                  <span>分类</span>
+                  <strong>{organization.classification.category}</strong>
+                </div>
+                <div>
+                  <span>标题</span>
+                  <strong>
+                    {organization.classification.title || "未识别"}
+                  </strong>
+                </div>
+                <div>
+                  <span>作者</span>
+                  <strong>
+                    {organization.classification.author || "未识别"}
+                  </strong>
+                </div>
+                <div>
+                  <span>文档时间</span>
+                  <strong>
+                    {organization.classification.documentTime || "未识别"}
+                  </strong>
+                </div>
               </div>
-            )}
-            {pendingTags.length > 0 ? (
-              <div className="source-tag-suggestions">
-                {pendingTags.map((tag) => (
-                  <article key={tag.id}>
-                    <div>
-                      <input
-                        aria-label={`修改标签 ${tag.tag}`}
-                        disabled={busy}
-                        value={tagDrafts[tag.id] ?? tag.tag}
-                        onChange={(event) =>
-                          onTagDraftChange(tag.id, event.target.value)
-                        }
-                      />
-                      <span>
-                        {tag.origin === "correction" ? "已复用历史修正 · " : ""}
-                        置信度 {Math.round(tag.confidence * 100)}%
-                      </span>
-                      <small>{tag.reason || "模型根据正文主题生成"}</small>
-                    </div>
+              {organization.classification.ruleBasis.rules &&
+                organization.classification.ruleBasis.rules.length > 0 && (
+                  <p className="source-organization-basis">
+                    分类依据：
+                    {organization.classification.ruleBasis.rules
+                      .map((rule) => `${rule.field}=${rule.value}`)
+                      .join(" · ")}
+                  </p>
+                )}
+            </>
+          ) : (
+            <p className="source-organization-empty">正在读取分类结果...</p>
+          )}
+        </section>
+
+        <section className="source-organization-section">
+          <div className="source-version-heading">
+            <strong>主题标签</strong>
+            <button
+              className="button ghost"
+              disabled={busy}
+              type="button"
+              onClick={onSuggestTags}
+            >
+              <Icon name="sparkle" size={14} />
+              生成标签建议
+            </button>
+          </div>
+          {confirmedTags.length > 0 && (
+            <div className="source-confirmed-tags">
+              {confirmedTags.map((tag) => (
+                <span key={tag.id}>{tag.tag}</span>
+              ))}
+            </div>
+          )}
+          {pendingTags.length > 0 ? (
+            <div className="source-tag-suggestions">
+              {pendingTags.map((tag) => (
+                <article key={tag.id}>
+                  <div>
+                    <input
+                      aria-label={`修改标签 ${tag.tag}`}
+                      disabled={busy}
+                      value={tagDrafts[tag.id] ?? tag.tag}
+                      onChange={(event) =>
+                        onTagDraftChange(tag.id, event.target.value)
+                      }
+                    />
+                    <span>
+                      {tag.origin === "correction" ? "已复用历史修正 · " : ""}
+                      置信度 {Math.round(tag.confidence * 100)}%
+                    </span>
+                    <small>{tag.reason || "模型根据正文主题生成"}</small>
+                  </div>
+                  <div>
+                    <button
+                      className="text-button danger-text"
+                      disabled={busy}
+                      type="button"
+                      onClick={() => onDecideTag(tag.id, "dismiss")}
+                    >
+                      忽略
+                    </button>
+                    <button
+                      className="button ghost"
+                      disabled={busy}
+                      type="button"
+                      onClick={() => onDecideTag(tag.id, "confirm")}
+                    >
+                      确认
+                    </button>
+                  </div>
+                </article>
+              ))}
+            </div>
+          ) : (
+            confirmedTags.length === 0 && (
+              <p className="source-organization-empty">
+                尚无标签，生成建议后可确认、修改或忽略。
+              </p>
+            )
+          )}
+        </section>
+
+        <section className="source-organization-section">
+          <div className="source-version-heading">
+            <strong>来源关联</strong>
+            <span>{visibleRelations.length} 个候选关联</span>
+          </div>
+          {visibleRelations.length > 0 ? (
+            <div className="source-relation-list">
+              {visibleRelations.map((relation) => (
+                <article key={relation.id}>
+                  <div>
+                    <strong>{relation.relatedDisplayName}</strong>
+                    <span>
+                      {sourceRelationLabel(relation.relationType)} · 置信度{" "}
+                      {Math.round(relation.confidence * 100)}% ·{" "}
+                      {sourceRelationStatusLabel(relation.status)}
+                    </span>
+                    <small>
+                      {relation.basis.reason || "根据来源内容生成关联"}
+                    </small>
+                    {relation.basis.sharedKeywords &&
+                      relation.basis.sharedKeywords.length > 0 && (
+                        <small>
+                          共享关键词：
+                          {relation.basis.sharedKeywords.join("、")}
+                        </small>
+                      )}
+                    {relation.basis.textSimilarity !== undefined && (
+                      <small>
+                        正文相似{" "}
+                        {Math.round(relation.basis.textSimilarity * 100)}% ·
+                        标题相似{" "}
+                        {Math.round(
+                          (relation.basis.titleSimilarity ?? 0) * 100,
+                        )}
+                        % · 关键词相似{" "}
+                        {Math.round(
+                          (relation.basis.tokenSimilarity ?? 0) * 100,
+                        )}
+                        %
+                      </small>
+                    )}
+                  </div>
+                  {relation.status === "pending" && (
                     <div>
                       <button
                         className="text-button danger-text"
                         disabled={busy}
                         type="button"
-                        onClick={() => onDecideTag(tag.id, "dismiss")}
+                        onClick={() => onDecideRelation(relation.id, "dismiss")}
                       >
                         忽略
                       </button>
@@ -6443,186 +6688,108 @@ function SourceMaintenanceDialog({
                         className="button ghost"
                         disabled={busy}
                         type="button"
-                        onClick={() => onDecideTag(tag.id, "confirm")}
+                        onClick={() => onDecideRelation(relation.id, "confirm")}
                       >
-                        确认
+                        确认关联
                       </button>
                     </div>
-                  </article>
-                ))}
-              </div>
-            ) : (
-              confirmedTags.length === 0 && (
-                <p className="source-organization-empty">
-                  尚无标签，生成建议后可确认、修改或忽略。
-                </p>
-              )
-            )}
-          </section>
-
-          <section className="source-organization-section">
-            <div className="source-version-heading">
-              <strong>来源关联</strong>
-              <span>{visibleRelations.length} 个候选关联</span>
-            </div>
-            {visibleRelations.length > 0 ? (
-              <div className="source-relation-list">
-                {visibleRelations.map((relation) => (
-                  <article key={relation.id}>
-                    <div>
-                      <strong>{relation.relatedDisplayName}</strong>
-                      <span>
-                        {sourceRelationLabel(relation.relationType)} · 置信度{" "}
-                        {Math.round(relation.confidence * 100)}% ·{" "}
-                        {sourceRelationStatusLabel(relation.status)}
-                      </span>
-                      <small>
-                        {relation.basis.reason || "根据来源内容生成关联"}
-                      </small>
-                      {relation.basis.sharedKeywords &&
-                        relation.basis.sharedKeywords.length > 0 && (
-                          <small>
-                            共享关键词：
-                            {relation.basis.sharedKeywords.join("、")}
-                          </small>
-                        )}
-                      {relation.basis.textSimilarity !== undefined && (
-                        <small>
-                          正文相似{" "}
-                          {Math.round(relation.basis.textSimilarity * 100)}% ·
-                          标题相似{" "}
-                          {Math.round(
-                            (relation.basis.titleSimilarity ?? 0) * 100,
-                          )}
-                          % · 关键词相似{" "}
-                          {Math.round(
-                            (relation.basis.tokenSimilarity ?? 0) * 100,
-                          )}
-                          %
-                        </small>
-                      )}
-                    </div>
-                    {relation.status === "pending" && (
-                      <div>
-                        <button
-                          className="text-button danger-text"
-                          disabled={busy}
-                          type="button"
-                          onClick={() =>
-                            onDecideRelation(relation.id, "dismiss")
-                          }
-                        >
-                          忽略
-                        </button>
-                        <button
-                          className="button ghost"
-                          disabled={busy}
-                          type="button"
-                          onClick={() =>
-                            onDecideRelation(relation.id, "confirm")
-                          }
-                        >
-                          确认关联
-                        </button>
-                      </div>
-                    )}
-                  </article>
-                ))}
-              </div>
-            ) : (
-              <p className="source-organization-empty">
-                未发现精确重复或近似重复来源。
-              </p>
-            )}
-          </section>
-
-          {error && <div className="settings-error">{error}</div>}
-
-          <section className="source-version-section">
-            <div className="source-version-heading">
-              <strong>版本记录</strong>
-              <span>{value.versions.length} 个版本</span>
-            </div>
-            <div className="source-version-list">
-              {value.versions.map((version) => (
-                <article key={version.id}>
-                  <div>
-                    <strong>
-                      v{version.versionNumber} ·{" "}
-                      {sourceVersionReviewLabel(version.reviewStatus)}
-                    </strong>
-                    <small>
-                      {version.checkedAt
-                        ? `检查于 ${formatDateTime(version.checkedAt)}`
-                        : formatDateTime(version.createdAt)}
-                    </small>
-                    {version.etag && <small>ETag {version.etag}</small>}
-                    {version.changeSummary.afterBlockCount !== undefined && (
-                      <span>
-                        +{version.changeSummary.addedBlocks ?? 0} / -
-                        {version.changeSummary.removedBlocks ?? 0} / 未变{" "}
-                        {version.changeSummary.unchangedBlocks ?? 0}
-                      </span>
-                    )}
-                  </div>
-                  <div className="source-version-actions">
-                    {version.previousVersionId && (
-                      <button
-                        className="text-button"
-                        disabled={busy}
-                        type="button"
-                        onClick={() => onInspectDiff(version.id)}
-                      >
-                        查看差异
-                      </button>
-                    )}
-                    {version.reviewStatus === "pending_review" && (
-                      <>
-                        <button
-                          className="text-button danger-text"
-                          disabled={busy}
-                          type="button"
-                          onClick={() => onDecideVersion(version.id, "reject")}
-                        >
-                          忽略
-                        </button>
-                        <button
-                          className="button primary"
-                          disabled={busy}
-                          type="button"
-                          onClick={() => onDecideVersion(version.id, "accept")}
-                        >
-                          采用
-                        </button>
-                      </>
-                    )}
-                  </div>
+                  )}
                 </article>
               ))}
             </div>
-          </section>
-
-          {diff && (
-            <section className="source-version-diff">
-              <div>
-                <strong>版本差异</strong>
-                <button
-                  aria-label="关闭版本差异"
-                  className="icon-button"
-                  type="button"
-                  onClick={onCloseDiff}
-                >
-                  <Icon name="close" size={15} />
-                </button>
-              </div>
-              <pre>
-                {diff.diff || "正文结构发生变化，但没有可展示的行级差异。"}
-              </pre>
-            </section>
+          ) : (
+            <p className="source-organization-empty">
+              未发现精确重复或近似重复来源。
+            </p>
           )}
-        </div>
-      </section>
-    </div>
+        </section>
+
+        {error && <div className="settings-error">{error}</div>}
+
+        <section className="source-version-section">
+          <div className="source-version-heading">
+            <strong>版本记录</strong>
+            <span>{value.versions.length} 个版本</span>
+          </div>
+          <div className="source-version-list">
+            {value.versions.map((version) => (
+              <article key={version.id}>
+                <div>
+                  <strong>
+                    v{version.versionNumber} ·{" "}
+                    {sourceVersionReviewLabel(version.reviewStatus)}
+                  </strong>
+                  <small>
+                    {version.checkedAt
+                      ? `检查于 ${formatDateTime(version.checkedAt)}`
+                      : formatDateTime(version.createdAt)}
+                  </small>
+                  {version.etag && <small>ETag {version.etag}</small>}
+                  {version.changeSummary.afterBlockCount !== undefined && (
+                    <span>
+                      +{version.changeSummary.addedBlocks ?? 0} / -
+                      {version.changeSummary.removedBlocks ?? 0} / 未变{" "}
+                      {version.changeSummary.unchangedBlocks ?? 0}
+                    </span>
+                  )}
+                </div>
+                <div className="source-version-actions">
+                  {version.previousVersionId && (
+                    <button
+                      className="text-button"
+                      disabled={busy}
+                      type="button"
+                      onClick={() => onInspectDiff(version.id)}
+                    >
+                      查看差异
+                    </button>
+                  )}
+                  {version.reviewStatus === "pending_review" && (
+                    <>
+                      <button
+                        className="text-button danger-text"
+                        disabled={busy}
+                        type="button"
+                        onClick={() => onDecideVersion(version.id, "reject")}
+                      >
+                        忽略
+                      </button>
+                      <button
+                        className="button primary"
+                        disabled={busy}
+                        type="button"
+                        onClick={() => onDecideVersion(version.id, "accept")}
+                      >
+                        采用
+                      </button>
+                    </>
+                  )}
+                </div>
+              </article>
+            ))}
+          </div>
+        </section>
+
+        {diff && (
+          <section className="source-version-diff">
+            <div>
+              <strong>版本差异</strong>
+              <button
+                aria-label="关闭版本差异"
+                className="icon-button"
+                type="button"
+                onClick={onCloseDiff}
+              >
+                <Icon name="close" size={15} />
+              </button>
+            </div>
+            <pre>
+              {diff.diff || "正文结构发生变化，但没有可展示的行级差异。"}
+            </pre>
+          </section>
+        )}
+      </div>
+    </AppDialog>
   );
 }
 
@@ -6659,45 +6826,48 @@ function ConfirmActionDialog({
         };
 
   return (
-    <div className="modal-backdrop" role="presentation">
-      <section className="kb-dialog" role="dialog" aria-modal="true">
-        <header className="settings-heading">
-          <div>
-            <p className="eyebrow">{content.eyebrow}</p>
-            <h2>{content.title}</h2>
-            <span>{content.description}</span>
-          </div>
-          <button
-            aria-label="关闭确认弹窗"
-            className="icon-button"
-            disabled={busy}
-            type="button"
-            onClick={onClose}
-          >
-            <Icon name="close" size={17} />
-          </button>
-        </header>
-        {error && <div className="settings-error">{error}</div>}
-        <div className="settings-actions confirm-actions">
-          <button
-            className="button ghost"
-            disabled={busy}
-            type="button"
-            onClick={onClose}
-          >
-            取消
-          </button>
-          <button
-            className={`button ${content.danger ? "danger" : "primary"}`}
-            disabled={busy}
-            type="button"
-            onClick={onSubmit}
-          >
-            {busy ? content.busyLabel : content.submitLabel}
-          </button>
+    <AppDialog
+      className="kb-dialog"
+      closeDisabled={busy}
+      labelledBy="confirm-action-title"
+      onClose={onClose}
+    >
+      <header className="settings-heading">
+        <div>
+          <p className="eyebrow">{content.eyebrow}</p>
+          <h2 id="confirm-action-title">{content.title}</h2>
+          <span>{content.description}</span>
         </div>
-      </section>
-    </div>
+        <button
+          aria-label="关闭确认弹窗"
+          className="icon-button"
+          disabled={busy}
+          type="button"
+          onClick={onClose}
+        >
+          <Icon name="close" size={17} />
+        </button>
+      </header>
+      {error && <div className="settings-error">{error}</div>}
+      <div className="settings-actions confirm-actions">
+        <button
+          className="button ghost"
+          disabled={busy}
+          type="button"
+          onClick={onClose}
+        >
+          取消
+        </button>
+        <button
+          className={`button ${content.danger ? "danger" : "primary"}`}
+          disabled={busy}
+          type="button"
+          onClick={onSubmit}
+        >
+          {busy ? content.busyLabel : content.submitLabel}
+        </button>
+      </div>
+    </AppDialog>
   );
 }
 
@@ -6765,227 +6935,222 @@ function ExternalResearchDialog({
     ) &&
     pending.length === 0;
   return (
-    <div className="modal-backdrop" role="presentation">
-      <section
-        className="kb-dialog external-research-dialog"
-        role="dialog"
-        aria-modal="true"
-      >
-        <header className="settings-heading">
-          <div>
-            <p className="eyebrow">External Evidence</p>
-            <h2>寻找外部资料</h2>
-            <span>
-              外部结果仅作为候选；确认后才会保存快照、导入当前知识库并重新索引。
-            </span>
-          </div>
-          <button
-            aria-label="关闭外部资料"
-            className="icon-button"
-            disabled={busy || pending.length > 0}
-            type="button"
-            onClick={onClose}
-          >
-            <Icon name="close" size={17} />
-          </button>
-        </header>
-        <div className="external-research-body">
-          <section className="external-mcp-panel">
-            <h3>MCP 只读能力</h3>
-            {servers.length > 0 ? (
-              <>
-                <label>
-                  <span>服务</span>
-                  <select
-                    value={selectedServerId}
-                    onChange={(event) => onDiscover(event.target.value)}
-                  >
-                    {servers.map((server) => (
-                      <option key={server.id} value={server.id}>
-                        {server.name}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <label>
-                  <span>只读 Tool</span>
-                  <select
-                    value={selectedToolName}
-                    onChange={(event) => onToolChange(event.target.value)}
-                  >
-                    <option value="">请选择</option>
-                    {tools.map((tool) => (
-                      <option
-                        disabled={!tool.locallyAllowedReadOnly}
-                        key={tool.name}
-                        value={tool.name}
-                      >
-                        {tool.title}
-                        {tool.locallyAllowedReadOnly
-                          ? ""
-                          : "（未通过本地策略）"}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-              </>
-            ) : (
-              <p className="external-empty-copy">
-                尚未配置 MCP 服务。命令由本机启动，密钥仅通过环境变量名传递。
-              </p>
-            )}
-            <details className="external-config">
-              <summary>
-                {servers.length > 0 ? "新增 MCP 服务" : "配置 MCP 服务"}
-              </summary>
-              <div className="external-config-fields">
-                <label>
-                  <span>名称</span>
-                  <input
-                    value={mcpForm.name}
-                    onChange={(event) =>
-                      onMcpFormChange({ ...mcpForm, name: event.target.value })
-                    }
-                  />
-                </label>
-                <label>
-                  <span>命令</span>
-                  <input
-                    placeholder="例如 npx 或 uvx"
-                    value={mcpForm.command}
-                    onChange={(event) =>
-                      onMcpFormChange({
-                        ...mcpForm,
-                        command: event.target.value,
-                      })
-                    }
-                  />
-                </label>
-                <label>
-                  <span>参数（每行一个）</span>
-                  <textarea
-                    rows={3}
-                    value={mcpForm.args}
-                    onChange={(event) =>
-                      onMcpFormChange({ ...mcpForm, args: event.target.value })
-                    }
-                  />
-                </label>
-                <label>
-                  <span>环境变量名（逗号分隔）</span>
-                  <input
-                    placeholder="SEARCH_API_KEY"
-                    value={mcpForm.envKeys}
-                    onChange={(event) =>
-                      onMcpFormChange({
-                        ...mcpForm,
-                        envKeys: event.target.value,
-                      })
-                    }
-                  />
-                </label>
-                <label>
-                  <span>本地只读 Tool 白名单（逗号分隔）</span>
-                  <input
-                    placeholder="search_web"
-                    value={mcpForm.readOnlyTools}
-                    onChange={(event) =>
-                      onMcpFormChange({
-                        ...mcpForm,
-                        readOnlyTools: event.target.value,
-                      })
-                    }
-                  />
-                </label>
-                <button
-                  className="button ghost"
-                  disabled={
-                    busy ||
-                    !mcpForm.name.trim() ||
-                    !mcpForm.command.trim() ||
-                    !mcpForm.readOnlyTools.trim()
-                  }
-                  type="button"
-                  onClick={onSaveServer}
-                >
-                  保存并发现能力
-                </button>
-              </div>
-            </details>
-          </section>
-          <section className="external-candidate-panel">
-            <div className="external-search-row">
-              <input
-                aria-label="外部资料检索词"
-                placeholder="输入要补充或核验的问题"
-                value={query}
-                onChange={(event) => onQueryChange(event.target.value)}
-              />
-              <button
-                className="button primary"
-                disabled={busy || !query.trim() || !selectedToolName}
-                type="button"
-                onClick={onSearch}
-              >
-                {busy && !result ? "检索中..." : "寻找候选"}
-              </button>
-            </div>
-            {error && <div className="settings-error">{error}</div>}
-            {!result && !error && (
-              <div className="external-candidates-empty">
-                <Icon name="sparkle" size={24} />
-                <strong>候选资料会显示在这里</strong>
-                <span>Tool 描述、注解和返回内容均按不可信输入处理。</span>
-              </div>
-            )}
-            {result && (
-              <div className="external-candidate-list">
-                {result.candidates.map((candidate) => (
-                  <ExternalCandidateCard
-                    candidate={candidate}
-                    checked={candidateIds.includes(candidate.id)}
-                    key={candidate.id}
-                    onToggle={() => onCandidateToggle(candidate.id)}
-                  />
-                ))}
-              </div>
-            )}
-          </section>
+    <AppDialog
+      className="kb-dialog external-research-dialog"
+      closeDisabled={busy || pending.length > 0}
+      labelledBy="external-research-title"
+      onClose={onClose}
+    >
+      <header className="settings-heading">
+        <div>
+          <p className="eyebrow">External Evidence</p>
+          <h2 id="external-research-title">寻找外部资料</h2>
+          <span>
+            外部结果仅作为候选；确认后才会保存快照、导入当前知识库并重新索引。
+          </span>
         </div>
-        <div className="settings-actions">
-          <button
-            className="button ghost"
-            disabled={busy || pending.length > 0}
-            type="button"
-            onClick={onClose}
-          >
-            {finished ? "完成" : "关闭"}
-          </button>
-          {pending.length > 0 && (
+        <button
+          aria-label="关闭外部资料"
+          className="icon-button"
+          disabled={busy || pending.length > 0}
+          type="button"
+          onClick={onClose}
+        >
+          <Icon name="close" size={17} />
+        </button>
+      </header>
+      <div className="external-research-body">
+        <section className="external-mcp-panel">
+          <h3>MCP 只读能力</h3>
+          {servers.length > 0 ? (
             <>
+              <label>
+                <span>服务</span>
+                <select
+                  value={selectedServerId}
+                  onChange={(event) => onDiscover(event.target.value)}
+                >
+                  {servers.map((server) => (
+                    <option key={server.id} value={server.id}>
+                      {server.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                <span>只读 Tool</span>
+                <select
+                  value={selectedToolName}
+                  onChange={(event) => onToolChange(event.target.value)}
+                >
+                  <option value="">请选择</option>
+                  {tools.map((tool) => (
+                    <option
+                      disabled={!tool.locallyAllowedReadOnly}
+                      key={tool.name}
+                      value={tool.name}
+                    >
+                      {tool.title}
+                      {tool.locallyAllowedReadOnly ? "" : "（未通过本地策略）"}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </>
+          ) : (
+            <p className="external-empty-copy">
+              尚未配置 MCP 服务。命令由本机启动，密钥仅通过环境变量名传递。
+            </p>
+          )}
+          <details className="external-config">
+            <summary>
+              {servers.length > 0 ? "新增 MCP 服务" : "配置 MCP 服务"}
+            </summary>
+            <div className="external-config-fields">
+              <label>
+                <span>名称</span>
+                <input
+                  value={mcpForm.name}
+                  onChange={(event) =>
+                    onMcpFormChange({ ...mcpForm, name: event.target.value })
+                  }
+                />
+              </label>
+              <label>
+                <span>命令</span>
+                <input
+                  placeholder="例如 npx 或 uvx"
+                  value={mcpForm.command}
+                  onChange={(event) =>
+                    onMcpFormChange({
+                      ...mcpForm,
+                      command: event.target.value,
+                    })
+                  }
+                />
+              </label>
+              <label>
+                <span>参数（每行一个）</span>
+                <textarea
+                  rows={3}
+                  value={mcpForm.args}
+                  onChange={(event) =>
+                    onMcpFormChange({ ...mcpForm, args: event.target.value })
+                  }
+                />
+              </label>
+              <label>
+                <span>环境变量名（逗号分隔）</span>
+                <input
+                  placeholder="SEARCH_API_KEY"
+                  value={mcpForm.envKeys}
+                  onChange={(event) =>
+                    onMcpFormChange({
+                      ...mcpForm,
+                      envKeys: event.target.value,
+                    })
+                  }
+                />
+              </label>
+              <label>
+                <span>本地只读 Tool 白名单（逗号分隔）</span>
+                <input
+                  placeholder="search_web"
+                  value={mcpForm.readOnlyTools}
+                  onChange={(event) =>
+                    onMcpFormChange({
+                      ...mcpForm,
+                      readOnlyTools: event.target.value,
+                    })
+                  }
+                />
+              </label>
               <button
                 className="button ghost"
-                disabled={busy}
+                disabled={
+                  busy ||
+                  !mcpForm.name.trim() ||
+                  !mcpForm.command.trim() ||
+                  !mcpForm.readOnlyTools.trim()
+                }
                 type="button"
-                onClick={() => onDecide("reject")}
+                onClick={onSaveServer}
               >
-                全部拒绝
+                保存并发现能力
               </button>
-              <button
-                className="button primary"
-                disabled={busy || candidateIds.length === 0}
-                type="button"
-                onClick={() => onDecide("import")}
-              >
-                {busy
-                  ? "导入并索引中..."
-                  : `导入所选 ${candidateIds.length} 项`}
-              </button>
-            </>
+            </div>
+          </details>
+        </section>
+        <section className="external-candidate-panel">
+          <div className="external-search-row">
+            <input
+              aria-label="外部资料检索词"
+              placeholder="输入要补充或核验的问题"
+              value={query}
+              onChange={(event) => onQueryChange(event.target.value)}
+            />
+            <button
+              className="button primary"
+              disabled={busy || !query.trim() || !selectedToolName}
+              type="button"
+              onClick={onSearch}
+            >
+              {busy && !result ? "检索中..." : "寻找候选"}
+            </button>
+          </div>
+          {error && <div className="settings-error">{error}</div>}
+          {!result && !error && (
+            <div className="external-candidates-empty">
+              <Icon name="sparkle" size={24} />
+              <strong>候选资料会显示在这里</strong>
+              <span>Tool 描述、注解和返回内容均按不可信输入处理。</span>
+            </div>
           )}
-        </div>
-      </section>
-    </div>
+          {result && (
+            <div className="external-candidate-list">
+              {result.candidates.map((candidate) => (
+                <ExternalCandidateCard
+                  candidate={candidate}
+                  checked={candidateIds.includes(candidate.id)}
+                  key={candidate.id}
+                  onToggle={() => onCandidateToggle(candidate.id)}
+                />
+              ))}
+            </div>
+          )}
+        </section>
+      </div>
+      <div className="settings-actions">
+        <button
+          className="button ghost"
+          disabled={busy || pending.length > 0}
+          type="button"
+          onClick={onClose}
+        >
+          {finished ? "完成" : "关闭"}
+        </button>
+        {pending.length > 0 && (
+          <>
+            <button
+              className="button ghost"
+              disabled={busy}
+              type="button"
+              onClick={() => onDecide("reject")}
+            >
+              全部拒绝
+            </button>
+            <button
+              className="button primary"
+              disabled={busy || candidateIds.length === 0}
+              type="button"
+              onClick={() => onDecide("import")}
+            >
+              {busy ? "导入并索引中..." : `导入所选 ${candidateIds.length} 项`}
+            </button>
+          </>
+        )}
+      </div>
+    </AppDialog>
   );
 }
 
@@ -7047,68 +7212,70 @@ function WebImportDialog({
   onSubmit: () => void;
 }): React.JSX.Element {
   return (
-    <div className="modal-backdrop" role="presentation">
-      <section className="kb-dialog" role="dialog" aria-modal="true">
-        <header className="settings-heading">
-          <div>
-            <p className="eyebrow">Web Source</p>
-            <h2>导入网页链接</h2>
-            <span>
-              优先使用正文提取器；静态正文不足时会尝试 Playwright 动态网页兜底。
-            </span>
-          </div>
-          <button
-            aria-label="关闭网页导入"
-            className="icon-button"
-            type="button"
-            onClick={onClose}
-          >
-            <Icon name="close" size={17} />
-          </button>
-        </header>
-        <div className="kb-dialog-body">
-          <label>
-            <span>网页 URL</span>
-            <input
-              placeholder="https://example.com/article"
-              value={form.url}
-              onChange={(event) =>
-                onFormChange({ ...form, url: event.target.value })
-              }
-            />
-          </label>
-          <label>
-            <span>显示名称</span>
-            <input
-              placeholder="可选"
-              value={form.displayName}
-              onChange={(event) =>
-                onFormChange({ ...form, displayName: event.target.value })
-              }
-            />
-          </label>
-          {error && <div className="settings-error">{error}</div>}
+    <AppDialog
+      className="kb-dialog"
+      labelledBy="web-import-title"
+      onClose={onClose}
+    >
+      <header className="settings-heading">
+        <div>
+          <p className="eyebrow">Web Source</p>
+          <h2 id="web-import-title">导入网页链接</h2>
+          <span>
+            优先使用正文提取器；静态正文不足时会尝试 Playwright 动态网页兜底。
+          </span>
         </div>
-        <div className="settings-actions">
-          <button
-            className="button ghost"
-            disabled={busy}
-            type="button"
-            onClick={onClose}
-          >
-            取消
-          </button>
-          <button
-            className="button primary"
-            disabled={busy || !form.url.trim()}
-            type="button"
-            onClick={onSubmit}
-          >
-            {busy ? "导入中..." : "导入网页"}
-          </button>
-        </div>
-      </section>
-    </div>
+        <button
+          aria-label="关闭网页导入"
+          className="icon-button"
+          type="button"
+          onClick={onClose}
+        >
+          <Icon name="close" size={17} />
+        </button>
+      </header>
+      <div className="kb-dialog-body">
+        <label>
+          <span>网页 URL</span>
+          <input
+            placeholder="https://example.com/article"
+            value={form.url}
+            onChange={(event) =>
+              onFormChange({ ...form, url: event.target.value })
+            }
+          />
+        </label>
+        <label>
+          <span>显示名称</span>
+          <input
+            placeholder="可选"
+            value={form.displayName}
+            onChange={(event) =>
+              onFormChange({ ...form, displayName: event.target.value })
+            }
+          />
+        </label>
+        {error && <div className="settings-error">{error}</div>}
+      </div>
+      <div className="settings-actions">
+        <button
+          className="button ghost"
+          disabled={busy}
+          type="button"
+          onClick={onClose}
+        >
+          取消
+        </button>
+        <button
+          className="button primary"
+          disabled={busy || !form.url.trim()}
+          type="button"
+          onClick={onSubmit}
+        >
+          {busy ? "导入中..." : "导入网页"}
+        </button>
+      </div>
+    </AppDialog>
   );
 }
 
@@ -7149,85 +7316,89 @@ function KnowledgeBaseDialog({
       : !form.name.trim());
 
   return (
-    <div className="modal-backdrop" role="presentation">
-      <section className="kb-dialog" role="dialog" aria-modal="true">
-        <header className="settings-heading">
-          <div>
-            <p className="eyebrow">Knowledge Base</p>
-            <h2>{title}</h2>
+    <AppDialog
+      className="kb-dialog"
+      closeDisabled={busy}
+      labelledBy="knowledge-base-dialog-title"
+      onClose={onClose}
+    >
+      <header className="settings-heading">
+        <div>
+          <p className="eyebrow">Knowledge Base</p>
+          <h2 id="knowledge-base-dialog-title">{title}</h2>
+          <span>
+            {deleting
+              ? "删除会级联移除该知识库下的来源、索引、对话和引用。"
+              : "知识库用于隔离来源、索引、对话与后续引用证据。"}
+          </span>
+        </div>
+        <button
+          aria-label="关闭知识库弹窗"
+          className="icon-button"
+          disabled={busy}
+          type="button"
+          onClick={onClose}
+        >
+          <Icon name="close" size={17} />
+        </button>
+      </header>
+      <div className="kb-dialog-body">
+        {deleting ? (
+          <label>
             <span>
-              {deleting
-                ? "删除会级联移除该知识库下的来源、索引、对话和引用。"
-                : "知识库用于隔离来源、索引、对话与后续引用证据。"}
+              输入 <strong>{activeKnowledgeBase?.name}</strong> 确认删除
             </span>
-          </div>
-          <button
-            aria-label="关闭知识库弹窗"
-            className="icon-button"
-            type="button"
-            onClick={onClose}
-          >
-            <Icon name="close" size={17} />
-          </button>
-        </header>
-        <div className="kb-dialog-body">
-          {deleting ? (
+            <input
+              value={form.confirmName}
+              onChange={(event) =>
+                onFormChange({ ...form, confirmName: event.target.value })
+              }
+            />
+          </label>
+        ) : (
+          <>
             <label>
-              <span>
-                输入 <strong>{activeKnowledgeBase?.name}</strong> 确认删除
-              </span>
+              <span>知识库名称</span>
               <input
-                value={form.confirmName}
+                value={form.name}
                 onChange={(event) =>
-                  onFormChange({ ...form, confirmName: event.target.value })
+                  onFormChange({ ...form, name: event.target.value })
                 }
               />
             </label>
-          ) : (
-            <>
-              <label>
-                <span>知识库名称</span>
-                <input
-                  value={form.name}
-                  onChange={(event) =>
-                    onFormChange({ ...form, name: event.target.value })
-                  }
-                />
-              </label>
-              <label>
-                <span>描述</span>
-                <input
-                  value={form.description}
-                  placeholder="可选"
-                  onChange={(event) =>
-                    onFormChange({ ...form, description: event.target.value })
-                  }
-                />
-              </label>
-            </>
-          )}
-          {error && <div className="settings-error">{error}</div>}
-        </div>
-        <div className="settings-actions">
-          <button
-            className="button ghost"
-            disabled={busy}
-            type="button"
-            onClick={onClose}
-          >
-            取消
-          </button>
-          <button
-            className={`button ${deleting ? "danger" : "primary"}`}
-            disabled={disabled}
-            type="button"
-            onClick={onSubmit}
-          >
-            {busy ? "处理中..." : title}
-          </button>
-        </div>
-      </section>
-    </div>
+            <label>
+              <span>描述</span>
+              <input
+                value={form.description}
+                placeholder="可选"
+                onChange={(event) =>
+                  onFormChange({ ...form, description: event.target.value })
+                }
+              />
+            </label>
+          </>
+        )}
+        {error && <div className="settings-error">{error}</div>}
+      </div>
+      <div className="settings-actions">
+        <button
+          className="button ghost"
+          disabled={busy}
+          type="button"
+          onClick={onClose}
+        >
+          取消
+        </button>
+        <button
+          className={`button ${deleting ? "danger" : "primary"}`}
+          disabled={disabled}
+          type="button"
+          onClick={onSubmit}
+        >
+          {busy ? "处理中..." : title}
+        </button>
+      </div>
+    </AppDialog>
   );
 }
 
@@ -7280,280 +7451,282 @@ function SeedSettingsModal({
   const models = status?.models.length ? status.models : FALLBACK_SEED_MODELS;
 
   return (
-    <div className="modal-backdrop" role="presentation">
-      <section className="settings-modal" role="dialog" aria-modal="true">
-        <header className="settings-heading">
-          <div>
-            <p className="eyebrow">Seed API</p>
-            <h2>配置火山方舟 Ark API</h2>
-            <span>
-              Key 会在 Electron Main 中加密保存，前端只显示掩码和验证状态。
-            </span>
-          </div>
-          <button
-            aria-label="关闭设置"
-            className="icon-button"
-            type="button"
-            onClick={onClose}
-          >
-            <Icon name="close" size={17} />
-          </button>
-        </header>
+    <AppDialog
+      className="settings-modal"
+      labelledBy="seed-settings-title"
+      onClose={onClose}
+    >
+      <header className="settings-heading">
+        <div>
+          <p className="eyebrow">Seed API</p>
+          <h2 id="seed-settings-title">配置火山方舟 Ark API</h2>
+          <span>
+            Key 会在 Electron Main 中加密保存，前端只显示掩码和验证状态。
+          </span>
+        </div>
+        <button
+          aria-label="关闭设置"
+          className="icon-button"
+          type="button"
+          onClick={onClose}
+        >
+          <Icon name="close" size={17} />
+        </button>
+      </header>
 
-        <div className="settings-form">
-          <label>
-            <span>配置名称</span>
-            <input
-              value={form.name}
-              onChange={(event) =>
-                onFormChange({ ...form, name: event.target.value })
-              }
-            />
-          </label>
-          <label>
-            <span>Ark API Key</span>
-            <input
-              type="password"
-              value={form.apiKey}
-              placeholder={
-                configured
-                  ? `已保存 ${status?.maskedKey ?? "加密 Key"}，输入新 Key 可覆盖`
-                  : "粘贴 Ark API Key"
-              }
-              onChange={(event) =>
-                onFormChange({ ...form, apiKey: event.target.value })
-              }
-            />
-          </label>
-          <label>
-            <span>新对话默认模型</span>
-            <select
-              value={form.defaultChatModel}
-              onChange={(event) =>
-                onFormChange({
-                  ...form,
-                  defaultChatModel: event.target.value,
-                })
-              }
-            >
-              {models
-                .filter((model) => model.role !== "embedding")
-                .map((model) => (
-                  <option key={model.id} value={model.id}>
-                    {model.label} · {model.id}
-                  </option>
-                ))}
-            </select>
-          </label>
-          <label>
-            <span>默认 Embedding 模型</span>
-            <select
-              value={form.defaultEmbeddingModel}
-              onChange={(event) =>
-                onFormChange({
-                  ...form,
-                  defaultEmbeddingModel: event.target.value,
-                })
-              }
-            >
-              {models
-                .filter((model) => model.role === "embedding")
-                .map((model) => (
-                  <option key={model.id} value={model.id}>
-                    {model.label} · {model.id}
-                  </option>
-                ))}
-            </select>
-          </label>
-          <div className="seed-status-line">
-            <span>Base URL</span>
-            <strong>
-              {status?.baseUrl ?? "https://ark.cn-beijing.volces.com/api/v3"}
-            </strong>
-          </div>
-          <div className="seed-status-line">
-            <span>safeStorage</span>
-            <strong
-              className={
-                status
-                  ? status.safeStorageAvailable
-                    ? "online"
-                    : "offline"
-                  : "offline"
-              }
-            >
-              {status
+      <div className="settings-form">
+        <label>
+          <span>配置名称</span>
+          <input
+            value={form.name}
+            onChange={(event) =>
+              onFormChange({ ...form, name: event.target.value })
+            }
+          />
+        </label>
+        <label>
+          <span>Ark API Key</span>
+          <input
+            type="password"
+            value={form.apiKey}
+            placeholder={
+              configured
+                ? `已保存 ${status?.maskedKey ?? "加密 Key"}，输入新 Key 可覆盖`
+                : "粘贴 Ark API Key"
+            }
+            onChange={(event) =>
+              onFormChange({ ...form, apiKey: event.target.value })
+            }
+          />
+        </label>
+        <label>
+          <span>新对话默认模型</span>
+          <select
+            value={form.defaultChatModel}
+            onChange={(event) =>
+              onFormChange({
+                ...form,
+                defaultChatModel: event.target.value,
+              })
+            }
+          >
+            {models
+              .filter((model) => model.role !== "embedding")
+              .map((model) => (
+                <option key={model.id} value={model.id}>
+                  {model.label} · {model.id}
+                </option>
+              ))}
+          </select>
+        </label>
+        <label>
+          <span>默认 Embedding 模型</span>
+          <select
+            value={form.defaultEmbeddingModel}
+            onChange={(event) =>
+              onFormChange({
+                ...form,
+                defaultEmbeddingModel: event.target.value,
+              })
+            }
+          >
+            {models
+              .filter((model) => model.role === "embedding")
+              .map((model) => (
+                <option key={model.id} value={model.id}>
+                  {model.label} · {model.id}
+                </option>
+              ))}
+          </select>
+        </label>
+        <div className="seed-status-line">
+          <span>Base URL</span>
+          <strong>
+            {status?.baseUrl ?? "https://ark.cn-beijing.volces.com/api/v3"}
+          </strong>
+        </div>
+        <div className="seed-status-line">
+          <span>safeStorage</span>
+          <strong
+            className={
+              status
                 ? status.safeStorageAvailable
-                  ? "可用"
-                  : "不可用"
-                : "待连接"}
+                  ? "online"
+                  : "offline"
+                : "offline"
+            }
+          >
+            {status
+              ? status.safeStorageAvailable
+                ? "可用"
+                : "不可用"
+              : "待连接"}
+          </strong>
+        </div>
+      </div>
+
+      {error && <div className="settings-error">{error}</div>}
+
+      <div className="settings-actions">
+        <button
+          className="button primary"
+          disabled={busy || !form.apiKey.trim()}
+          type="button"
+          onClick={onSave}
+        >
+          {busy ? "验证中..." : "保存并验证"}
+        </button>
+        <button
+          className="button ghost"
+          disabled={busy || !configured}
+          type="button"
+          onClick={onSaveDefaults}
+        >
+          保存默认模型
+        </button>
+        <button
+          className="button ghost"
+          disabled={busy || !configured}
+          type="button"
+          onClick={onValidate}
+        >
+          重新验证
+        </button>
+        <button
+          className="button ghost"
+          disabled={busy}
+          type="button"
+          onClick={onReload}
+        >
+          刷新状态
+        </button>
+        <button
+          className="button danger"
+          disabled={busy || !configured}
+          type="button"
+          onClick={onDelete}
+        >
+          删除配置
+        </button>
+      </div>
+
+      <section className="operational-status">
+        <div className="model-validation-heading">
+          <strong>调用与存储</strong>
+          <span>{usageSummary?.pricingNotice ?? "正在读取本地估算..."}</span>
+        </div>
+        <div className="operational-metrics">
+          <span>
+            <small>API 调用</small>
+            <strong>{formatNumber(usageSummary?.calls.total ?? 0)}</strong>
+          </span>
+          <span>
+            <small>估算 Token</small>
+            <strong>
+              {formatNumber(usageSummary?.estimatedTokens.total ?? 0)}
             </strong>
-          </div>
-        </div>
-
-        {error && <div className="settings-error">{error}</div>}
-
-        <div className="settings-actions">
-          <button
-            className="button primary"
-            disabled={busy || !form.apiKey.trim()}
-            type="button"
-            onClick={onSave}
-          >
-            {busy ? "验证中..." : "保存并验证"}
-          </button>
-          <button
-            className="button ghost"
-            disabled={busy || !configured}
-            type="button"
-            onClick={onSaveDefaults}
-          >
-            保存默认模型
-          </button>
+          </span>
+          <span>
+            <small>数据占用</small>
+            <strong>{formatBytes(maintenanceStatus?.totalBytes ?? 0)}</strong>
+          </span>
+          <span>
+            <small>可回收索引</small>
+            <strong>{maintenanceStatus?.recyclableIndexCount ?? 0}</strong>
+          </span>
+          <span>
+            <small>可回收旧版本</small>
+            <strong>
+              {maintenanceStatus?.recyclableSourceVersionCount ?? 0}
+            </strong>
+          </span>
           <button
             className="button ghost"
-            disabled={busy || !configured}
+            disabled={maintenanceBusy}
             type="button"
-            onClick={onValidate}
+            onClick={onCleanup}
           >
-            重新验证
-          </button>
-          <button
-            className="button ghost"
-            disabled={busy}
-            type="button"
-            onClick={onReload}
-          >
-            刷新状态
-          </button>
-          <button
-            className="button danger"
-            disabled={busy || !configured}
-            type="button"
-            onClick={onDelete}
-          >
-            删除配置
+            <Icon name="trash" size={14} />
+            {maintenanceBusy ? "清理中..." : "立即清理"}
           </button>
         </div>
-
-        <section className="operational-status">
-          <div className="model-validation-heading">
-            <strong>调用与存储</strong>
-            <span>{usageSummary?.pricingNotice ?? "正在读取本地估算..."}</span>
-          </div>
-          <div className="operational-metrics">
-            <span>
-              <small>API 调用</small>
-              <strong>{formatNumber(usageSummary?.calls.total ?? 0)}</strong>
-            </span>
-            <span>
-              <small>估算 Token</small>
-              <strong>
-                {formatNumber(usageSummary?.estimatedTokens.total ?? 0)}
-              </strong>
-            </span>
-            <span>
-              <small>数据占用</small>
-              <strong>{formatBytes(maintenanceStatus?.totalBytes ?? 0)}</strong>
-            </span>
-            <span>
-              <small>可回收索引</small>
-              <strong>{maintenanceStatus?.recyclableIndexCount ?? 0}</strong>
-            </span>
-            <span>
-              <small>可回收旧版本</small>
-              <strong>
-                {maintenanceStatus?.recyclableSourceVersionCount ?? 0}
-              </strong>
-            </span>
-            <button
-              className="button ghost"
-              disabled={maintenanceBusy}
-              type="button"
-              onClick={onCleanup}
-            >
-              <Icon name="trash" size={14} />
-              {maintenanceBusy ? "清理中..." : "立即清理"}
-            </button>
-          </div>
-          <div className="quality-metric-strip">
-            <span>
-              <small>解析成功率</small>
-              <strong>
-                {formatMetricPercent(
-                  maintenanceStatus?.qualityMetrics.parseSuccessRate,
-                )}
-              </strong>
-            </span>
-            <span>
-              <small>平均索引耗时</small>
-              <strong>
-                {formatMetricDuration(
-                  maintenanceStatus?.qualityMetrics.indexDurationMs,
-                )}
-              </strong>
-            </span>
-            <span>
-              <small>平均检索延迟</small>
-              <strong>
-                {formatMetricDuration(
-                  maintenanceStatus?.qualityMetrics.retrievalLatencyMs,
-                )}
-              </strong>
-            </span>
-            <span>
-              <small>回答首 Token</small>
-              <strong>
-                {formatMetricDuration(
-                  maintenanceStatus?.qualityMetrics.firstTokenLatencyMs,
-                )}
-              </strong>
-            </span>
-            <span>
-              <small>引用失败率</small>
-              <strong>
-                {formatMetricPercent(
-                  maintenanceStatus?.qualityMetrics.citationFailureRate,
-                )}
-              </strong>
-            </span>
-            <span>
-              <small>Embedding 调用 / 重试</small>
-              <strong>
-                {formatNumber(
-                  maintenanceStatus?.qualityMetrics.embeddingCalls ?? 0,
-                )}{" "}
-                /{" "}
-                {formatNumber(
-                  maintenanceStatus?.qualityMetrics.embeddingRetries ?? 0,
-                )}
-              </strong>
-            </span>
-          </div>
-          {maintenanceNotice && (
-            <p className="maintenance-notice">{maintenanceNotice}</p>
-          )}
-        </section>
-
-        <section className="model-validation">
-          <div className="model-validation-heading">
-            <strong>默认 Seed 模型权限</strong>
-            <span>
-              {configured ? "已绑定当前 Ark Key" : "保存 Key 后执行验证"}
-            </span>
-          </div>
-          <div className="model-list">
-            {models.map((model) => (
-              <ModelValidationCard
-                key={`${model.role}:${model.id}`}
-                capability={findCapability(status?.capabilities ?? [], model)}
-                model={model}
-              />
-            ))}
-          </div>
-        </section>
+        <div className="quality-metric-strip">
+          <span>
+            <small>解析成功率</small>
+            <strong>
+              {formatMetricPercent(
+                maintenanceStatus?.qualityMetrics.parseSuccessRate,
+              )}
+            </strong>
+          </span>
+          <span>
+            <small>平均索引耗时</small>
+            <strong>
+              {formatMetricDuration(
+                maintenanceStatus?.qualityMetrics.indexDurationMs,
+              )}
+            </strong>
+          </span>
+          <span>
+            <small>平均检索延迟</small>
+            <strong>
+              {formatMetricDuration(
+                maintenanceStatus?.qualityMetrics.retrievalLatencyMs,
+              )}
+            </strong>
+          </span>
+          <span>
+            <small>回答首 Token</small>
+            <strong>
+              {formatMetricDuration(
+                maintenanceStatus?.qualityMetrics.firstTokenLatencyMs,
+              )}
+            </strong>
+          </span>
+          <span>
+            <small>引用失败率</small>
+            <strong>
+              {formatMetricPercent(
+                maintenanceStatus?.qualityMetrics.citationFailureRate,
+              )}
+            </strong>
+          </span>
+          <span>
+            <small>Embedding 调用 / 重试</small>
+            <strong>
+              {formatNumber(
+                maintenanceStatus?.qualityMetrics.embeddingCalls ?? 0,
+              )}{" "}
+              /{" "}
+              {formatNumber(
+                maintenanceStatus?.qualityMetrics.embeddingRetries ?? 0,
+              )}
+            </strong>
+          </span>
+        </div>
+        {maintenanceNotice && (
+          <p className="maintenance-notice">{maintenanceNotice}</p>
+        )}
       </section>
-    </div>
+
+      <section className="model-validation">
+        <div className="model-validation-heading">
+          <strong>默认 Seed 模型权限</strong>
+          <span>
+            {configured ? "已绑定当前 Ark Key" : "保存 Key 后执行验证"}
+          </span>
+        </div>
+        <div className="model-list">
+          {models.map((model) => (
+            <ModelValidationCard
+              key={`${model.role}:${model.id}`}
+              capability={findCapability(status?.capabilities ?? [], model)}
+              model={model}
+            />
+          ))}
+        </div>
+      </section>
+    </AppDialog>
   );
 }
 
@@ -7845,6 +8018,44 @@ function isPendingAssistantMessage(
   message: ConversationMessageRecord,
 ): boolean {
   return message.id.startsWith(PENDING_ASSISTANT_MESSAGE_PREFIX);
+}
+
+function getDialogFocusableElements(root: HTMLElement): HTMLElement[] {
+  return Array.from(
+    root.querySelectorAll<HTMLElement>(DIALOG_FOCUSABLE_SELECTOR),
+  ).filter(
+    (element) =>
+      element.tabIndex >= 0 &&
+      !element.hasAttribute("disabled") &&
+      element.getAttribute("aria-hidden") !== "true",
+  );
+}
+
+function trapDialogFocus(
+  event: React.KeyboardEvent<HTMLElement>,
+  root: HTMLElement | null,
+): void {
+  if (!root) {
+    return;
+  }
+  const focusable = getDialogFocusableElements(root);
+  if (focusable.length === 0) {
+    event.preventDefault();
+    root.focus({ preventScroll: true });
+    return;
+  }
+  const first = focusable[0]!;
+  const last = focusable[focusable.length - 1]!;
+  const active = document.activeElement;
+  if (event.shiftKey && active === first) {
+    event.preventDefault();
+    last.focus({ preventScroll: true });
+    return;
+  }
+  if (!event.shiftKey && active === last) {
+    event.preventDefault();
+    first.focus({ preventScroll: true });
+  }
 }
 
 function isTerminalJobStatus(status: BackgroundJobRecord["status"]): boolean {

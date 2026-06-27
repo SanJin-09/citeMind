@@ -1668,6 +1668,7 @@ kbd {
 
 .chat-panel {
   display: grid;
+  position: relative;
   grid-template-rows: auto minmax(0, 1fr) auto;
 }
 
@@ -1677,6 +1678,35 @@ kbd {
 
 .chat-scroll.conversation-active {
   padding-top: 22px;
+}
+
+.chat-scroll-bottom {
+  position: absolute;
+  right: 24px;
+  bottom: 96px;
+  z-index: 5;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 32px;
+  padding: 0 12px;
+  border: 1px solid #cfe1d4;
+  border-radius: 999px;
+  color: #2e6948;
+  background: rgb(255 255 255 / 94%);
+  box-shadow: 0 10px 26px rgb(35 58 42 / 14%);
+  font-size: 10px;
+  font-weight: 750;
+  backdrop-filter: blur(10px);
+}
+
+.chat-scroll-bottom:hover {
+  border-color: #9ec2aa;
+  background: #eff8f2;
+}
+
+.chat-scroll-bottom svg {
+  transform: rotate(90deg);
 }
 
 .welcome-block {
