@@ -172,6 +172,12 @@ export interface SourceVersionDiffResponse {
   truncated: boolean;
 }
 
+export interface OpenSourceResult {
+  opened: boolean;
+  target: string;
+  message: string;
+}
+
 export interface WebUpdateCheckItem {
   sourceId: string;
   status: "unchanged" | "changed";
@@ -1507,6 +1513,7 @@ export interface DesktopApi {
     importFiles: (knowledgeBaseId: string) => Promise<ImportFilesResponse>;
     importWeb: (request: ImportWebRequest) => Promise<ImportSourceResult>;
     parseChecks: (knowledgeBaseId: string) => Promise<ParseChecksResponse>;
+    open: (sourceId: string) => Promise<OpenSourceResult>;
     delete: (sourceId: string) => Promise<DeleteSourceResponse>;
     resolveDuplicate: (
       request: ResolveDuplicateRequest,
@@ -1667,6 +1674,7 @@ export const IPC_CHANNELS = {
   importSourceFiles: "citemind:sources:import-files",
   importWebSource: "citemind:sources:import-web",
   listParseChecks: "citemind:sources:parse-checks",
+  openSource: "citemind:sources:open",
   deleteSource: "citemind:sources:delete",
   resolveDuplicate: "citemind:sources:resolve-duplicate",
   checkAllWebSources: "citemind:sources:check-web-all",

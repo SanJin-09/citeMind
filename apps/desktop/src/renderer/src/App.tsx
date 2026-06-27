@@ -331,6 +331,11 @@ function App(): React.JSX.Element {
   const [importBusy, setImportBusy] = useState(false);
   const [importError, setImportError] = useState("");
   const [appError, setAppError] = useState("");
+  const [backgroundJobs, setBackgroundJobs] = useState<BackgroundJobRecord[]>(
+    [],
+  );
+  const [taskCenterOpen, setTaskCenterOpen] = useState(false);
+  const [taskActionBusyId, setTaskActionBusyId] = useState("");
   const automaticIndexBuildsRef = useRef(
     new Map<
       string,
@@ -395,6 +400,7 @@ function App(): React.JSX.Element {
   const [selectedEvidence, setSelectedEvidence] =
     useState<EvidenceSelection | null>(null);
   const [sourceJumpNotice, setSourceJumpNotice] = useState("");
+  const [sourceOpenBusy, setSourceOpenBusy] = useState(false);
   const [evidenceOpen, setEvidenceOpen] = useState(true);
   const [systemOpen, setSystemOpen] = useState(false);
   const [knowledgeBaseMenuOpen, setKnowledgeBaseMenuOpen] = useState(false);
@@ -698,6 +704,30 @@ function App(): React.JSX.Element {
     setAppError(message);
   }, []);
 
+  const rememberBackgroundJob = useCallback((job: BackgroundJobRecord) => {
+    setBackgroundJobs((items) => {
+      const next = [job, ...items.filter((item) => item.id !== job.id)];
+      return next
+        .sort(
+          (left, right) =>
+            Date.parse(right.updatedAt) - Date.parse(left.updatedAt),
+        )
+        .slice(0, 16);
+    });
+  }, []);
+
+  const loadBackgroundJobs = useCallback(async (): Promise<void> => {
+    try {
+      const result = await getDesktopApi().jobs.list({
+        includeTerminal: true,
+        limit: 16,
+      });
+      setBackgroundJobs(result.jobs);
+    } catch {
+      // 任务中心是辅助入口，读取失败不阻断主流程。
+    }
+  }, []);
+
   const startAutomaticIndexBuild = useCallback(
     async (knowledgeBaseId: string, context: string): Promise<void> => {
       const current = automaticIndexBuildsRef.current.get(knowledgeBaseId);
@@ -737,6 +767,10 @@ function App(): React.JSX.Element {
 
   const handleBackgroundJobUpdate = useCallback(
     async (job: BackgroundJobRecord): Promise<void> => {
+      rememberBackgroundJob(job);
+      if (!isTerminalJobStatus(job.status)) {
+        setTaskCenterOpen(true);
+      }
       const terminal = ["completed", "failed", "cancelled"].includes(
         job.status,
       );
@@ -793,6 +827,7 @@ function App(): React.JSX.Element {
       loadSources,
       showAppError,
       startAutomaticIndexBuild,
+      rememberBackgroundJob,
     ],
   );
 
@@ -926,6 +961,7 @@ function App(): React.JSX.Element {
     if (!online) {
       return;
     }
+    void loadBackgroundJobs();
     try {
       return getDesktopApi().jobs.onUpdated((job) => {
         void handleBackgroundJobUpdate(job);
@@ -933,7 +969,7 @@ function App(): React.JSX.Element {
     } catch {
       return undefined;
     }
-  }, [handleBackgroundJobUpdate, online]);
+  }, [handleBackgroundJobUpdate, loadBackgroundJobs, online]);
 
   useEffect(() => {
     if (!activeKnowledgeBaseId) {
@@ -986,6 +1022,11 @@ function App(): React.JSX.Element {
   const hasSearchOutput =
     searchBusy || Boolean(searchError) || searchResults.length > 0;
   const activeSearchQuery = lastSearchQuery || searchQuery;
+  const apiSetupBlocked = seedStatus !== null && !seedStatus.configured;
+  const activeBackgroundJobs = backgroundJobs.filter(
+    (job) => !isTerminalJobStatus(job.status),
+  );
+  const taskCenterJobs = taskCenterOpen ? backgroundJobs : activeBackgroundJobs;
   const normalizedSourceFilter = sourceFilter.trim().toLowerCase();
   const hasSourceFilter = normalizedSourceFilter.length > 0;
   const visibleSources = hasSourceFilter
@@ -1254,6 +1295,52 @@ function App(): React.JSX.Element {
         .getElementById(`source-${sourceId}`)
         ?.scrollIntoView({ block: "center", behavior: "smooth" });
     });
+  };
+
+  const openEvidenceSource = async (
+    selection: EvidenceSelection,
+  ): Promise<void> => {
+    const sourceId = evidenceSourceId(selection);
+    if (!sourceId || sourceOpenBusy) {
+      return;
+    }
+    setSourceOpenBusy(true);
+    setSourceJumpNotice("");
+    try {
+      const result = await getDesktopApi().sources.open(sourceId);
+      setSourceJumpNotice(
+        `${result.message}：${evidenceDisplayName(selection)} · ${evidenceLocationLabel(selection)}`,
+      );
+    } catch (error) {
+      setSourceJumpNotice(
+        error instanceof Error ? error.message : "原文打开失败",
+      );
+    } finally {
+      setSourceOpenBusy(false);
+    }
+  };
+
+  const handleBackgroundJobAction = async (
+    job: BackgroundJobRecord,
+    action: "pause" | "resume" | "cancel" | "retry",
+  ): Promise<void> => {
+    const busyId = `${job.id}:${action}`;
+    setTaskActionBusyId(busyId);
+    try {
+      const updated = await getDesktopApi().jobs[action](job.id);
+      rememberBackgroundJob(updated);
+      setTaskCenterOpen(true);
+    } catch (error) {
+      showAppError(error instanceof Error ? error.message : "后台任务操作失败");
+    } finally {
+      setTaskActionBusyId("");
+    }
+  };
+
+  const clearCompletedBackgroundJobs = (): void => {
+    setBackgroundJobs((items) =>
+      items.filter((job) => !isTerminalJobStatus(job.status)),
+    );
   };
 
   const submitQuestion = async (): Promise<void> => {
@@ -2910,6 +2997,18 @@ function App(): React.JSX.Element {
               </div>
             )}
           </div>
+          <TaskCenter
+            actionBusyId={taskActionBusyId}
+            jobs={taskCenterJobs}
+            open={taskCenterOpen}
+            sources={sources}
+            totalCount={backgroundJobs.length}
+            onAction={(job, action) =>
+              void handleBackgroundJobAction(job, action)
+            }
+            onClearCompleted={clearCompletedBackgroundJobs}
+            onToggle={() => setTaskCenterOpen((value) => !value)}
+          />
         </aside>
 
         <section className="panel chat-panel">
@@ -2961,7 +3060,18 @@ function App(): React.JSX.Element {
               hasStartedConversation ? "conversation-active" : ""
             }`}
           >
-            {!hasStartedConversation && (
+            {apiSetupBlocked && !hasStartedConversation && (
+              <SetupGuide
+                knowledgeBaseName={activeKnowledgeBase?.name ?? "当前知识库"}
+                sourceCount={sourceSummary.sourceCount}
+                onOpenSettings={() => {
+                  setSettingsOpen(true);
+                  void loadSeedStatus();
+                }}
+              />
+            )}
+
+            {!hasStartedConversation && !apiSetupBlocked && (
               <div className="welcome-block">
                 <span className="welcome-icon">
                   <Icon name="sparkle" size={25} />
@@ -3125,7 +3235,7 @@ function App(): React.JSX.Element {
               </div>
             )}
 
-            {!hasStartedConversation && (
+            {!hasStartedConversation && !apiSetupBlocked && (
               <div className="suggestion-block">
                 <span className="section-label">建议提问</span>
                 <div className="suggestions">
@@ -3144,6 +3254,24 @@ function App(): React.JSX.Element {
             )}
           </div>
           <div className="composer-wrap">
+            {apiSetupBlocked && (
+              <div className="composer-blocker" role="status">
+                <span>
+                  <strong>需要先配置 Ark API Key</strong>
+                  <small>配置完成后才能生成回答和研究简报。</small>
+                </span>
+                <button
+                  className="text-button"
+                  type="button"
+                  onClick={() => {
+                    setSettingsOpen(true);
+                    void loadSeedStatus();
+                  }}
+                >
+                  去配置
+                </button>
+              </div>
+            )}
             {(focusedResearchBrief || nextRouteHint === "research_brief") && (
               <div className="composer-context-row">
                 {focusedResearchBrief && (
@@ -3223,11 +3351,13 @@ function App(): React.JSX.Element {
               <textarea
                 aria-label="向知识库提问"
                 placeholder={
-                  focusedResearchBrief
-                    ? "继续提问或要求修改当前简报…"
-                    : nextRouteHint === "research_brief"
-                      ? "描述要生成的研究简报…"
-                      : "向知识库提问，回答将附带真实引用…"
+                  apiSetupBlocked
+                    ? "先配置 Ark API Key 后开始提问…"
+                    : focusedResearchBrief
+                      ? "继续提问或要求修改当前简报…"
+                      : nextRouteHint === "research_brief"
+                        ? "描述要生成的研究简报…"
+                        : "向知识库提问，回答将附带真实引用…"
                 }
                 rows={1}
                 value={query}
@@ -3240,7 +3370,11 @@ function App(): React.JSX.Element {
                 }}
               />
               <span className="composer-meta">
-                {chatBusy ? "生成中" : `${selectedCount} 个来源`}
+                {apiSetupBlocked
+                  ? "需配置 API"
+                  : chatBusy
+                    ? "生成中"
+                    : `${selectedCount} 个来源`}
               </span>
               <label className="composer-model">
                 <select
@@ -3263,7 +3397,7 @@ function App(): React.JSX.Element {
               <button
                 aria-label="发送问题"
                 className="send-button"
-                disabled={!query.trim() || chatBusy}
+                disabled={!query.trim() || chatBusy || apiSetupBlocked}
                 type="button"
                 onClick={() => void submitQuestion()}
               >
@@ -3292,8 +3426,10 @@ function App(): React.JSX.Element {
           <div className="evidence-content">
             <EvidenceDetail
               jumpNotice={sourceJumpNotice}
+              openBusy={sourceOpenBusy}
               selection={selectedEvidence}
               onFocusSource={focusEvidenceSource}
+              onOpenSource={(selection) => void openEvidenceSource(selection)}
             />
           </div>
         </aside>
@@ -5576,6 +5712,184 @@ function SearchResultsPanel({
   );
 }
 
+function SetupGuide({
+  knowledgeBaseName,
+  sourceCount,
+  onOpenSettings,
+}: {
+  knowledgeBaseName: string;
+  sourceCount: number;
+  onOpenSettings: () => void;
+}): React.JSX.Element {
+  return (
+    <section className="setup-guide" aria-label="首次使用引导">
+      <span className="welcome-icon">
+        <Icon name="sparkle" size={25} />
+      </span>
+      <p className="eyebrow">开始前需要完成</p>
+      <h1>配置模型服务后开始可验证问答</h1>
+      <p>
+        当前知识库是“{knowledgeBaseName}”。你的资料会保存在本机；配置 Ark API
+        Key 后，citeMind 才能生成回答、检索向量并校验引用。
+      </p>
+      <ol className="setup-steps">
+        <li className="active">
+          <span>1</span>
+          <strong>配置 Ark API Key</strong>
+          <small>未完成</small>
+        </li>
+        <li className={sourceCount > 0 ? "done" : ""}>
+          <span>2</span>
+          <strong>添加第一份资料</strong>
+          <small>
+            {sourceCount > 0 ? `${sourceCount} 个来源` : "等待配置后继续"}
+          </small>
+        </li>
+        <li>
+          <span>3</span>
+          <strong>提出第一个问题</strong>
+          <small>回答会附带可点击引用</small>
+        </li>
+      </ol>
+      <button className="button primary" type="button" onClick={onOpenSettings}>
+        <Icon name="settings" size={16} />
+        配置 Ark API
+      </button>
+    </section>
+  );
+}
+
+function TaskCenter({
+  actionBusyId,
+  jobs,
+  open,
+  sources,
+  totalCount,
+  onAction,
+  onClearCompleted,
+  onToggle,
+}: {
+  actionBusyId: string;
+  jobs: BackgroundJobRecord[];
+  open: boolean;
+  sources: KnowledgeBaseSource[];
+  totalCount: number;
+  onAction: (
+    job: BackgroundJobRecord,
+    action: "pause" | "resume" | "cancel" | "retry",
+  ) => void;
+  onClearCompleted: () => void;
+  onToggle: () => void;
+}): React.JSX.Element | null {
+  if (jobs.length === 0 && totalCount === 0) {
+    return null;
+  }
+  const activeCount = jobs.filter(
+    (job) => !isTerminalJobStatus(job.status),
+  ).length;
+  const sourceNames = new Map(
+    sources.map((source) => [source.id, source.displayName]),
+  );
+  const hasTerminal = jobs.some((job) => isTerminalJobStatus(job.status));
+
+  return (
+    <section className="task-center" aria-label="后台任务中心">
+      <button
+        aria-expanded={open}
+        className="task-center-heading"
+        type="button"
+        onClick={onToggle}
+      >
+        <span>
+          <strong>后台任务</strong>
+          <small>
+            {activeCount > 0
+              ? `正在处理 ${activeCount} 项`
+              : totalCount > 0
+                ? "最近任务"
+                : "暂无任务"}
+          </small>
+        </span>
+        <Icon name="chevron" size={14} />
+      </button>
+      <div className="task-list">
+        {jobs.map((job) => (
+          <article className={`task-card ${job.status}`} key={job.id}>
+            <div className="task-card-heading">
+              <span>
+                <strong>{jobTitle(job, sourceNames)}</strong>
+                <small>
+                  {jobStatusLabel(job.status)} · {jobElapsedLabel(job)}
+                </small>
+              </span>
+              <small>{jobProgressPercent(job)}%</small>
+            </div>
+            <div className="task-progress" aria-hidden="true">
+              <span style={{ width: `${jobProgressPercent(job)}%` }} />
+            </div>
+            <p>{jobStageSummary(job)}</p>
+            {job.errorMessage && (
+              <p className="task-error">{job.errorMessage}</p>
+            )}
+            <div className="task-actions">
+              {job.status === "running" && (
+                <>
+                  <button
+                    disabled={actionBusyId === `${job.id}:pause`}
+                    type="button"
+                    onClick={() => onAction(job, "pause")}
+                  >
+                    暂停
+                  </button>
+                  <button
+                    disabled={actionBusyId === `${job.id}:cancel`}
+                    type="button"
+                    onClick={() => onAction(job, "cancel")}
+                  >
+                    取消
+                  </button>
+                </>
+              )}
+              {["pending", "retrying"].includes(job.status) && (
+                <button
+                  disabled={actionBusyId === `${job.id}:cancel`}
+                  type="button"
+                  onClick={() => onAction(job, "cancel")}
+                >
+                  取消
+                </button>
+              )}
+              {job.status === "paused" && (
+                <button
+                  disabled={actionBusyId === `${job.id}:resume`}
+                  type="button"
+                  onClick={() => onAction(job, "resume")}
+                >
+                  继续
+                </button>
+              )}
+              {job.status === "failed" && (
+                <button
+                  disabled={actionBusyId === `${job.id}:retry`}
+                  type="button"
+                  onClick={() => onAction(job, "retry")}
+                >
+                  重试
+                </button>
+              )}
+            </div>
+          </article>
+        ))}
+      </div>
+      {open && hasTerminal && (
+        <button className="task-clear" type="button" onClick={onClearCompleted}>
+          清理已结束任务
+        </button>
+      )}
+    </section>
+  );
+}
+
 function AssistantAnswerMessage({
   message,
   response,
@@ -5731,12 +6045,16 @@ function InlineCitationButton({
 
 function EvidenceDetail({
   jumpNotice,
+  openBusy,
   selection,
   onFocusSource,
+  onOpenSource,
 }: {
   jumpNotice: string;
+  openBusy: boolean;
   selection: EvidenceSelection | null;
   onFocusSource: (selection: EvidenceSelection) => void;
+  onOpenSource: (selection: EvidenceSelection) => void;
 }): React.JSX.Element {
   if (!selection) {
     return (
@@ -5806,13 +6124,24 @@ function EvidenceDetail({
             "这是历史持久化引用，原回答检索解释未随消息列表加载。"}
         </p>
         {jumpNotice && <p className="source-jump-notice">{jumpNotice}</p>}
-        <button
-          className="button evidence-action"
-          type="button"
-          onClick={() => onFocusSource(selection)}
-        >
-          定位来源位置 <Icon name="chevron" size={15} />
-        </button>
+        <div className="evidence-actions">
+          <button
+            className="button evidence-action primary-action"
+            disabled={openBusy}
+            type="button"
+            onClick={() => onOpenSource(selection)}
+          >
+            {openBusy ? "打开中…" : "打开原文"}{" "}
+            <Icon name="chevron" size={15} />
+          </button>
+          <button
+            className="button evidence-action"
+            type="button"
+            onClick={() => onFocusSource(selection)}
+          >
+            来源列表定位 <Icon name="chevron" size={15} />
+          </button>
+        </div>
       </article>
     </>
   );
@@ -7516,6 +7845,67 @@ function isPendingAssistantMessage(
   message: ConversationMessageRecord,
 ): boolean {
   return message.id.startsWith(PENDING_ASSISTANT_MESSAGE_PREFIX);
+}
+
+function isTerminalJobStatus(status: BackgroundJobRecord["status"]): boolean {
+  return ["completed", "failed", "cancelled"].includes(status);
+}
+
+function jobProgressPercent(job: BackgroundJobRecord): number {
+  return Math.max(0, Math.min(100, Math.round(job.progress * 100)));
+}
+
+function jobTitle(
+  job: BackgroundJobRecord,
+  sourceNames: Map<string, string>,
+): string {
+  const targetName = sourceNames.get(job.targetId);
+  const prefix = job.jobType.startsWith("index.")
+    ? "索引构建"
+    : job.jobType.startsWith("source.import")
+      ? "资料导入"
+      : job.jobType.startsWith("web.")
+        ? "网页更新"
+        : "后台任务";
+  return targetName ? `${prefix} · ${targetName}` : prefix;
+}
+
+function jobStatusLabel(status: BackgroundJobRecord["status"]): string {
+  const labels: Record<BackgroundJobRecord["status"], string> = {
+    pending: "排队中",
+    running: "运行中",
+    completed: "已完成",
+    paused: "已暂停",
+    cancelled: "已取消",
+    failed: "失败",
+    retrying: "重试中",
+  };
+  return labels[status];
+}
+
+function jobStageSummary(job: BackgroundJobRecord): string {
+  const stages = job.checkpoint.stages ?? [];
+  const current =
+    stages.find((stage) => ["running", "retrying"].includes(stage.status)) ??
+    stages.find((stage) => stage.status === "failed") ??
+    [...stages].reverse().find((stage) => stage.status === "completed");
+  if (!current) {
+    return `${jobStatusLabel(job.status)} · ${jobProgressPercent(job)}%`;
+  }
+  return `${current.label} · ${Math.round(current.progress * 100)}%`;
+}
+
+function jobElapsedLabel(job: BackgroundJobRecord): string {
+  const started = Date.parse(job.createdAt);
+  const updated = Date.parse(job.updatedAt);
+  if (!Number.isFinite(started) || !Number.isFinite(updated)) {
+    return "时间未知";
+  }
+  const seconds = Math.max(0, Math.round((updated - started) / 1000));
+  if (seconds < 60) {
+    return `${seconds}s`;
+  }
+  return `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
 }
 
 function citationsForParagraph(

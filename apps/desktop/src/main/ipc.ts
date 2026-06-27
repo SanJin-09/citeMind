@@ -1,4 +1,4 @@
-import { BrowserWindow, dialog, ipcMain } from "electron";
+import { BrowserWindow, dialog, ipcMain, shell } from "electron";
 import { writeFile } from "node:fs/promises";
 import {
   type AgentRunConfirmationRequest,
@@ -54,6 +54,7 @@ import {
   type McpServerListResponse,
   type McpServerRecord,
   type ModelCapabilityStatus,
+  type OpenSourceResult,
   type ParseChecksResponse,
   type RenameKnowledgeBaseRequest,
   type ResearchBriefExportResult,
@@ -637,6 +638,34 @@ export function registerIpcHandlers(workerManager: PythonWorkerManager): void {
       30_000,
     ),
   );
+  ipcMain.handle(IPC_CHANNELS.openSource, async (_event, sourceId) => {
+    const response = await workerManager.call<SourceVersionsResponse>(
+      "sources.versions",
+      { sourceId: normalizeNonEmptyString(sourceId, "来源 ID") },
+      30_000,
+    );
+    const target = sourceOpenTarget(response);
+    if (!target) {
+      throw new Error("当前来源缺少可打开的原文路径");
+    }
+    if (isExternalUrl(target)) {
+      await shell.openExternal(target);
+      return {
+        opened: true,
+        target,
+        message: "已在浏览器打开网页来源",
+      } satisfies OpenSourceResult;
+    }
+    const errorMessage = await shell.openPath(target);
+    if (errorMessage) {
+      throw new Error(`原文打开失败：${errorMessage}`);
+    }
+    return {
+      opened: true,
+      target,
+      message: "已打开本地原文文件",
+    } satisfies OpenSourceResult;
+  });
   ipcMain.handle(IPC_CHANNELS.deleteSource, (_event, sourceId) =>
     workerManager.call<DeleteSourceResponse>(
       "sources.delete",
@@ -1118,6 +1147,31 @@ function buildSeedStatus(
     models: workerStatus.models,
     capabilities: workerStatus.capabilities,
   };
+}
+
+function sourceOpenTarget(response: SourceVersionsResponse): string | null {
+  const source = response.source;
+  if (source.sourceType === "web" && source.uri) {
+    return source.uri;
+  }
+  const currentVersion =
+    response.versions.find((version) => version.reviewStatus === "current") ??
+    response.versions[0];
+  return (
+    currentVersion?.originalPath ??
+    currentVersion?.snapshotPath ??
+    source.uri ??
+    null
+  );
+}
+
+function isExternalUrl(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return url.protocol === "http:" || url.protocol === "https:";
+  } catch {
+    return false;
+  }
 }
 
 function normalizeSaveRequest(payload: unknown): SaveSeedCredentialRequest {
