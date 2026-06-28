@@ -643,6 +643,8 @@ export interface ConversationAnswerResponse {
     }>;
     evidenceSufficient: boolean;
     refusalReason: string | null;
+    answerMode?: "knowledge_grounded" | "system_meta";
+    citationPolicy?: "required" | "not_required";
   };
   citations: AnswerCitation[];
   citationValidation: {

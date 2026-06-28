@@ -1039,12 +1039,17 @@ function App(): React.JSX.Element {
     }
     try {
       return getDesktopApi().agentRuns.onTraceEvent((event) => {
-        setAgentRunTraces((items) => updateAgentRunTraceEvent(items, event));
-        void openAgentRunTrace(
-          event.runId,
-          pendingTraceMessageIdRef.current,
-          activeKnowledgeBaseId,
+        setAgentRunTraces((items) =>
+          updateAgentRunTraceEvent(
+            items,
+            event,
+            pendingTraceMessageIdRef.current,
+            activeKnowledgeBaseId,
+          ),
         );
+        if (isTerminalTraceEvent(event)) {
+          void openAgentRunTrace(event.runId, undefined, activeKnowledgeBaseId);
+        }
       });
     } catch {
       return undefined;
@@ -1541,7 +1546,10 @@ function App(): React.JSX.Element {
         delete next[pendingAssistantMessage.id];
         if (response.kind === "answer") {
           if (pendingTrace) {
-            next[response.answer.assistantMessage.id] = pendingTrace;
+            next[response.answer.assistantMessage.id] = mergeAgentRunResponse(
+              pendingTrace,
+              next[response.answer.assistantMessage.id] ?? pendingTrace,
+            );
           }
         } else if (
           response.kind === "research_brief_created" ||
@@ -6102,6 +6110,9 @@ function AssistantAnswerMessage({
   const evidenceSufficient = response
     ? response.answer.evidenceSufficient
     : citations.length > 0;
+  const answerMode =
+    response?.answer.answerMode ?? answerModeFromMessage(message);
+  const systemMetaAnswer = answerMode === "system_meta";
   const citationNumbers = citationNumberMap(citations);
 
   return (
@@ -6122,7 +6133,7 @@ function AssistantAnswerMessage({
           <Icon name="download" size={15} />
         </button>
       </div>
-      {!evidenceSufficient && (
+      {!evidenceSufficient && !systemMetaAnswer && (
         <div className="evidence-warning">
           证据不足：没有通过检索与引用校验的来源。
         </div>
@@ -6166,16 +6177,20 @@ function AssistantAnswerMessage({
       <div className="answer-meta">
         <span>{message.modelId ?? response?.model.id ?? "历史回答"}</span>
         <span>
-          {response
-            ? `检索候选 ${response.retrieval.retrieval.mergedCandidateCount}`
-            : `${citations.length} 条持久化引用`}
+          {systemMetaAnswer
+            ? "系统说明"
+            : response
+              ? `检索候选 ${response.retrieval.retrieval.mergedCandidateCount}`
+              : `${citations.length} 条持久化引用`}
         </span>
         <span>
-          {!evidenceSufficient
-            ? "证据不足"
-            : response?.citationValidation.valid
-              ? "引用校验通过"
-              : "历史引用"}
+          {systemMetaAnswer
+            ? "无需知识库引用"
+            : !evidenceSufficient
+              ? "证据不足"
+              : response?.citationValidation.valid
+                ? "引用校验通过"
+                : "历史引用"}
         </span>
       </div>
     </article>
@@ -7810,24 +7825,435 @@ function upsertAgentRunEvent(
 function updateAgentRunTraceEvent(
   traces: Record<string, AgentRunResponse>,
   event: AgentRunEventRecord,
+  preferredMessageId?: string,
+  fallbackKnowledgeBaseId?: string,
 ): Record<string, AgentRunResponse> {
-  let changed = false;
-  const next = Object.fromEntries(
-    Object.entries(traces).map(([messageId, response]) => {
-      if (response.run.id !== event.runId) {
-        return [messageId, response];
-      }
-      changed = true;
-      return [
-        messageId,
-        {
-          ...response,
-          events: upsertAgentRunEvent(response.events, event),
-        },
-      ];
-    }),
+  const matchingEntry = Object.entries(traces).find(
+    ([, response]) => response.run.id === event.runId,
   );
-  return changed ? next : traces;
+  const messageId =
+    matchingEntry?.[0] ||
+    traceMessageIdFromEvent(event, preferredMessageId, fallbackKnowledgeBaseId);
+  if (!messageId) {
+    return traces;
+  }
+  const current = matchingEntry?.[1] ?? traces[messageId];
+  const nextResponse = mergeAgentRunEventResponse(
+    current,
+    event,
+    fallbackKnowledgeBaseId,
+  );
+  if (!nextResponse) {
+    return traces;
+  }
+  if (current === nextResponse && traces[messageId] === nextResponse) {
+    return traces;
+  }
+  const next = { ...traces };
+  if (matchingEntry && matchingEntry[0] !== messageId) {
+    delete next[matchingEntry[0]];
+  }
+  next[messageId] = nextResponse;
+  return next;
+}
+
+function traceMessageIdFromEvent(
+  event: AgentRunEventRecord,
+  preferredMessageId?: string,
+  fallbackKnowledgeBaseId?: string,
+): string | null {
+  if (!preferredMessageId || event.eventType !== "run.created") {
+    return null;
+  }
+  const skillId = recordString(event.payload, "skillId");
+  if (skillId !== "conversation_answer") {
+    return null;
+  }
+  const eventKnowledgeBaseId = recordString(event.payload, "knowledgeBaseId");
+  if (
+    fallbackKnowledgeBaseId &&
+    eventKnowledgeBaseId &&
+    eventKnowledgeBaseId !== fallbackKnowledgeBaseId
+  ) {
+    return null;
+  }
+  return preferredMessageId;
+}
+
+function mergeAgentRunEventResponse(
+  current: AgentRunResponse | undefined,
+  event: AgentRunEventRecord,
+  fallbackKnowledgeBaseId?: string,
+): AgentRunResponse | null {
+  const base =
+    current ??
+    syntheticAgentRunResponseFromEvent(event, fallbackKnowledgeBaseId);
+  if (!base) {
+    return null;
+  }
+  const events = upsertAgentRunEvent(base.events, event);
+  return {
+    ...base,
+    run: updateSyntheticAgentRun(
+      base.run,
+      event,
+      events,
+      fallbackKnowledgeBaseId,
+    ),
+    events,
+    toolCalls: upsertSyntheticToolCall(base.toolCalls, event),
+  };
+}
+
+function syntheticAgentRunResponseFromEvent(
+  event: AgentRunEventRecord,
+  fallbackKnowledgeBaseId?: string,
+): AgentRunResponse | null {
+  const skillId = recordString(event.payload, "skillId");
+  if (event.eventType !== "run.created" || skillId !== "conversation_answer") {
+    return null;
+  }
+  const knowledgeBaseId =
+    recordString(event.payload, "knowledgeBaseId") ??
+    fallbackKnowledgeBaseId ??
+    "";
+  if (!knowledgeBaseId) {
+    return null;
+  }
+  const createdAt = event.createdAt;
+  const run: AgentRunRecord = {
+    id: event.runId,
+    knowledgeBaseId,
+    title: "对话回答",
+    goal: event.summary ?? "",
+    skillId,
+    skillVersion: recordString(event.payload, "skillVersion") ?? "1.0.0",
+    status: normalizeAgentRunStatus(event.status) ?? "planning",
+    sourceScope: recordStringArray(event.payload, "sourceScope"),
+    indexVersionId: recordNullableString(event.payload, "indexVersionId"),
+    models: recordObject(event.payload, "models"),
+    budgets: recordObject(event.payload, "budgets"),
+    usage: {},
+    plan: {},
+    draft: {},
+    finalOutput: {},
+    traceSnapshot: traceSnapshotFromEvents([event]),
+    errorMessage: null,
+    stopReason: null,
+    retryCount: 0,
+    startedAt: event.startedAt ?? createdAt,
+    completedAt: null,
+    createdAt,
+    updatedAt: createdAt,
+  };
+  return {
+    run,
+    events: [],
+    toolCalls: [],
+    confirmations: [],
+    delegations: [],
+    outputs: [],
+    citations: [],
+  };
+}
+
+function updateSyntheticAgentRun(
+  run: AgentRunRecord,
+  event: AgentRunEventRecord,
+  events: AgentRunEventRecord[],
+  fallbackKnowledgeBaseId?: string,
+): AgentRunRecord {
+  const nextStatus = normalizeAgentRunStatus(event.status) ?? run.status;
+  const terminal = isAgentRunFinished(nextStatus);
+  const plan = recordObjectOrNull(event.payload, "plan") ?? run.plan;
+  return {
+    ...run,
+    knowledgeBaseId:
+      recordString(event.payload, "knowledgeBaseId") ??
+      run.knowledgeBaseId ??
+      fallbackKnowledgeBaseId ??
+      "",
+    goal:
+      event.eventType === "run.created"
+        ? (event.summary ?? run.goal)
+        : run.goal,
+    skillId: recordString(event.payload, "skillId") ?? run.skillId,
+    skillVersion:
+      recordString(event.payload, "skillVersion") ?? run.skillVersion,
+    status: nextStatus,
+    sourceScope:
+      event.eventType === "run.created"
+        ? recordStringArray(event.payload, "sourceScope")
+        : run.sourceScope,
+    indexVersionId:
+      event.eventType === "run.created"
+        ? recordNullableString(event.payload, "indexVersionId")
+        : run.indexVersionId,
+    models:
+      event.eventType === "run.created"
+        ? recordObject(event.payload, "models")
+        : run.models,
+    budgets:
+      event.eventType === "run.created"
+        ? recordObject(event.payload, "budgets")
+        : run.budgets,
+    plan,
+    traceSnapshot: traceSnapshotFromEvents(events),
+    errorMessage:
+      event.eventType === "run.failed"
+        ? (event.summary ?? run.errorMessage)
+        : run.errorMessage,
+    stopReason: terminal ? (event.summary ?? run.stopReason) : run.stopReason,
+    completedAt: terminal
+      ? (event.completedAt ?? event.createdAt)
+      : run.completedAt,
+    updatedAt: event.createdAt,
+  };
+}
+
+function upsertSyntheticToolCall(
+  toolCalls: AgentRunToolCallRecord[],
+  event: AgentRunEventRecord,
+): AgentRunToolCallRecord[] {
+  if (!event.toolCallId || !event.eventType.startsWith("tool_call.")) {
+    return toolCalls;
+  }
+  const existing = toolCalls.find((item) => item.id === event.toolCallId);
+  const startedAt = existing?.startedAt ?? event.startedAt ?? event.createdAt;
+  const nextStatus =
+    toolStatusFromEvent(event) ?? existing?.status ?? "running";
+  const next: AgentRunToolCallRecord = {
+    id: event.toolCallId,
+    runId: event.runId,
+    stepId:
+      existing?.stepId ??
+      recordString(event.payload, "stepId") ??
+      event.stepId ??
+      null,
+    toolName:
+      existing?.toolName ??
+      recordString(event.payload, "toolName") ??
+      "unknown_tool",
+    skillId:
+      existing?.skillId ?? recordNullableString(event.payload, "skillId"),
+    skillVersion:
+      existing?.skillVersion ??
+      recordNullableString(event.payload, "skillVersion"),
+    actionSummary: existing?.actionSummary ?? event.summary ?? event.title,
+    workingDirectory:
+      existing?.workingDirectory ??
+      recordNullableString(event.payload, "workingDirectory"),
+    sanitizedParams:
+      existing?.sanitizedParams ??
+      recordObject(event.payload, "sanitizedParams"),
+    status: nextStatus,
+    startedAt,
+    completedAt: isTerminalToolStatus(nextStatus)
+      ? (event.completedAt ?? event.createdAt)
+      : (existing?.completedAt ?? null),
+    durationMs:
+      recordNumber(event.payload, "durationMs") ??
+      event.durationMs ??
+      existing?.durationMs ??
+      null,
+    exitCode:
+      recordNumber(event.payload, "exitCode") ?? existing?.exitCode ?? null,
+    stdoutSummary:
+      recordString(event.payload, "stdoutSummary") ??
+      (event.eventType === "tool_call.completed" ? event.summary : null) ??
+      existing?.stdoutSummary ??
+      null,
+    stderrSummary:
+      recordString(event.payload, "stderrSummary") ??
+      existing?.stderrSummary ??
+      null,
+    errorMessage:
+      nextStatus === "failed"
+        ? (event.summary ?? existing?.errorMessage ?? null)
+        : (existing?.errorMessage ?? null),
+  };
+  return [
+    next,
+    ...toolCalls.filter((item) => item.id !== event.toolCallId),
+  ].sort(
+    (left, right) =>
+      new Date(right.startedAt).getTime() - new Date(left.startedAt).getTime(),
+  );
+}
+
+function traceSnapshotFromEvents(
+  events: AgentRunEventRecord[],
+): AgentRunRecord["traceSnapshot"] {
+  const ordered = [...events].sort(
+    (left, right) => left.sequence - right.sequence,
+  );
+  const phases: NonNullable<AgentRunRecord["traceSnapshot"]["phases"]> = [];
+  const phaseById = new Map<string, (typeof phases)[number]>();
+  for (const event of ordered) {
+    const phaseId = eventStageId(event);
+    let phase = phaseById.get(phaseId);
+    if (!phase) {
+      phase = {
+        id: phaseId,
+        label: tracePhaseLabel(phaseId),
+        status: "pending",
+      };
+      phaseById.set(phaseId, phase);
+      phases.push(phase);
+    }
+    if (isTerminalTraceEvent(event)) {
+      for (const item of phases) {
+        if (item.status === "active") {
+          item.status =
+            event.eventType === "run.failed" ? "failed" : "completed";
+        }
+      }
+      phase.status = event.eventType === "run.failed" ? "failed" : "completed";
+    } else if (traceEventTone(event) === "completed") {
+      phase.status = "completed";
+    } else {
+      for (const item of phases) {
+        if (item.status === "active" && item.id !== phaseId) {
+          item.status = "completed";
+        }
+      }
+      phase.status = "active";
+    }
+  }
+  const last = ordered.at(-1);
+  if (!last) {
+    return { phases };
+  }
+  const currentStage = eventStageId(last);
+  return {
+    currentStage,
+    currentStageLabel: tracePhaseLabel(currentStage),
+    currentEventType: last.eventType,
+    status: last.status,
+    title: last.title,
+    summary: last.summary,
+    toolCallId: last.toolCallId,
+    stepId: last.stepId,
+    lastSequence: last.sequence,
+    lastEventAt: last.createdAt,
+    phases,
+  };
+}
+
+function normalizeAgentRunStatus(
+  value: string | null,
+): AgentRunRecord["status"] | null {
+  if (
+    value === "planning" ||
+    value === "waiting_confirmation" ||
+    value === "executing" ||
+    value === "paused" ||
+    value === "completed" ||
+    value === "cancelled" ||
+    value === "failed"
+  ) {
+    return value;
+  }
+  return null;
+}
+
+function toolStatusFromEvent(
+  event: AgentRunEventRecord,
+): AgentRunToolCallRecord["status"] | null {
+  if (event.eventType === "tool_call.started") {
+    return "running";
+  }
+  if (event.eventType === "tool_call.completed") {
+    return "completed";
+  }
+  if (event.eventType === "tool_call.failed") {
+    return "failed";
+  }
+  if (event.eventType === "tool_call.cancelled") {
+    return "cancelled";
+  }
+  return null;
+}
+
+function isTerminalToolStatus(
+  status: AgentRunToolCallRecord["status"],
+): boolean {
+  return (
+    status === "completed" || status === "failed" || status === "cancelled"
+  );
+}
+
+function isTerminalTraceEvent(event: AgentRunEventRecord): boolean {
+  return (
+    event.eventType === "run.completed" ||
+    event.eventType === "run.cancelled" ||
+    event.eventType === "run.failed"
+  );
+}
+
+function tracePhaseLabel(phaseId: string): string {
+  return (
+    {
+      planning: "规划任务",
+      evidence_retrieval: "检索证据",
+      source_reading: "读取来源",
+      tool_calling: "工具调用",
+      drafting: "生成回答",
+      citation_validation: "校验引用",
+      conflict_audit: "冲突审计",
+      waiting_confirmation: "等待确认",
+      finalizing: "保存结果",
+    }[phaseId] ?? phaseId
+  );
+}
+
+function recordString(
+  record: Record<string, unknown>,
+  key: string,
+): string | null {
+  const value = record[key];
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+function recordNullableString(
+  record: Record<string, unknown>,
+  key: string,
+): string | null {
+  const value = record[key];
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+function recordNumber(
+  record: Record<string, unknown>,
+  key: string,
+): number | null {
+  const value = record[key];
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function recordObject(
+  record: Record<string, unknown>,
+  key: string,
+): Record<string, unknown> {
+  return recordObjectOrNull(record, key) ?? {};
+}
+
+function recordObjectOrNull(
+  record: Record<string, unknown>,
+  key: string,
+): Record<string, unknown> | null {
+  const value = record[key];
+  return isRecord(value) ? value : null;
+}
+
+function recordStringArray(
+  record: Record<string, unknown>,
+  key: string,
+): string[] {
+  const value = record[key];
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === "string")
+    : [];
 }
 
 function updateAgentRunTraceResponse(
@@ -7857,7 +8283,26 @@ function mergeAgentRunResponse(
   }
   const currentSequence = current.events.at(-1)?.sequence ?? 0;
   const incomingSequence = incoming.events.at(-1)?.sequence ?? 0;
-  return incomingSequence >= currentSequence ? incoming : current;
+  if (incomingSequence > currentSequence) {
+    return incoming;
+  }
+  if (incomingSequence < currentSequence) {
+    return current;
+  }
+  return traceCompletenessScore(incoming) >= traceCompletenessScore(current)
+    ? incoming
+    : current;
+}
+
+function traceCompletenessScore(response: AgentRunResponse): number {
+  return (
+    response.events.length +
+    response.toolCalls.length * 3 +
+    response.outputs.length * 4 +
+    response.citations.length +
+    response.confirmations.length +
+    response.delegations.length
+  );
 }
 
 function traceAssistantMessageId(response: AgentRunResponse): string | null {
@@ -8164,6 +8609,13 @@ function answerParagraphsFromMessage(
     ];
   });
   return paragraphs.length > 0 ? paragraphs : null;
+}
+
+function answerModeFromMessage(
+  message: ConversationMessageRecord,
+): ConversationAnswerResponse["answer"]["answerMode"] | null {
+  const mode = message.modelParams.answerMode;
+  return mode === "system_meta" || mode === "knowledge_grounded" ? mode : null;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

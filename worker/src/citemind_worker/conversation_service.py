@@ -26,7 +26,56 @@ DEFAULT_MAX_OUTPUT_TOKENS = 2400
 HISTORY_SUMMARY_LINE_CHARS = 240
 DENSE_PARAGRAPH_MIN_CHARS = 180
 MAX_AUTO_PARAGRAPHS = 6
+LOW_RELEVANCE_MAX_QUERY_TERMS = 4
+LOW_RELEVANCE_DISTANCE_THRESHOLD = 0.35
 PLAIN_CITATION_PATTERN = re.compile(r"\[([A-Za-z0-9_.:-]+)\]")
+
+type QueryIntent = Literal[
+    "assistant_identity",
+    "system_capability",
+    "system_limitation",
+    "citation_policy",
+    "runtime_tool_question",
+    "knowledge_base_question",
+]
+
+SYSTEM_META_PROFILE: dict[str, str | tuple[str, ...]] = {
+    "version": "system-meta-profile-v1",
+    "productName": "CiteMind",
+    "identity": (
+        "CiteMind 是一个面向本地知识库的可信问答系统，我是其中负责检索、生成和引用校验的回答模块。"
+    ),
+    "scope": (
+        "我可以回答系统自身能力、引用规则和使用边界等元问题；"
+        "这类回答来自内置系统说明，不需要知识库引用。"
+    ),
+    "modelBoundary": (
+        "我不会把底层模型、运行工具或系统说明伪装成知识库事实；"
+        "具体回答是否需要引用，取决于问题是否在询问资料内容。"
+    ),
+    "capabilities": (
+        "基于导入的文件和网页资料进行知识库检索",
+        "生成带段落级引用的回答",
+        "校验引用是否来自当前知识库候选片段",
+        "在证据不足或候选弱相关时拒答",
+        "支持来源维护、对话历史、研究简报和写作工作流",
+    ),
+    "citationPolicy": (
+        "知识库事实问题必须基于检索候选回答，并附带通过校验的引用",
+        "系统身份、能力、使用边界和运行过程说明属于系统元信息，不要求知识库引用",
+        "如果候选证据为空、弱相关或引用校验失败，系统会拒答而不是伪造来源",
+    ),
+    "limitations": (
+        "我不能用用户知识库证明系统运行时的内部工具调用",
+        "我不能把系统提示或内置说明伪装成知识库引用",
+        "我不能在缺少有效证据时替知识库补全事实",
+        "如果你明确询问资料、简历、文档或来源内容，我会切回 RAG 流程并按证据回答",
+    ),
+    "runtimeToolNote": (
+        "当前问题是在询问运行过程，而不是询问知识库内容。"
+        "知识库资料不能证明我本轮实际调用了哪些内部工具。"
+    ),
+}
 
 ANSWER_SCHEMA: dict[str, object] = {
     "type": "object",
@@ -369,6 +418,34 @@ class ConversationService:
                 "message": user_message,
             }
 
+            query_intent = _classify_query_intent(clean_query)
+            if query_intent != "knowledge_base_question":
+                response = self._persist_meta_answer(
+                    conversation=conversation,
+                    user_message=user_message,
+                    query=clean_query,
+                    intent=query_intent,
+                    chat_model=effective_chat_model,
+                    generation_time_ms=_elapsed_ms(started),
+                    history_context=history_context,
+                )
+                self._record_answer_metrics(
+                    knowledge_base_id,
+                    started=started,
+                    citation_failed=False,
+                )
+                response["agentRunId"] = trace_run_id
+                self._save_answer_trace_output(trace_run_id, response)
+                self._complete_answer_trace(
+                    trace_run_id,
+                    summary="已保存系统元问题说明",
+                )
+                trace_finished = True
+                for event in _delta_events(str(response["content"])):
+                    yield event
+                yield {"type": "answer.completed", "response": response}
+                return
+
             self._record_trace_stage(
                 trace_run_id,
                 stage="evidence_retrieval",
@@ -448,6 +525,34 @@ class ConversationService:
                 self._complete_answer_trace(
                     trace_run_id,
                     summary="没有足够证据，已保存拒答结果",
+                )
+                trace_finished = True
+                for event in _delta_events(str(response["content"])):
+                    yield event
+                yield {"type": "answer.completed", "response": response}
+                return
+
+            weak_reason = _low_relevance_reason(clean_query, retrieval)
+            if weak_reason is not None:
+                response = self._persist_refusal(
+                    conversation=conversation,
+                    user_message=user_message,
+                    retrieval=retrieval,
+                    chat_model=effective_chat_model,
+                    generation_time_ms=_elapsed_ms(started),
+                    reason=weak_reason,
+                    history_context=history_context,
+                )
+                self._record_answer_metrics(
+                    knowledge_base_id,
+                    started=started,
+                    citation_failed=True,
+                )
+                response["agentRunId"] = trace_run_id
+                self._save_answer_trace_output(trace_run_id, response)
+                self._complete_answer_trace(
+                    trace_run_id,
+                    summary="候选证据相关性过低，已保存拒答结果",
                 )
                 trace_finished = True
                 for event in _delta_events(str(response["content"])):
@@ -796,6 +901,8 @@ class ConversationService:
                 "conversationId": _nested_string(response, "conversation", "id"),
                 "assistantMessageId": _nested_string(response, "assistantMessage", "id"),
                 "evidenceSufficient": _nested_bool(response, "answer", "evidenceSufficient"),
+                "answerMode": _nested_string(response, "answer", "answerMode"),
+                "citationPolicy": _nested_string(response, "answer", "citationPolicy"),
                 "citationValidation": response.get("citationValidation"),
             },
             citations=_trace_response_citations(response.get("citations")),
@@ -895,6 +1002,8 @@ class ConversationService:
                 "generationTimeMs": generation_time_ms,
                 "retryCount": retry_count,
                 "attempts": list(attempts),
+                "answerMode": "knowledge_grounded",
+                "citationPolicy": "required",
                 "evidenceSufficient": evidence_sufficient,
                 "refusalReason": refusal_reason,
                 "candidateChunkIds": _candidate_chunk_ids(retrieval),
@@ -920,6 +1029,8 @@ class ConversationService:
                 "paragraphs": paragraphs,
                 "evidenceSufficient": evidence_sufficient,
                 "refusalReason": refusal_reason,
+                "answerMode": "knowledge_grounded",
+                "citationPolicy": "required",
             },
             "citations": citations,
             "citationValidation": validation,
@@ -943,6 +1054,7 @@ class ConversationService:
         reason: str,
         history_context: dict[str, object],
     ) -> dict[str, object]:
+        candidate_chunk_ids = _candidate_chunk_ids(retrieval)
         assistant_message = self._insert_message(
             conversation_id=str(conversation["id"]),
             role="assistant",
@@ -951,9 +1063,11 @@ class ConversationService:
             model_params={
                 "generationTimeMs": generation_time_ms,
                 "retryCount": 0,
+                "answerMode": "knowledge_grounded",
+                "citationPolicy": "required",
                 "evidenceSufficient": False,
                 "refusalReason": reason,
-                "candidateChunkIds": [],
+                "candidateChunkIds": candidate_chunk_ids,
                 "retrieval": retrieval.get("retrieval"),
                 "historyContext": history_context,
             },
@@ -979,7 +1093,7 @@ class ConversationService:
                     "reason": reason,
                 }
             ],
-            "candidateChunkIds": [],
+            "candidateChunkIds": candidate_chunk_ids,
         }
         return {
             "conversation": self._conversation_record(str(conversation["id"])),
@@ -996,6 +1110,96 @@ class ConversationService:
                 ],
                 "evidenceSufficient": False,
                 "refusalReason": reason,
+                "answerMode": "knowledge_grounded",
+                "citationPolicy": "required",
+            },
+            "citations": [],
+            "citationValidation": validation,
+            "retrieval": retrieval,
+            "model": {
+                "id": chat_model,
+                "generationTimeMs": generation_time_ms,
+                "retryCount": 0,
+            },
+        }
+
+    def _persist_meta_answer(
+        self,
+        *,
+        conversation: dict[str, object],
+        user_message: dict[str, object],
+        query: str,
+        intent: QueryIntent,
+        chat_model: str,
+        generation_time_ms: int,
+        history_context: dict[str, object],
+    ) -> dict[str, object]:
+        content = _meta_answer_text(intent)
+        retrieval = _empty_meta_retrieval(
+            knowledge_base_id=str(conversation["knowledgeBaseId"]),
+            query=query,
+        )
+        paragraphs = [
+            {
+                "index": index,
+                "text": paragraph,
+                "evidenceChunkIds": [],
+            }
+            for index, paragraph in enumerate(_meta_answer_paragraphs(content))
+        ]
+        validation = {
+            "valid": True,
+            "paragraphs": [
+                {
+                    "index": paragraph["index"],
+                    "text": paragraph["text"],
+                    "validEvidenceChunkIds": [],
+                    "invalidEvidenceChunkIds": [],
+                }
+                for paragraph in paragraphs
+            ],
+            "validCitations": [],
+            "invalidCitations": [],
+            "candidateChunkIds": [],
+        }
+        assistant_message = self._insert_message(
+            conversation_id=str(conversation["id"]),
+            role="assistant",
+            content=content,
+            model_id=chat_model,
+            model_params={
+                "generationTimeMs": generation_time_ms,
+                "retryCount": 0,
+                "answerMode": "system_meta",
+                "citationPolicy": "not_required",
+                "queryIntent": intent,
+                "systemMetaProfileVersion": _profile_text("version"),
+                "evidenceSufficient": True,
+                "refusalReason": None,
+                "candidateChunkIds": [],
+                "retrieval": retrieval.get("retrieval"),
+                "citationValidation": {
+                    "valid": True,
+                    "invalidCitations": [],
+                },
+                "answerParagraphs": paragraphs,
+                "historyContext": history_context,
+            },
+            index_version_id=None,
+        )
+        assistant_message = self._message_record(str(assistant_message["id"]))
+        self._touch_conversation(str(conversation["id"]), model_id=chat_model)
+        return {
+            "conversation": self._conversation_record(str(conversation["id"])),
+            "userMessage": user_message,
+            "assistantMessage": assistant_message,
+            "content": content,
+            "answer": {
+                "paragraphs": paragraphs,
+                "evidenceSufficient": True,
+                "refusalReason": None,
+                "answerMode": "system_meta",
+                "citationPolicy": "not_required",
             },
             "citations": [],
             "citationValidation": validation,
@@ -1240,6 +1444,342 @@ def _ark_gateway_factory(api_key: str, base_url: str, embedding_model: str) -> A
         base_url=base_url,
         embedding_model=embedding_model,
     )
+
+
+def _classify_query_intent(query: str) -> QueryIntent:
+    compact = re.sub(r"[\s？?！!。,.，、：:；;“”\"'（）()【】\[\]]+", "", query.lower())
+    knowledge_markers = (
+        "资料",
+        "材料",
+        "文档",
+        "文件",
+        "简历",
+        "候选人",
+        "作者",
+        "这份",
+        "这篇",
+        "pdf",
+        "来源",
+        "原文",
+        "知识库里",
+        "知识库中",
+        "已导入",
+        "上传的",
+        "资料里",
+        "资料中",
+        "文档里",
+        "文档中",
+        "文件里",
+        "文件中",
+    )
+    if any(marker in compact for marker in knowledge_markers):
+        return "knowledge_base_question"
+
+    subject_markers = ("你", "citemind", "这个软件", "这个应用", "这个系统", "系统")
+    asks_system_subject = any(marker in compact for marker in subject_markers)
+
+    identity_exact_markers = {
+        "你是谁",
+        "你是什么",
+        "你是什么模型",
+        "你叫什么",
+        "你是干嘛的",
+        "你是做什么的",
+        "你基于什么模型",
+        "你用的什么模型",
+        "介绍一下你自己",
+        "请介绍一下你自己",
+        "自我介绍",
+        "citemind是什么",
+        "citemind是干嘛的",
+        "citemind是做什么的",
+        "这个软件是什么",
+        "这个应用是什么",
+        "这个系统是什么",
+        "你和普通ai有什么区别",
+        "你和普通ai有什么不同",
+    }
+    identity_phrase_markers = (
+        "是谁",
+        "是什么",
+        "叫什么",
+        "叫什么名字",
+        "自我介绍",
+        "介绍一下你自己",
+        "普通ai有什么区别",
+        "普通ai有什么不同",
+    )
+    if compact in identity_exact_markers or (
+        asks_system_subject and any(marker in compact for marker in identity_phrase_markers)
+    ):
+        return "assistant_identity"
+
+    tool_markers = ("工具", "tool", "调用")
+    runtime_markers = (
+        "你",
+        "刚才",
+        "本轮",
+        "这次",
+        "本次",
+        "当前回答",
+        "本次回答",
+        "用了哪些",
+        "使用了哪些",
+        "用到了哪些",
+        "调用了哪些",
+        "用过哪些",
+    )
+    if any(marker in compact for marker in tool_markers) and any(
+        marker in compact for marker in runtime_markers
+    ):
+        return "runtime_tool_question"
+
+    capability_markers = (
+        "你能做什么",
+        "你会什么",
+        "你会做什么",
+        "能做什么",
+        "可以做什么",
+        "能帮我做什么",
+        "可以帮我做什么",
+        "能帮忙干什么",
+        "支持哪些功能",
+        "有哪些功能",
+        "功能是什么",
+        "你的能力",
+        "有什么能力",
+        "有哪些能力",
+        "怎么使用",
+        "如何使用",
+        "怎么用",
+        "如何用",
+        "怎么提问",
+        "适合做什么",
+    )
+    if any(marker in compact for marker in capability_markers) and asks_system_subject:
+        return "system_capability"
+    limitation_markers = (
+        "有什么限制",
+        "限制是什么",
+        "你的限制",
+        "你的局限",
+        "有什么局限",
+        "不能做什么",
+        "什么不能做",
+        "什么时候拒答",
+        "为什么拒答",
+        "为什么不能回答",
+        "哪些问题不能回答",
+        "什么问题不能回答",
+        "你会拒答吗",
+        "会不会胡编",
+        "会胡编吗",
+        "会不会编造",
+        "会编造吗",
+        "边界是什么",
+        "边界在哪",
+    )
+    if any(marker in compact for marker in limitation_markers) and (
+        asks_system_subject or "拒答" in compact or "不能回答" in compact
+    ):
+        return "system_limitation"
+    citation_markers = (
+        "为什么要引用",
+        "为什么需要引用",
+        "怎么保证可信",
+        "怎么保证引用可信",
+        "引用可信",
+        "怎么校验引用",
+        "引用怎么校验",
+        "怎么校验证据",
+        "证据怎么校验",
+        "引用规则",
+        "证据规则",
+        "引用从哪里来",
+        "证据从哪里来",
+        "什么问题需要引用",
+        "为什么没有引用",
+        "为什么无引用",
+        "为什么没引用",
+        "rag是什么",
+        "rag是啥",
+    )
+    if any(marker in compact for marker in citation_markers):
+        return "citation_policy"
+    return "knowledge_base_question"
+
+
+def _meta_answer_text(intent: QueryIntent) -> str:
+    if intent == "assistant_identity":
+        return (
+            f"{_profile_text('identity')}"
+            "\n\n"
+            f"{_profile_text('scope')}"
+            "\n\n"
+            f"{_profile_text('modelBoundary')}"
+            "\n\n如果你想问这份资料里的“你”是谁，可以改问“这份简历中的候选人是谁？”。"
+        )
+    if intent == "system_capability":
+        return (
+            "我可以帮助你围绕本地知识库完成可信问答和资料处理。"
+            f"主要能力包括：{_join_profile_items('capabilities')}。"
+            "\n\n如果你明确询问资料、简历或文档里的事实，我会切换到知识库检索并要求引用校验。"
+        )
+    if intent == "system_limitation":
+        return (
+            "我的主要边界是："
+            f"{_join_profile_items('limitations')}。"
+            "\n\n因此，当资料证据不足、候选弱相关或引用校验失败时，我会拒答，而不是把无关来源当作证据。"
+        )
+    if intent == "citation_policy":
+        return (
+            "我的引用规则是："
+            f"{_join_profile_items('citationPolicy')}。"
+            "\n\n所以系统说明类问题会标记为“无需知识库引用”；知识库事实问题仍必须提供可点击、可校验的来源引用。"
+        )
+    if intent == "runtime_tool_question":
+        return (
+            f"{_profile_text('runtimeToolNote')}"
+            "\n\n本次回答走的是系统元问题说明路径，不需要也不会伪造知识库引用。"
+            "如果你想问资料或项目中使用了哪些技术工具，可以明确问“资料中提到了哪些技术工具？”。"
+        )
+    return DEFAULT_REFUSAL
+
+
+def _profile_text(key: str) -> str:
+    value = SYSTEM_META_PROFILE.get(key)
+    return value if isinstance(value, str) else ""
+
+
+def _join_profile_items(key: str) -> str:
+    value = SYSTEM_META_PROFILE.get(key)
+    if not isinstance(value, tuple):
+        return ""
+    return "；".join(value)
+
+
+def _meta_answer_paragraphs(content: str) -> list[str]:
+    paragraphs = [_clean_inline_text(block) for block in re.split(r"\n\s*\n", content)]
+    return [paragraph for paragraph in paragraphs if paragraph]
+
+
+def _empty_meta_retrieval(*, knowledge_base_id: str, query: str) -> dict[str, object]:
+    return {
+        "knowledgeBaseId": knowledge_base_id,
+        "query": query,
+        "indexVersion": {
+            "id": "system-meta",
+            "embeddingProvider": "system",
+            "embeddingModel": "not_required",
+            "embeddingDimension": 0,
+            "chunkingVersion": "not_required",
+            "parserVersion": "not_required",
+            "status": "ready",
+            "isCurrent": True,
+            "createdAt": "",
+            "activatedAt": None,
+            "retainedUntil": None,
+            "failureReason": None,
+            "reusedChunkCount": 0,
+            "embeddedChunkCount": 0,
+            "chunkCount": 0,
+        },
+        "limits": {
+            "resultLimit": 0,
+            "candidateLimit": 0,
+        },
+        "retrieval": {
+            "keywordCandidateCount": 0,
+            "semanticCandidateCount": 0,
+            "mergedCandidateCount": 0,
+            "fusion": "reciprocal_rank_fusion",
+            "rrfK": 60,
+        },
+        "rerank": {
+            "available": False,
+            "applied": False,
+            "modelVersion": None,
+        },
+        "results": [],
+        "context": {
+            "chunkCount": 0,
+            "chunks": [],
+            "text": "",
+        },
+    }
+
+
+def _low_relevance_reason(query: str, retrieval: dict[str, object]) -> str | None:
+    results = retrieval.get("results")
+    retrieval_meta = retrieval.get("retrieval")
+    if not isinstance(results, list) or not results:
+        return None
+    if not isinstance(retrieval_meta, dict):
+        return None
+    keyword_count = retrieval_meta.get("keywordCandidateCount")
+    if isinstance(keyword_count, int) and keyword_count > 0:
+        return None
+
+    query_terms = _text_terms(query)
+    if not query_terms or len(query_terms) > LOW_RELEVANCE_MAX_QUERY_TERMS:
+        return None
+    if _has_query_chunk_overlap(query_terms, results):
+        return None
+    if not _all_results_semantic_only(results):
+        return None
+
+    top_distance = _top_semantic_distance(results)
+    if top_distance is not None and top_distance < LOW_RELEVANCE_DISTANCE_THRESHOLD:
+        return None
+    return "low_relevance_candidates"
+
+
+def _has_query_chunk_overlap(
+    query_terms: set[str],
+    results: Sequence[object],
+) -> bool:
+    for result in results:
+        if not isinstance(result, dict):
+            continue
+        text = result.get("text")
+        text_record = text if isinstance(text, dict) else {}
+        chunk_text = " ".join(
+            str(text_record.get(key) or "") for key in ("normalized", "original", "preview")
+        )
+        if query_terms & _text_terms(chunk_text):
+            return True
+        match = result.get("match")
+        if isinstance(match, dict) and match.get("hasKeywordHit") is True:
+            return True
+    return False
+
+
+def _all_results_semantic_only(results: Sequence[object]) -> bool:
+    for result in results:
+        if not isinstance(result, dict):
+            continue
+        match = result.get("match")
+        if not isinstance(match, dict):
+            return False
+        matched_by = match.get("matchedBy")
+        if not isinstance(matched_by, list):
+            return False
+        if "keyword" in matched_by or "semantic" not in matched_by:
+            return False
+    return True
+
+
+def _top_semantic_distance(results: Sequence[object]) -> float | None:
+    for result in results:
+        if not isinstance(result, dict):
+            continue
+        scores = result.get("scores")
+        if not isinstance(scores, dict):
+            continue
+        distance = scores.get("semanticDistance")
+        if isinstance(distance, int | float):
+            return float(distance)
+    return None
 
 
 def _answer_prompt(

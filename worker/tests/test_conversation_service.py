@@ -109,6 +109,122 @@ class EmptyRetrieval:
         }
 
 
+class FailingRetrieval:
+    async def retrieve(
+        self,
+        knowledge_base_id: str,
+        query: str,
+        *,
+        api_key: str | None = None,
+        base_url: str = "",
+        embedding_model: str = "",
+        limit: int = 8,
+        candidate_limit: int = 24,
+        rerank_model_version: str | None = None,
+    ) -> dict[str, object]:
+        raise AssertionError("meta questions must not call retrieval")
+
+
+class WeakSemanticRetrieval:
+    async def retrieve(
+        self,
+        knowledge_base_id: str,
+        query: str,
+        *,
+        api_key: str | None = None,
+        base_url: str = "",
+        embedding_model: str = "",
+        limit: int = 8,
+        candidate_limit: int = 24,
+        rerank_model_version: str | None = None,
+    ) -> dict[str, object]:
+        return {
+            "knowledgeBaseId": knowledge_base_id,
+            "query": query,
+            "indexVersion": {
+                "id": "index-current",
+                "embeddingProvider": "ark",
+                "embeddingModel": embedding_model or "embedding-current",
+                "embeddingDimension": 3,
+                "chunkingVersion": "chunk-v1",
+                "parserVersion": "parser-v1",
+                "status": "ready",
+                "isCurrent": True,
+                "createdAt": "",
+                "chunkCount": 1,
+            },
+            "limits": {
+                "resultLimit": limit,
+                "candidateLimit": candidate_limit,
+            },
+            "retrieval": {
+                "keywordCandidateCount": 0,
+                "semanticCandidateCount": 1,
+                "mergedCandidateCount": 1,
+                "fusion": "reciprocal_rank_fusion",
+                "rrfK": 60,
+            },
+            "rerank": {
+                "available": False,
+                "applied": False,
+                "modelVersion": rerank_model_version,
+            },
+            "results": [
+                {
+                    "chunkId": "chunk-pdf-valid",
+                    "source": {
+                        "id": "source-pdf",
+                        "versionId": "version-pdf",
+                        "type": "pdf",
+                        "displayName": "Alpha.pdf",
+                        "uri": None,
+                    },
+                    "location": {
+                        "pageNumber": 3,
+                        "boundingBox": {"x": 1, "y": 2, "width": 3, "height": 4},
+                        "headingPath": ["Alpha"],
+                        "anchor": "pdf-block",
+                    },
+                    "text": {
+                        "original": "Alpha evidence for conversation",
+                        "normalized": "Alpha evidence for conversation",
+                        "preview": "Alpha evidence for conversation",
+                        "contentHash": "hash-alpha",
+                    },
+                    "match": {
+                        "matchedBy": ["semantic"],
+                        "keywordHits": [],
+                        "hasKeywordHit": False,
+                        "hasSemanticMatch": True,
+                    },
+                    "scores": {
+                        "keywordBm25": None,
+                        "keywordScore": None,
+                        "semanticDistance": 0.92,
+                        "semanticScore": 0.08,
+                        "fusedScore": 0.016,
+                    },
+                    "ranks": {
+                        "keyword": None,
+                        "semantic": 1,
+                        "fused": 1,
+                    },
+                    "explanation": {
+                        "summary": "向量检索第 1 名，距离 0.920000",
+                        "fusion": "reciprocal_rank_fusion",
+                        "keyword": {"matched": False, "rank": None, "bm25": None, "hits": []},
+                        "semantic": {"matched": True, "rank": 1, "distance": 0.92},
+                    },
+                }
+            ],
+            "context": {
+                "chunkCount": 1,
+                "chunks": [],
+                "text": "",
+            },
+        }
+
+
 def test_conversation_answer_persists_messages_and_valid_citations(tmp_path: Path) -> None:
     storage = StorageRuntime(tmp_path, vector_dimension=3)
     storage.initialize()
@@ -428,6 +544,174 @@ def test_conversation_refuses_without_retrieval_candidates(tmp_path: Path) -> No
         )
     assert params["evidenceSufficient"] is False
     assert params["refusalReason"] == "no_retrieval_candidates"
+
+
+def test_conversation_answers_assistant_identity_without_knowledge_citations(
+    tmp_path: Path,
+) -> None:
+    storage = StorageRuntime(tmp_path, vector_dimension=3)
+    storage.initialize()
+    knowledge_base_id = _seed_answer_fixture(storage)
+    gateway = FakeAnswerGateway([])
+
+    response = asyncio.run(
+        ConversationService(
+            storage,
+            retrieval=FailingRetrieval(),
+            gateway_factory=lambda _key, _base, _embedding: gateway,
+        ).answer(
+            knowledge_base_id=knowledge_base_id,
+            query="你是谁？",
+            api_key="ark-test",
+            chat_model="doubao-test-chat",
+            embedding_model="doubao-test-embedding",
+        )
+    )
+
+    assert gateway.prompts == []
+    assert "CiteMind 是一个面向本地知识库的可信问答系统" in response["content"]
+    assert response["answer"]["evidenceSufficient"] is True
+    assert response["answer"]["answerMode"] == "system_meta"
+    assert response["answer"]["citationPolicy"] == "not_required"
+    assert response["citations"] == []
+    assert response["citationValidation"]["valid"] is True
+    assert response["retrieval"]["retrieval"]["mergedCandidateCount"] == 0
+    event_types = [event["type"] for event in response["events"]]
+    assert event_types[0] == "conversation.ready"
+    assert event_types[-1] == "answer.completed"
+    assert event_types.count("answer.delta") == 4
+    assert "retrieval.completed" not in event_types
+    assert "generation.started" not in event_types
+
+    messages = ConversationService(storage).messages(str(response["conversation"]["id"]))
+    assistant = messages["messages"][1]
+    assert assistant["citations"] == []
+    assert assistant["indexVersionId"] is None
+    assert assistant["modelParams"]["answerMode"] == "system_meta"
+    assert assistant["modelParams"]["citationPolicy"] == "not_required"
+    assert assistant["modelParams"]["systemMetaProfileVersion"] == "system-meta-profile-v1"
+
+
+def test_conversation_runtime_tool_question_uses_meta_answer_without_fake_citation(
+    tmp_path: Path,
+) -> None:
+    storage = StorageRuntime(tmp_path, vector_dimension=3)
+    storage.initialize()
+    knowledge_base_id = _seed_answer_fixture(storage)
+
+    response = asyncio.run(
+        ConversationService(storage, retrieval=FailingRetrieval()).answer(
+            knowledge_base_id=knowledge_base_id,
+            query="你使用了哪些工具？",
+            api_key="ark-test",
+            chat_model="doubao-test-chat",
+        )
+    )
+
+    assert "知识库资料不能证明我本轮实际调用了哪些内部工具" in response["content"]
+    assert response["answer"]["answerMode"] == "system_meta"
+    assert response["citations"] == []
+    assert response["assistantMessage"]["modelParams"]["queryIntent"] == "runtime_tool_question"
+
+
+def test_conversation_system_meta_profile_covers_common_variants(
+    tmp_path: Path,
+) -> None:
+    storage = StorageRuntime(tmp_path, vector_dimension=3)
+    storage.initialize()
+    knowledge_base_id = _seed_answer_fixture(storage)
+    cases = [
+        ("CiteMind 是什么？", "assistant_identity", "可信问答系统"),
+        ("请问你到底是谁呀？", "assistant_identity", "可信问答系统"),
+        ("你是什么模型？", "assistant_identity", "不会把底层模型"),
+        ("你可以帮我做什么？", "system_capability", "主要能力包括"),
+        ("你能帮忙干什么？", "system_capability", "主要能力包括"),
+        ("这个软件支持哪些功能？", "system_capability", "带段落级引用"),
+        ("你有什么限制？", "system_limitation", "主要边界"),
+        ("为什么不能回答？", "system_limitation", "主要边界"),
+        ("你怎么保证引用可信？", "citation_policy", "引用规则"),
+        ("引用怎么校验？", "citation_policy", "引用规则"),
+        ("为什么没有引用？", "citation_policy", "无需知识库引用"),
+        ("用了哪些工具？", "runtime_tool_question", "内部工具"),
+    ]
+
+    for query, intent, expected_text in cases:
+        response = asyncio.run(
+            ConversationService(storage, retrieval=FailingRetrieval()).answer(
+                knowledge_base_id=knowledge_base_id,
+                query=query,
+                api_key="ark-test",
+                chat_model="doubao-test-chat",
+            )
+        )
+
+        assert response["answer"]["answerMode"] == "system_meta"
+        assert response["answer"]["citationPolicy"] == "not_required"
+        assert response["citations"] == []
+        assert response["assistantMessage"]["modelParams"]["queryIntent"] == intent
+        assert expected_text in response["content"]
+        assert response["retrieval"]["retrieval"]["mergedCandidateCount"] == 0
+
+
+def test_conversation_explicit_source_question_still_uses_rag_path(
+    tmp_path: Path,
+) -> None:
+    storage = StorageRuntime(tmp_path, vector_dimension=3)
+    storage.initialize()
+    knowledge_base_id = _seed_answer_fixture(storage)
+
+    response = asyncio.run(
+        ConversationService(storage, retrieval=EmptyRetrieval()).answer(
+            knowledge_base_id=knowledge_base_id,
+            query="这份简历中的你是谁？",
+            api_key="ark-test",
+            chat_model="doubao-test-chat",
+        )
+    )
+
+    assert response["answer"]["answerMode"] == "knowledge_grounded"
+    assert response["answer"]["citationPolicy"] == "required"
+    assert response["answer"]["refusalReason"] == "no_retrieval_candidates"
+    assert response["retrieval"]["query"] == "这份简历中的你是谁？"
+
+
+def test_conversation_refuses_low_relevance_semantic_candidates(
+    tmp_path: Path,
+) -> None:
+    storage = StorageRuntime(tmp_path, vector_dimension=3)
+    storage.initialize()
+    knowledge_base_id = _seed_answer_fixture(storage)
+    gateway = FakeAnswerGateway([])
+
+    response = asyncio.run(
+        ConversationService(
+            storage,
+            retrieval=WeakSemanticRetrieval(),
+            gateway_factory=lambda _key, _base, _embedding: gateway,
+        ).answer(
+            knowledge_base_id=knowledge_base_id,
+            query="天气？",
+            api_key="ark-test",
+            chat_model="doubao-test-chat",
+            embedding_model="doubao-test-embedding",
+        )
+    )
+
+    assert gateway.prompts == []
+    assert response["answer"]["evidenceSufficient"] is False
+    assert response["answer"]["refusalReason"] == "low_relevance_candidates"
+    assert response["content"] == DEFAULT_REFUSAL
+    assert response["citations"] == []
+    assert response["citationValidation"]["candidateChunkIds"] == ["chunk-pdf-valid"]
+    assert response["retrieval"]["retrieval"]["mergedCandidateCount"] == 1
+
+    with storage.database.connect() as connection:
+        params = json.loads(
+            connection.execute(
+                "SELECT model_params_json FROM messages WHERE role = 'assistant'"
+            ).fetchone()[0]
+        )
+    assert params["refusalReason"] == "low_relevance_candidates"
 
 
 def test_conversation_model_switch_applies_to_next_message_and_history_is_compacted(

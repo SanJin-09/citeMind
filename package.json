@@ -3,13 +3,6 @@
   "version": "0.1.0",
   "private": true,
   "packageManager": "pnpm@10.3.0",
-  "pnpm": {
-    "onlyBuiltDependencies": [
-      "electron",
-      "electron-winstaller",
-      "esbuild"
-    ]
-  },
   "scripts": {
     "setup": "pnpm install && uv sync --project worker --python 3.12 && pnpm --filter @citemind/desktop setup:electron",
     "dev": "pnpm --filter @citemind/desktop dev",
