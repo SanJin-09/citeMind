@@ -1089,7 +1089,21 @@ function App(): React.JSX.Element {
   const hasSearchOutput =
     searchBusy || Boolean(searchError) || searchResults.length > 0;
   const activeSearchQuery = lastSearchQuery || searchQuery;
-  const apiSetupBlocked = seedStatus !== null && !seedStatus.configured;
+  const seedStatusLoading = seedStatus === null;
+  const apiSetupBlocked = seedStatus?.configured !== true;
+  const apiSetupTitle = seedStatusLoading
+    ? seedError
+      ? "模型配置状态读取失败"
+      : "正在检查模型服务配置"
+    : "需要先配置 Ark API Key";
+  const apiSetupDescription = seedStatusLoading
+    ? seedError || "检查完成前暂不能生成回答和研究简报。"
+    : "配置完成后才能生成回答和研究简报。";
+  const apiSetupActionLabel = seedStatusLoading
+    ? seedError
+      ? "打开设置"
+      : "检查中"
+    : "去配置";
   const activeBackgroundJobs = backgroundJobs.filter(
     (job) => !isTerminalJobStatus(job.status),
   );
@@ -3171,8 +3185,18 @@ function App(): React.JSX.Element {
           >
             {apiSetupBlocked && !hasStartedConversation && (
               <SetupGuide
+                actionLabel={
+                  seedStatusLoading
+                    ? seedError
+                      ? "打开设置"
+                      : "检查配置中"
+                    : "配置 Ark API"
+                }
+                busy={seedStatusLoading && !seedError}
+                description={apiSetupDescription}
                 knowledgeBaseName={activeKnowledgeBase?.name ?? "当前知识库"}
                 sourceCount={sourceSummary.sourceCount}
+                title={apiSetupTitle}
                 onOpenSettings={() => {
                   setSettingsOpen(true);
                   void loadSeedStatus();
@@ -3375,18 +3399,19 @@ function App(): React.JSX.Element {
             {apiSetupBlocked && (
               <div className="composer-blocker" role="status">
                 <span>
-                  <strong>需要先配置 Ark API Key</strong>
-                  <small>配置完成后才能生成回答和研究简报。</small>
+                  <strong>{apiSetupTitle}</strong>
+                  <small>{apiSetupDescription}</small>
                 </span>
                 <button
                   className="text-button"
+                  disabled={seedStatusLoading && !seedError}
                   type="button"
                   onClick={() => {
                     setSettingsOpen(true);
                     void loadSeedStatus();
                   }}
                 >
-                  去配置
+                  {apiSetupActionLabel}
                 </button>
               </div>
             )}
@@ -5893,12 +5918,20 @@ function AppDialog({
 }
 
 function SetupGuide({
+  actionLabel,
+  busy,
+  description,
   knowledgeBaseName,
   sourceCount,
+  title,
   onOpenSettings,
 }: {
+  actionLabel: string;
+  busy: boolean;
+  description: string;
   knowledgeBaseName: string;
   sourceCount: number;
+  title: string;
   onOpenSettings: () => void;
 }): React.JSX.Element {
   return (
@@ -5907,16 +5940,15 @@ function SetupGuide({
         <Icon name="sparkle" size={25} />
       </span>
       <p className="eyebrow">开始前需要完成</p>
-      <h1>配置模型服务后开始可验证问答</h1>
+      <h1>{title}</h1>
       <p>
-        当前知识库是“{knowledgeBaseName}”。你的资料会保存在本机；配置 Ark API
-        Key 后，citeMind 才能生成回答、检索向量并校验引用。
+        当前知识库是“{knowledgeBaseName}”。你的资料会保存在本机；{description}
       </p>
       <ol className="setup-steps">
         <li className="active">
           <span>1</span>
           <strong>配置 Ark API Key</strong>
-          <small>未完成</small>
+          <small>{busy ? "检查中" : "未完成"}</small>
         </li>
         <li className={sourceCount > 0 ? "done" : ""}>
           <span>2</span>
@@ -5931,9 +5963,14 @@ function SetupGuide({
           <small>回答会附带可点击引用</small>
         </li>
       </ol>
-      <button className="button primary" type="button" onClick={onOpenSettings}>
+      <button
+        className="button primary"
+        disabled={busy}
+        type="button"
+        onClick={onOpenSettings}
+      >
         <Icon name="settings" size={16} />
-        配置 Ark API
+        {actionLabel}
       </button>
     </section>
   );
@@ -5970,6 +6007,7 @@ function TaskCenter({
   const sourceNames = new Map(
     sources.map((source) => [source.id, source.displayName]),
   );
+  const hasVisibleJobs = jobs.length > 0;
   const hasTerminal = jobs.some((job) => isTerminalJobStatus(job.status));
 
   return (
@@ -5992,35 +6030,46 @@ function TaskCenter({
         </span>
         <Icon name="chevron" size={14} />
       </button>
-      <div className="task-list">
-        {jobs.map((job) => (
-          <article className={`task-card ${job.status}`} key={job.id}>
-            <div className="task-card-heading">
-              <span>
-                <strong>{jobTitle(job, sourceNames)}</strong>
-                <small>
-                  {jobStatusLabel(job.status)} · {jobElapsedLabel(job)}
-                </small>
-              </span>
-              <small>{jobProgressPercent(job)}%</small>
-            </div>
-            <div className="task-progress" aria-hidden="true">
-              <span style={{ width: `${jobProgressPercent(job)}%` }} />
-            </div>
-            <p>{jobStageSummary(job)}</p>
-            {job.errorMessage && (
-              <p className="task-error">{job.errorMessage}</p>
-            )}
-            <div className="task-actions">
-              {job.status === "running" && (
-                <>
-                  <button
-                    disabled={actionBusyId === `${job.id}:pause`}
-                    type="button"
-                    onClick={() => onAction(job, "pause")}
-                  >
-                    暂停
-                  </button>
+      {hasVisibleJobs && (
+        <div className="task-list">
+          {jobs.map((job) => (
+            <article className={`task-card ${job.status}`} key={job.id}>
+              <div className="task-card-heading">
+                <span>
+                  <strong>{jobTitle(job, sourceNames)}</strong>
+                  <small>
+                    {jobStatusLabel(job.status)} · {jobElapsedLabel(job)}
+                  </small>
+                </span>
+                <small>{jobProgressPercent(job)}%</small>
+              </div>
+              <div className="task-progress" aria-hidden="true">
+                <span style={{ width: `${jobProgressPercent(job)}%` }} />
+              </div>
+              <p>{jobStageSummary(job)}</p>
+              {job.errorMessage && (
+                <p className="task-error">{job.errorMessage}</p>
+              )}
+              <div className="task-actions">
+                {job.status === "running" && (
+                  <>
+                    <button
+                      disabled={actionBusyId === `${job.id}:pause`}
+                      type="button"
+                      onClick={() => onAction(job, "pause")}
+                    >
+                      暂停
+                    </button>
+                    <button
+                      disabled={actionBusyId === `${job.id}:cancel`}
+                      type="button"
+                      onClick={() => onAction(job, "cancel")}
+                    >
+                      取消
+                    </button>
+                  </>
+                )}
+                {["pending", "retrying"].includes(job.status) && (
                   <button
                     disabled={actionBusyId === `${job.id}:cancel`}
                     type="button"
@@ -6028,39 +6077,30 @@ function TaskCenter({
                   >
                     取消
                   </button>
-                </>
-              )}
-              {["pending", "retrying"].includes(job.status) && (
-                <button
-                  disabled={actionBusyId === `${job.id}:cancel`}
-                  type="button"
-                  onClick={() => onAction(job, "cancel")}
-                >
-                  取消
-                </button>
-              )}
-              {job.status === "paused" && (
-                <button
-                  disabled={actionBusyId === `${job.id}:resume`}
-                  type="button"
-                  onClick={() => onAction(job, "resume")}
-                >
-                  继续
-                </button>
-              )}
-              {job.status === "failed" && (
-                <button
-                  disabled={actionBusyId === `${job.id}:retry`}
-                  type="button"
-                  onClick={() => onAction(job, "retry")}
-                >
-                  重试
-                </button>
-              )}
-            </div>
-          </article>
-        ))}
-      </div>
+                )}
+                {job.status === "paused" && (
+                  <button
+                    disabled={actionBusyId === `${job.id}:resume`}
+                    type="button"
+                    onClick={() => onAction(job, "resume")}
+                  >
+                    继续
+                  </button>
+                )}
+                {job.status === "failed" && (
+                  <button
+                    disabled={actionBusyId === `${job.id}:retry`}
+                    type="button"
+                    onClick={() => onAction(job, "retry")}
+                  >
+                    重试
+                  </button>
+                )}
+              </div>
+            </article>
+          ))}
+        </div>
+      )}
       {open && hasTerminal && (
         <button className="task-clear" type="button" onClick={onClearCompleted}>
           清理已结束任务
