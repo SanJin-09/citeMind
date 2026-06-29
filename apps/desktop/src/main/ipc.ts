@@ -1,5 +1,6 @@
 import { BrowserWindow, dialog, ipcMain, shell } from "electron";
 import { writeFile } from "node:fs/promises";
+import { pathToFileURL } from "node:url";
 import {
   type AgentRunConfirmationRequest,
   type AgentRunConfirmationResolution,
@@ -54,6 +55,7 @@ import {
   type McpServerListResponse,
   type McpServerRecord,
   type ModelCapabilityStatus,
+  type OpenSourceRequest,
   type OpenSourceResult,
   type ParseChecksResponse,
   type RenameKnowledgeBaseRequest,
@@ -638,23 +640,45 @@ export function registerIpcHandlers(workerManager: PythonWorkerManager): void {
       30_000,
     ),
   );
-  ipcMain.handle(IPC_CHANNELS.openSource, async (_event, sourceId) => {
+  ipcMain.handle(IPC_CHANNELS.openSource, async (_event, payload) => {
+    const request = normalizeOpenSourceRequest(payload);
     const response = await workerManager.call<SourceVersionsResponse>(
       "sources.versions",
-      { sourceId: normalizeNonEmptyString(sourceId, "来源 ID") },
+      { sourceId: request.sourceId },
       30_000,
     );
     const target = sourceOpenTarget(response);
     if (!target) {
       throw new Error("当前来源缺少可打开的原文路径");
     }
+    const locationHint = sourceOpenLocationHint(response, request.location);
     if (isExternalUrl(target)) {
-      await shell.openExternal(target);
+      await shell.openExternal(
+        sourceOpenExternalTarget(target, request.location),
+      );
       return {
         opened: true,
         target,
-        message: "已在浏览器打开网页来源",
+        message: locationHint
+          ? `已在浏览器打开网页来源，${locationHint}`
+          : "已在浏览器打开网页来源",
+        locationHint,
       } satisfies OpenSourceResult;
+    }
+    if (response.source.sourceType === "pdf" && request.location?.pageNumber) {
+      try {
+        await shell.openExternal(
+          `${pathToFileURL(target).toString()}#page=${request.location.pageNumber}`,
+        );
+        return {
+          opened: true,
+          target,
+          message: `已打开 PDF 原文位置：第 ${request.location.pageNumber} 页`,
+          locationHint,
+        } satisfies OpenSourceResult;
+      } catch {
+        // Fall back to the default file opener below.
+      }
     }
     const errorMessage = await shell.openPath(target);
     if (errorMessage) {
@@ -663,7 +687,10 @@ export function registerIpcHandlers(workerManager: PythonWorkerManager): void {
     return {
       opened: true,
       target,
-      message: "已打开本地原文文件",
+      message: locationHint
+        ? `已打开本地原文文件，${locationHint}`
+        : "已打开本地原文文件",
+      locationHint,
     } satisfies OpenSourceResult;
   });
   ipcMain.handle(IPC_CHANNELS.deleteSource, (_event, sourceId) =>
@@ -1165,6 +1192,48 @@ function sourceOpenTarget(response: SourceVersionsResponse): string | null {
   );
 }
 
+function sourceOpenLocationHint(
+  response: SourceVersionsResponse,
+  location?: OpenSourceRequest["location"],
+): string | undefined {
+  if (!location) {
+    return undefined;
+  }
+  if (response.source.sourceType === "pdf" && location.pageNumber) {
+    return `定位到第 ${location.pageNumber} 页`;
+  }
+  if (location.headingPath.length > 0) {
+    return `定位线索：${location.headingPath.join(" / ")}`;
+  }
+  if (location.anchor) {
+    return response.source.sourceType === "web"
+      ? `定位到锚点 ${location.anchor}`
+      : `定位线索：${location.anchor}`;
+  }
+  if (location.boundingBox) {
+    return "已携带原文高亮区域线索";
+  }
+  return undefined;
+}
+
+function sourceOpenExternalTarget(
+  target: string,
+  location?: OpenSourceRequest["location"],
+): string {
+  if (!location?.anchor) {
+    return target;
+  }
+  try {
+    const url = new URL(target);
+    if (!url.hash) {
+      url.hash = location.anchor;
+    }
+    return url.toString();
+  } catch {
+    return target;
+  }
+}
+
 function isExternalUrl(value: string): boolean {
   try {
     const url = new URL(value);
@@ -1281,6 +1350,42 @@ function normalizeImportWebRequest(payload: unknown): ImportWebRequest {
     throw new Error("网页名称必须是字符串");
   }
   return { knowledgeBaseId, url, displayName };
+}
+
+function normalizeOpenSourceRequest(payload: unknown): OpenSourceRequest {
+  if (typeof payload === "string") {
+    return { sourceId: normalizeNonEmptyString(payload, "来源 ID") };
+  }
+  if (!isRecord(payload)) {
+    throw new Error("打开来源参数无效");
+  }
+  return {
+    sourceId: normalizeNonEmptyString(payload.sourceId, "来源 ID"),
+    location: normalizeSourceLocation(payload.location),
+  };
+}
+
+function normalizeSourceLocation(
+  value: unknown,
+): OpenSourceRequest["location"] {
+  if (value === undefined || value === null) {
+    return null;
+  }
+  if (!isRecord(value)) {
+    throw new Error("来源定位参数无效");
+  }
+  const pageNumber = value.pageNumber;
+  const boundingBox = value.boundingBox;
+  const headingPath = value.headingPath;
+  const anchor = value.anchor;
+  return {
+    pageNumber: typeof pageNumber === "number" ? pageNumber : null,
+    boundingBox: isRecord(boundingBox) ? boundingBox : null,
+    headingPath: Array.isArray(headingPath)
+      ? headingPath.filter((item): item is string => typeof item === "string")
+      : [],
+    anchor: typeof anchor === "string" && anchor.trim() ? anchor : null,
+  };
 }
 
 function normalizeResolveDuplicateRequest(

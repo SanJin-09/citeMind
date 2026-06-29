@@ -2856,6 +2856,12 @@ kbd {
   font-size: 17px;
 }
 
+.research-editor-heading p {
+  margin: 4px 0 0;
+  color: #78847c;
+  font-size: 10px;
+}
+
 .research-editor-heading > div:last-child {
   display: flex;
   align-items: center;

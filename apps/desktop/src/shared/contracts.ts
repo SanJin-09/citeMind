@@ -176,6 +176,12 @@ export interface OpenSourceResult {
   opened: boolean;
   target: string;
   message: string;
+  locationHint?: string;
+}
+
+export interface OpenSourceRequest {
+  sourceId: string;
+  location?: HybridSearchResult["location"] | null;
 }
 
 export interface WebUpdateCheckItem {
@@ -1515,7 +1521,7 @@ export interface DesktopApi {
     importFiles: (knowledgeBaseId: string) => Promise<ImportFilesResponse>;
     importWeb: (request: ImportWebRequest) => Promise<ImportSourceResult>;
     parseChecks: (knowledgeBaseId: string) => Promise<ParseChecksResponse>;
-    open: (sourceId: string) => Promise<OpenSourceResult>;
+    open: (request: OpenSourceRequest) => Promise<OpenSourceResult>;
     delete: (sourceId: string) => Promise<DeleteSourceResponse>;
     resolveDuplicate: (
       request: ResolveDuplicateRequest,

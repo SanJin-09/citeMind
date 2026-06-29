@@ -1423,7 +1423,10 @@ function App(): React.JSX.Element {
     setSourceOpenBusy(true);
     setSourceJumpNotice("");
     try {
-      const result = await getDesktopApi().sources.open(sourceId);
+      const result = await getDesktopApi().sources.open({
+        sourceId,
+        location: evidenceLocation(selection),
+      });
       setSourceJumpNotice(
         `${result.message}：${evidenceDisplayName(selection)} · ${evidenceLocationLabel(selection)}`,
       );
@@ -4111,6 +4114,7 @@ function ResearchBriefEditorDialog({
       backdropClassName="research-editor-backdrop"
       className="research-editor-dialog"
       closeDisabled={saveState === "saving"}
+      describedBy="research-editor-description"
       labelledBy="research-editor-title"
       onClose={onClose}
     >
@@ -4118,6 +4122,9 @@ function ResearchBriefEditorDialog({
         <div>
           <span className="eyebrow">对话内研究简报</span>
           <h2 id="research-editor-title">{workspace.title}</h2>
+          <p id="research-editor-description">
+            编辑研究计划、大纲、草稿和最终输出；保存中会临时锁定关闭。
+          </p>
         </div>
         <div>
           <span className={`research-save-state ${saveState}`}>
@@ -5391,6 +5398,7 @@ function WritingWorkspaceDialog({
     <AppDialog
       className="writing-workspace-dialog"
       closeDisabled={busy}
+      describedBy="writing-workspace-description"
       labelledBy="writing-workspace-title"
       onClose={onClose}
     >
@@ -5398,7 +5406,9 @@ function WritingWorkspaceDialog({
         <div>
           <span className="eyebrow">LangGraph 写作工作流</span>
           <h2 id="writing-workspace-title">复习与写作</h2>
-          <p>大纲、逐节内容和检查点均绑定到当前知识库证据。</p>
+          <p id="writing-workspace-description">
+            大纲、逐节内容和检查点均绑定到当前知识库证据。
+          </p>
         </div>
         <div>
           <button
@@ -5850,6 +5860,7 @@ function AppDialog({
   children,
   className,
   closeDisabled = false,
+  describedBy,
   labelledBy,
   onClose,
 }: {
@@ -5857,6 +5868,7 @@ function AppDialog({
   children: ReactNode;
   className: string;
   closeDisabled?: boolean;
+  describedBy?: string;
   labelledBy: string;
   onClose: () => void;
 }): React.JSX.Element {
@@ -5903,6 +5915,7 @@ function AppDialog({
       role="presentation"
     >
       <section
+        aria-describedby={describedBy}
         aria-labelledby={labelledBy}
         aria-modal="true"
         className={className}
@@ -6443,6 +6456,7 @@ function SourceMaintenanceDialog({
     <AppDialog
       className="source-maintenance-dialog"
       closeDisabled={busy}
+      describedBy="source-maintenance-description"
       labelledBy="source-maintenance-title"
       onClose={onClose}
     >
@@ -6450,7 +6464,7 @@ function SourceMaintenanceDialog({
         <div>
           <p className="eyebrow">Source Maintenance</p>
           <h2 id="source-maintenance-title">{value.source.displayName}</h2>
-          <span>
+          <span id="source-maintenance-description">
             当前 v{value.source.currentVersionNumber} ·{" "}
             {expiryStatusLabel(value.source.expiryStatus)}
           </span>
@@ -6884,6 +6898,7 @@ function ConfirmActionDialog({
     <AppDialog
       className="kb-dialog"
       closeDisabled={busy}
+      describedBy="confirm-action-description"
       labelledBy="confirm-action-title"
       onClose={onClose}
     >
@@ -6891,7 +6906,7 @@ function ConfirmActionDialog({
         <div>
           <p className="eyebrow">{content.eyebrow}</p>
           <h2 id="confirm-action-title">{content.title}</h2>
-          <span>{content.description}</span>
+          <span id="confirm-action-description">{content.description}</span>
         </div>
         <button
           aria-label="关闭确认弹窗"
@@ -6993,6 +7008,7 @@ function ExternalResearchDialog({
     <AppDialog
       className="kb-dialog external-research-dialog"
       closeDisabled={busy || pending.length > 0}
+      describedBy="external-research-description"
       labelledBy="external-research-title"
       onClose={onClose}
     >
@@ -7000,7 +7016,7 @@ function ExternalResearchDialog({
         <div>
           <p className="eyebrow">External Evidence</p>
           <h2 id="external-research-title">寻找外部资料</h2>
-          <span>
+          <span id="external-research-description">
             外部结果仅作为候选；确认后才会保存快照、导入当前知识库并重新索引。
           </span>
         </div>
@@ -7269,6 +7285,7 @@ function WebImportDialog({
   return (
     <AppDialog
       className="kb-dialog"
+      describedBy="web-import-description"
       labelledBy="web-import-title"
       onClose={onClose}
     >
@@ -7276,7 +7293,7 @@ function WebImportDialog({
         <div>
           <p className="eyebrow">Web Source</p>
           <h2 id="web-import-title">导入网页链接</h2>
-          <span>
+          <span id="web-import-description">
             优先使用正文提取器；静态正文不足时会尝试 Playwright 动态网页兜底。
           </span>
         </div>
@@ -7374,6 +7391,7 @@ function KnowledgeBaseDialog({
     <AppDialog
       className="kb-dialog"
       closeDisabled={busy}
+      describedBy="knowledge-base-dialog-description"
       labelledBy="knowledge-base-dialog-title"
       onClose={onClose}
     >
@@ -7381,7 +7399,7 @@ function KnowledgeBaseDialog({
         <div>
           <p className="eyebrow">Knowledge Base</p>
           <h2 id="knowledge-base-dialog-title">{title}</h2>
-          <span>
+          <span id="knowledge-base-dialog-description">
             {deleting
               ? "删除会级联移除该知识库下的来源、索引、对话和引用。"
               : "知识库用于隔离来源、索引、对话与后续引用证据。"}
@@ -7508,6 +7526,7 @@ function SeedSettingsModal({
   return (
     <AppDialog
       className="settings-modal"
+      describedBy="seed-settings-description"
       labelledBy="seed-settings-title"
       onClose={onClose}
     >
@@ -7515,7 +7534,7 @@ function SeedSettingsModal({
         <div>
           <p className="eyebrow">Seed API</p>
           <h2 id="seed-settings-title">配置火山方舟 Ark API</h2>
-          <span>
+          <span id="seed-settings-description">
             Key 会在 Electron Main 中加密保存，前端只显示掩码和验证状态。
           </span>
         </div>
@@ -8744,6 +8763,14 @@ function evidenceLocationLabel(selection: EvidenceSelection): string {
         selection.citation.location,
       )
     : formatLocation(selection.result.source.type, selection.result.location);
+}
+
+function evidenceLocation(
+  selection: EvidenceSelection,
+): HybridSearchResult["location"] {
+  return selection.kind === "citation"
+    ? selection.citation.location
+    : selection.result.location;
 }
 
 function sourceToneFromType(

@@ -161,7 +161,7 @@ const api: DesktopApi = {
       ipcRenderer.invoke(IPC_CHANNELS.importWebSource, request),
     parseChecks: (knowledgeBaseId) =>
       ipcRenderer.invoke(IPC_CHANNELS.listParseChecks, knowledgeBaseId),
-    open: (sourceId) => ipcRenderer.invoke(IPC_CHANNELS.openSource, sourceId),
+    open: (request) => ipcRenderer.invoke(IPC_CHANNELS.openSource, request),
     delete: (sourceId) =>
       ipcRenderer.invoke(IPC_CHANNELS.deleteSource, sourceId),
     resolveDuplicate: (request) =>
