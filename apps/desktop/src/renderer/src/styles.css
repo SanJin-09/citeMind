@@ -3003,6 +3003,10 @@ kbd {
   grid-template-rows: auto minmax(0, 1fr);
 }
 
+.evidence-backdrop {
+  display: none;
+}
+
 .evidence-content {
   padding: 13px;
   overflow: auto;
@@ -3169,6 +3173,7 @@ blockquote {
 
 .evidence-restore {
   position: absolute;
+  z-index: 2;
   right: 18px;
   top: 82px;
   display: flex;
@@ -4635,7 +4640,29 @@ blockquote {
     grid-template-columns: 250px minmax(420px, 1fr);
   }
 
-  .evidence-panel,
+  .evidence-backdrop {
+    position: absolute;
+    z-index: 3;
+    inset: 10px 12px;
+    display: block;
+    border: 0;
+    border-radius: 16px;
+    background: rgb(22 35 28 / 26%);
+    cursor: pointer;
+    backdrop-filter: blur(1px);
+  }
+
+  .evidence-panel {
+    position: absolute;
+    z-index: 4;
+    top: 10px;
+    right: 12px;
+    bottom: 10px;
+    width: min(340px, calc(100% - 36px));
+    max-width: calc(100% - 24px);
+    box-shadow: 0 22px 58px rgb(26 45 32 / 24%);
+  }
+
   .research-evidence-panel {
     position: absolute;
     z-index: 3;

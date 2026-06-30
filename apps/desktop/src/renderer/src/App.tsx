@@ -79,7 +79,9 @@ type KnowledgeBaseDialogMode = "create" | "rename" | "delete";
 
 type ConfirmAction =
   | { kind: "delete-source"; source: KnowledgeBaseSource }
-  | { kind: "delete-conversation"; conversation: ConversationRecord };
+  | { kind: "delete-conversation"; conversation: ConversationRecord }
+  | { kind: "delete-seed-credential" }
+  | { kind: "cleanup-storage"; status: MaintenanceStatus | null };
 
 type EvidenceSelection =
   | {
@@ -106,6 +108,7 @@ const PENDING_CONVERSATION_ID = "pending-conversation";
 const PENDING_USER_MESSAGE_PREFIX = "pending-user:";
 const PENDING_ASSISTANT_MESSAGE_PREFIX = "pending-assistant:";
 const CHAT_BOTTOM_THRESHOLD_PX = 96;
+const EVIDENCE_PANEL_OPEN_STORAGE_KEY = "citemind:evidence-panel-open";
 const DIALOG_FOCUSABLE_SELECTOR = [
   "a[href]",
   "button:not([disabled])",
@@ -420,7 +423,15 @@ function App(): React.JSX.Element {
     useState<EvidenceSelection | null>(null);
   const [sourceJumpNotice, setSourceJumpNotice] = useState("");
   const [sourceOpenBusy, setSourceOpenBusy] = useState(false);
-  const [evidenceOpen, setEvidenceOpen] = useState(true);
+  const [evidenceOpen, setEvidenceOpen] = useState(() => {
+    try {
+      return (
+        window.localStorage.getItem(EVIDENCE_PANEL_OPEN_STORAGE_KEY) !== "false"
+      );
+    } catch {
+      return true;
+    }
+  });
   const [systemOpen, setSystemOpen] = useState(false);
   const [knowledgeBaseMenuOpen, setKnowledgeBaseMenuOpen] = useState(false);
   const [accountMenuOpen, setAccountMenuOpen] = useState(false);
@@ -1010,6 +1021,17 @@ function App(): React.JSX.Element {
   }, [activeKnowledgeBaseId, loadOperationalStatus, settingsOpen]);
 
   useEffect(() => {
+    try {
+      window.localStorage.setItem(
+        EVIDENCE_PANEL_OPEN_STORAGE_KEY,
+        evidenceOpen ? "true" : "false",
+      );
+    } catch {
+      // localStorage 可能在受限预览环境不可用，面板状态降级为本次会话内生效。
+    }
+  }, [evidenceOpen]);
+
+  useEffect(() => {
     if (!appError) {
       return;
     }
@@ -1241,16 +1263,19 @@ function App(): React.JSX.Element {
     }
     setMaintenanceBusy(true);
     setMaintenanceNotice("");
+    setConfirmError("");
     try {
       const result = await getDesktopApi().system.cleanupStorage();
       setMaintenanceStatus(result);
       setMaintenanceNotice(
         `已回收 ${result.recycledIndexCount ?? 0} 个索引、${result.removedFileCount ?? 0} 个孤儿文件`,
       );
+      setConfirmAction(null);
     } catch (error) {
-      setMaintenanceNotice(
-        error instanceof Error ? error.message : "应用数据清理失败",
-      );
+      const message =
+        error instanceof Error ? error.message : "应用数据清理失败";
+      setMaintenanceNotice(message);
+      setConfirmError(message);
     } finally {
       setMaintenanceBusy(false);
     }
@@ -2313,6 +2338,13 @@ function App(): React.JSX.Element {
       await deleteConversation(confirmAction.conversation);
       return;
     }
+    if (confirmAction?.kind === "delete-seed-credential") {
+      await deleteSeedCredential();
+      return;
+    }
+    if (confirmAction?.kind === "cleanup-storage") {
+      await cleanupStorage();
+    }
   };
 
   const saveSeedCredential = async (): Promise<void> => {
@@ -2365,8 +2397,12 @@ function App(): React.JSX.Element {
   };
 
   const deleteSeedCredential = async (): Promise<void> => {
+    if (seedBusy) {
+      return;
+    }
     setSeedBusy(true);
     setSeedError("");
+    setConfirmError("");
     try {
       setSeedStatus(await getDesktopApi().seed.deleteCredential());
       setSeedForm({
@@ -2375,10 +2411,12 @@ function App(): React.JSX.Element {
         defaultChatModel: SEED_DEFAULTS.defaultChatModel,
         defaultEmbeddingModel: SEED_DEFAULTS.defaultEmbeddingModel,
       });
+      setConfirmAction(null);
     } catch (error) {
-      setSeedError(
-        error instanceof Error ? error.message : "Seed API 删除失败",
-      );
+      const message =
+        error instanceof Error ? error.message : "Seed API 删除失败";
+      setSeedError(message);
+      setConfirmError(message);
     } finally {
       setSeedBusy(false);
     }
@@ -3554,7 +3592,16 @@ function App(): React.JSX.Element {
           </div>
         </section>
 
-        <aside className="panel evidence-panel">
+        {evidenceOpen && (
+          <button
+            aria-label="关闭证据抽屉遮罩"
+            className="evidence-backdrop"
+            type="button"
+            onClick={() => setEvidenceOpen(false)}
+          />
+        )}
+
+        <aside aria-label="来源与证据" className="panel evidence-panel">
           <PanelHeader
             icon="evidence"
             title="来源与证据"
@@ -3685,14 +3732,25 @@ function App(): React.JSX.Element {
           form={seedForm}
           status={seedStatus}
           onClose={() => setSettingsOpen(false)}
-          onDelete={() => void deleteSeedCredential()}
+          onDelete={() => {
+            setSeedError("");
+            setConfirmError("");
+            setConfirmAction({ kind: "delete-seed-credential" });
+          }}
           onFormChange={setSeedForm}
           onReload={() => void loadSeedStatus()}
           maintenanceBusy={maintenanceBusy}
           maintenanceNotice={maintenanceNotice}
           maintenanceStatus={maintenanceStatus}
           usageSummary={usageSummary}
-          onCleanup={() => void cleanupStorage()}
+          onCleanup={() => {
+            setMaintenanceNotice("");
+            setConfirmError("");
+            setConfirmAction({
+              kind: "cleanup-storage",
+              status: maintenanceStatus,
+            });
+          }}
           onSave={() => void saveSeedCredential()}
           onSaveDefaults={() => void updateSeedDefaults()}
           onValidate={() => void validateSeedCredential()}
@@ -3879,11 +3937,19 @@ function App(): React.JSX.Element {
         <ConfirmActionDialog
           action={confirmAction}
           busy={
-            Boolean(sourceDeleteBusyId) || Boolean(conversationDeleteBusyId)
+            Boolean(sourceDeleteBusyId) ||
+            Boolean(conversationDeleteBusyId) ||
+            seedBusy ||
+            maintenanceBusy
           }
           error={confirmError}
           onClose={() => {
-            if (!sourceDeleteBusyId && !conversationDeleteBusyId) {
+            if (
+              !sourceDeleteBusyId &&
+              !conversationDeleteBusyId &&
+              !seedBusy &&
+              !maintenanceBusy
+            ) {
               setConfirmAction(null);
             }
           }}
@@ -6875,17 +6941,19 @@ function ConfirmActionDialog({
   onClose: () => void;
   onSubmit: () => void;
 }): React.JSX.Element {
-  const content =
-    action.kind === "delete-source"
-      ? {
+  const content = (() => {
+    switch (action.kind) {
+      case "delete-source":
+        return {
           eyebrow: "Source",
           title: "删除已导入来源",
           description: `将删除“${action.source.displayName}”的文件副本、解析产物、文本块、向量和历史引用。此操作无法撤销。`,
           submitLabel: "删除来源",
           busyLabel: "删除中...",
           danger: true,
-        }
-      : {
+        };
+      case "delete-conversation":
+        return {
           eyebrow: "Conversation",
           title: "删除历史对话",
           description: `将删除“${action.conversation.title}”及其全部消息和引用记录。此操作无法撤销。`,
@@ -6893,6 +6961,27 @@ function ConfirmActionDialog({
           busyLabel: "删除中...",
           danger: true,
         };
+      case "delete-seed-credential":
+        return {
+          eyebrow: "Seed API",
+          title: "删除 Ark API Key",
+          description:
+            "将删除本机加密保存的 Ark API Key。删除后，新对话、检索增强回答和模型验证会被配置要求阻断，直到重新保存有效 Key。",
+          submitLabel: "删除 Key",
+          busyLabel: "删除中...",
+          danger: true,
+        };
+      case "cleanup-storage":
+        return {
+          eyebrow: "Storage",
+          title: "清理应用存储",
+          description: `将清理失效索引、旧版本索引和孤儿文件，不会删除知识库、来源或对话。当前可回收索引 ${action.status?.recyclableIndexCount ?? 0} 个，旧版本 ${action.status?.recyclableSourceVersionCount ?? 0} 个。`,
+          submitLabel: "清理存储",
+          busyLabel: "清理中...",
+          danger: true,
+        };
+    }
+  })();
 
   return (
     <AppDialog
