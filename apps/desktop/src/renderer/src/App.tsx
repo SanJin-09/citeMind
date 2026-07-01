@@ -83,6 +83,37 @@ type ConfirmAction =
   | { kind: "delete-seed-credential" }
   | { kind: "cleanup-storage"; status: MaintenanceStatus | null };
 
+type AppNotificationTone = "success" | "info" | "error";
+
+type AppNotificationActionKind =
+  | "open-settings"
+  | "open-tasks"
+  | "retry-job"
+  | "retry-file-import"
+  | "retry-web-import";
+
+interface AppNotificationAction {
+  kind: AppNotificationActionKind;
+  label: string;
+  jobId?: string;
+}
+
+interface AppNotification {
+  id: string;
+  tone: AppNotificationTone;
+  title: string;
+  message: string;
+  createdAt: number;
+  persistent?: boolean;
+  dismissed?: boolean;
+  actions?: AppNotificationAction[];
+}
+
+type AppNotificationInput = Omit<
+  AppNotification,
+  "id" | "createdAt" | "dismissed"
+>;
+
 type EvidenceSelection =
   | {
       kind: "citation";
@@ -348,7 +379,9 @@ function App(): React.JSX.Element {
   const [confirmError, setConfirmError] = useState("");
   const [importBusy, setImportBusy] = useState(false);
   const [importError, setImportError] = useState("");
-  const [appError, setAppError] = useState("");
+  const [notifications, setNotifications] = useState<AppNotification[]>([]);
+  const [notificationHistoryOpen, setNotificationHistoryOpen] = useState(false);
+  const notificationIdRef = useRef(0);
   const [backgroundJobs, setBackgroundJobs] = useState<BackgroundJobRecord[]>(
     [],
   );
@@ -360,6 +393,7 @@ function App(): React.JSX.Element {
       { jobId: string | null; context: string; queuedContext: string | null }
     >(),
   );
+  const reportedJobNotificationsRef = useRef(new Set<string>());
   const [webImportOpen, setWebImportOpen] = useState(false);
   const [webImportForm, setWebImportForm] = useState({
     url: "",
@@ -730,8 +764,86 @@ function App(): React.JSX.Element {
     [],
   );
 
-  const showAppError = useCallback((message: string) => {
-    setAppError(message);
+  const showAppNotification = useCallback((input: AppNotificationInput) => {
+    setNotifications((items) => {
+      notificationIdRef.current += 1;
+      return [
+        {
+          ...input,
+          id: `notification-${Date.now()}-${notificationIdRef.current}`,
+          createdAt: Date.now(),
+        },
+        ...items,
+      ].slice(0, 24);
+    });
+  }, []);
+
+  const dismissNotification = useCallback((id: string) => {
+    setNotifications((items) =>
+      items.map((item) =>
+        item.id === id ? { ...item, dismissed: true } : item,
+      ),
+    );
+  }, []);
+
+  const showAppError = useCallback(
+    (
+      message: string,
+      options: {
+        title?: string;
+        actions?: AppNotificationAction[];
+      } = {},
+    ) => {
+      showAppNotification({
+        tone: "error",
+        title: options.title ?? "操作失败",
+        message,
+        persistent: true,
+        actions: options.actions,
+      });
+    },
+    [showAppNotification],
+  );
+
+  const showSuccessNotification = useCallback(
+    (
+      title: string,
+      message: string,
+      actions: AppNotificationAction[] = [
+        { kind: "open-tasks", label: "查看任务" },
+      ],
+    ) => {
+      showAppNotification({
+        tone: "success",
+        title,
+        message,
+        actions,
+      });
+    },
+    [showAppNotification],
+  );
+
+  const showInfoNotification = useCallback(
+    (
+      title: string,
+      message: string,
+      actions: AppNotificationAction[] = [
+        { kind: "open-tasks", label: "查看任务" },
+      ],
+    ) => {
+      showAppNotification({
+        tone: "info",
+        title,
+        message,
+        actions,
+      });
+    },
+    [showAppNotification],
+  );
+
+  const clearNotificationHistory = useCallback(() => {
+    setNotifications([]);
+    setNotificationHistoryOpen(false);
   }, []);
 
   const updateChatScrollState = useCallback((element: HTMLDivElement): void => {
@@ -823,6 +935,10 @@ function App(): React.JSX.Element {
         const tracked = automaticIndexBuildsRef.current.get(knowledgeBaseId);
         if (result.jobId && tracked === trackedBuild) {
           trackedBuild.jobId = result.jobId;
+          showInfoNotification(
+            "索引构建已开始",
+            `正在为 ${context} 构建检索索引，完成后会提示摘要。`,
+          );
         }
       } catch (error) {
         if (
@@ -832,10 +948,13 @@ function App(): React.JSX.Element {
         }
         const reason =
           error instanceof Error ? error.message : "后台任务启动失败";
-        showAppError(`索引构建失败（${context}）：${reason}`);
+        showAppError(`索引构建失败（${context}）：${reason}`, {
+          title: "索引构建失败",
+          actions: [{ kind: "open-tasks", label: "查看任务" }],
+        });
       }
     },
-    [showAppError],
+    [showAppError, showInfoNotification],
   );
 
   const handleBackgroundJobUpdate = useCallback(
@@ -869,11 +988,32 @@ function App(): React.JSX.Element {
         }
       }
 
-      if (
+      const notificationKey = `${job.id}:${job.status}`;
+      const shouldReportTerminal =
+        !reportedJobNotificationsRef.current.has(notificationKey);
+      if (shouldReportTerminal) {
+        reportedJobNotificationsRef.current.add(notificationKey);
+      }
+
+      if (shouldReportTerminal && job.status === "completed") {
+        const sourceNamesById = new Map(
+          sources.map((source) => [source.id, source.displayName]),
+        );
+        const title = jobTitle(job, sourceNamesById);
+        const context = isTrackedIndex ? tracked.context : title;
+        showSuccessNotification(
+          "后台任务已完成",
+          jobCompletionSummary(job, title, context),
+          [{ kind: "open-tasks", label: "查看摘要" }],
+        );
+      }
+
+      const reportTrackedIndexFailure =
         job.status === "failed" &&
         job.jobType.startsWith("index.") &&
-        (isTrackedIndex || job.targetId === activeKnowledgeBaseId)
-      ) {
+        (isTrackedIndex || job.targetId === activeKnowledgeBaseId);
+
+      if (shouldReportTerminal && reportTrackedIndexFailure) {
         const failedStage = job.checkpoint.stages.find(
           (stage) => stage.status === "failed",
         )?.label;
@@ -883,7 +1023,32 @@ function App(): React.JSX.Element {
           `索引构建失败（${context}${stage}）：${
             job.errorMessage ?? "未知错误"
           }`,
+          {
+            title: "索引构建失败",
+            actions: [
+              { kind: "retry-job", label: "重试", jobId: job.id },
+              { kind: "open-tasks", label: "查看任务" },
+            ],
+          },
         );
+      }
+
+      if (
+        shouldReportTerminal &&
+        job.status === "failed" &&
+        !reportTrackedIndexFailure
+      ) {
+        const sourceNamesById = new Map(
+          sources.map((source) => [source.id, source.displayName]),
+        );
+        const title = jobTitle(job, sourceNamesById);
+        showAppError(`${title}：${job.errorMessage ?? "未知错误"}`, {
+          title: "后台任务失败",
+          actions: [
+            { kind: "retry-job", label: "重试", jobId: job.id },
+            { kind: "open-tasks", label: "查看任务" },
+          ],
+        });
       }
 
       if (!isTrackedIndex) {
@@ -899,8 +1064,10 @@ function App(): React.JSX.Element {
       activeKnowledgeBaseId,
       loadSources,
       showAppError,
+      showSuccessNotification,
       startAutomaticIndexBuild,
       rememberBackgroundJob,
+      sources,
     ],
   );
 
@@ -1032,12 +1199,16 @@ function App(): React.JSX.Element {
   }, [evidenceOpen]);
 
   useEffect(() => {
-    if (!appError) {
+    const visibleNotification = notifications.find((item) => !item.dismissed);
+    if (!visibleNotification || visibleNotification.persistent) {
       return;
     }
-    const timer = window.setTimeout(() => setAppError(""), 8000);
+    const timer = window.setTimeout(
+      () => dismissNotification(visibleNotification.id),
+      6200,
+    );
     return () => window.clearTimeout(timer);
-  }, [appError]);
+  }, [dismissNotification, notifications]);
 
   const online = worker.kind === "online";
 
@@ -1493,11 +1664,20 @@ function App(): React.JSX.Element {
       return;
     }
     if (!activeKnowledgeBaseId) {
-      setChatError("请先选择知识库");
+      const message = "请先选择知识库";
+      setChatError(message);
+      showAppError(message, {
+        title: "无法生成回答",
+      });
       return;
     }
     if (!seedStatus?.configured) {
-      setChatError("请先在设置中配置 Ark API Key");
+      const message = "请先在设置中配置 Ark API Key";
+      setChatError(message);
+      showAppError(message, {
+        title: "模型配置未完成",
+        actions: [{ kind: "open-settings", label: "打开设置" }],
+      });
       return;
     }
     setChatBusy(true);
@@ -1635,6 +1815,7 @@ function App(): React.JSX.Element {
       setNextRouteHint("auto");
       setComposerToolsOpen(false);
     } catch (error) {
+      const message = error instanceof Error ? error.message : "回答生成失败";
       setMessages((items) =>
         items.filter((message) => message.id !== pendingAssistantMessage.id),
       );
@@ -1644,7 +1825,14 @@ function App(): React.JSX.Element {
         return next;
       });
       setQuery(value);
-      setChatError(error instanceof Error ? error.message : "回答生成失败");
+      setChatError(message);
+      showAppError(message, {
+        title: "回答生成失败",
+        actions: [
+          { kind: "open-settings", label: "打开设置" },
+          { kind: "open-tasks", label: "查看任务" },
+        ],
+      });
     } finally {
       if (pendingTraceMessageIdRef.current === pendingAssistantMessage.id) {
         pendingTraceMessageIdRef.current = "";
@@ -1792,7 +1980,9 @@ function App(): React.JSX.Element {
     if (!activeKnowledgeBaseId) {
       const message = "请先选择知识库";
       setImportError(message);
-      showAppError(message);
+      showAppError(message, {
+        title: "无法导入资料",
+      });
       return;
     }
     setImportBusy(true);
@@ -1808,12 +1998,24 @@ function App(): React.JSX.Element {
         if (failed.length > 0) {
           showAppError(
             parseFailureMessage(failed.map((item) => item.parseCheck)),
+            {
+              title: "资料解析失败",
+              actions: [
+                { kind: "retry-file-import", label: "重新导入" },
+                { kind: "open-tasks", label: "查看任务" },
+              ],
+            },
           );
         }
         const succeeded = result.imported.filter(
           (item) => item.parseCheck.status === "success",
         );
         if (succeeded.length > 0) {
+          showSuccessNotification(
+            "导入成功",
+            `已导入 ${succeeded.length} 份资料，正在准备后台索引。`,
+            [{ kind: "open-tasks", label: "查看任务" }],
+          );
           await startAutomaticIndexBuild(
             activeKnowledgeBaseId,
             sourceNames(succeeded.map((item) => item.parseCheck.displayName)),
@@ -1824,7 +2026,13 @@ function App(): React.JSX.Element {
     } catch (error) {
       const message = error instanceof Error ? error.message : "文件导入失败";
       setImportError(message);
-      showAppError(`资料导入失败：${message}`);
+      showAppError(`资料导入失败：${message}`, {
+        title: "资料导入失败",
+        actions: [
+          { kind: "retry-file-import", label: "重试导入" },
+          { kind: "open-tasks", label: "查看任务" },
+        ],
+      });
     } finally {
       setImportBusy(false);
     }
@@ -1834,7 +2042,9 @@ function App(): React.JSX.Element {
     if (!activeKnowledgeBaseId) {
       const message = "请先选择知识库";
       setImportError(message);
-      showAppError(message);
+      showAppError(message, {
+        title: "无法导入网页",
+      });
       return;
     }
     setImportBusy(true);
@@ -1848,9 +2058,20 @@ function App(): React.JSX.Element {
       setWebImportOpen(false);
       setWebImportForm({ url: "", displayName: "" });
       if (result.parseCheck.status === "failed") {
-        showAppError(parseFailureMessage([result.parseCheck]));
+        showAppError(parseFailureMessage([result.parseCheck]), {
+          title: "网页解析失败",
+          actions: [
+            { kind: "retry-web-import", label: "重新导入" },
+            { kind: "open-tasks", label: "查看任务" },
+          ],
+        });
       }
       if (result.parseCheck.status === "success") {
+        showSuccessNotification(
+          "网页导入成功",
+          `“${result.parseCheck.displayName}”已导入，正在准备后台索引。`,
+          [{ kind: "open-tasks", label: "查看任务" }],
+        );
         await startAutomaticIndexBuild(
           activeKnowledgeBaseId,
           result.parseCheck.displayName,
@@ -1860,7 +2081,13 @@ function App(): React.JSX.Element {
     } catch (error) {
       const message = error instanceof Error ? error.message : "网页导入失败";
       setImportError(message);
-      showAppError(`资料导入失败：${message}`);
+      showAppError(`资料导入失败：${message}`, {
+        title: "网页导入失败",
+        actions: [
+          { kind: "retry-web-import", label: "重试导入" },
+          { kind: "open-tasks", label: "查看任务" },
+        ],
+      });
     } finally {
       setImportBusy(false);
     }
@@ -2840,19 +3067,66 @@ function App(): React.JSX.Element {
     setResearchEditorOpen(false);
   };
 
+  const visibleNotification =
+    notifications.find((item) => !item.dismissed) ?? null;
+
+  const handleNotificationAction = (action: AppNotificationAction): void => {
+    if (action.kind === "open-settings") {
+      setSettingsOpen(true);
+      return;
+    }
+    if (action.kind === "open-tasks") {
+      setTaskCenterOpen(true);
+      return;
+    }
+    if (action.kind === "retry-file-import") {
+      void importFiles();
+      return;
+    }
+    if (action.kind === "retry-web-import") {
+      if (webImportForm.url.trim()) {
+        void importWebSource();
+        return;
+      }
+      setWebImportOpen(true);
+      return;
+    }
+    if (action.kind === "retry-job" && action.jobId) {
+      const job = backgroundJobs.find((item) => item.id === action.jobId);
+      if (job) {
+        void handleBackgroundJobAction(job, "retry");
+      }
+      setTaskCenterOpen(true);
+    }
+  };
+
   return (
     <main className={`app-shell ${evidenceOpen ? "" : "evidence-collapsed"}`}>
-      {appError && (
-        <div aria-live="assertive" className="app-error-toast" role="alert">
-          <span>{appError}</span>
-          <button
-            aria-label="关闭错误提示"
-            type="button"
-            onClick={() => setAppError("")}
-          >
-            <Icon name="close" size={15} />
-          </button>
-        </div>
+      {visibleNotification && (
+        <AppNotificationToast
+          historyCount={notifications.length}
+          notification={visibleNotification}
+          onAction={handleNotificationAction}
+          onDismiss={() => dismissNotification(visibleNotification.id)}
+          onToggleHistory={() => setNotificationHistoryOpen((value) => !value)}
+        />
+      )}
+      {!visibleNotification && notifications.length > 0 && (
+        <button
+          className="notification-history-trigger"
+          type="button"
+          onClick={() => setNotificationHistoryOpen((value) => !value)}
+        >
+          通知 {notifications.length}
+        </button>
+      )}
+      {notificationHistoryOpen && (
+        <NotificationHistory
+          notifications={notifications}
+          onAction={handleNotificationAction}
+          onClear={clearNotificationHistory}
+          onClose={() => setNotificationHistoryOpen(false)}
+        />
       )}
       <header className="topbar">
         <div className="brand">
@@ -3095,57 +3369,65 @@ function App(): React.JSX.Element {
           <div className="source-list">
             {sources.length > 0 ? (
               visibleSources.length > 0 ? (
-                visibleSources.map((source) => (
-                  <article
-                    className={`source-item ${
-                      selectedSourceIds.includes(source.id) ? "selected" : ""
-                    } ${focusedSourceId === source.id ? "focused" : ""}`}
-                    id={`source-${source.id}`}
-                    key={source.id}
-                  >
-                    <button
-                      className="source-main"
-                      type="button"
-                      onClick={() => toggleSource(source.id)}
+                visibleSources.map((source) => {
+                  const sourceJob = sourceActiveJob(
+                    source,
+                    activeBackgroundJobs,
+                    activeKnowledgeBaseId,
+                  );
+                  return (
+                    <article
+                      className={`source-item ${
+                        selectedSourceIds.includes(source.id) ? "selected" : ""
+                      } ${focusedSourceId === source.id ? "focused" : ""}`}
+                      id={`source-${source.id}`}
+                      key={source.id}
                     >
-                      <span className={`source-icon ${sourceTone(source)}`}>
-                        <Icon name="document" size={17} />
-                      </span>
-                      <span className="source-copy">
-                        <strong>{source.displayName}</strong>
-                        <small>{sourceMeta(source)}</small>
-                      </span>
-                      <span className="source-check">
-                        {selectedSourceIds.includes(source.id) && (
-                          <Icon name="check" size={14} />
-                        )}
-                      </span>
-                    </button>
-                    <button
-                      aria-label={`维护来源版本 ${source.displayName}`}
-                      className="source-maintenance"
-                      disabled={sourceMaintenanceBusy}
-                      title="版本与时效维护"
-                      type="button"
-                      onClick={() => void openSourceMaintenance(source)}
-                    >
-                      <Icon name="refresh" size={15} />
-                    </button>
-                    <button
-                      aria-label={`删除来源 ${source.displayName}`}
-                      className="source-delete"
-                      disabled={Boolean(sourceDeleteBusyId)}
-                      title="删除来源"
-                      type="button"
-                      onClick={() => {
-                        setConfirmError("");
-                        setConfirmAction({ kind: "delete-source", source });
-                      }}
-                    >
-                      <Icon name="trash" size={15} />
-                    </button>
-                  </article>
-                ))
+                      <button
+                        className="source-main"
+                        type="button"
+                        onClick={() => toggleSource(source.id)}
+                      >
+                        <span className={`source-icon ${sourceTone(source)}`}>
+                          <Icon name="document" size={17} />
+                        </span>
+                        <span className="source-copy">
+                          <strong>{source.displayName}</strong>
+                          <small>{sourceMeta(source)}</small>
+                        </span>
+                        <span className="source-check">
+                          {selectedSourceIds.includes(source.id) && (
+                            <Icon name="check" size={14} />
+                          )}
+                        </span>
+                      </button>
+                      <button
+                        aria-label={`维护来源版本 ${source.displayName}`}
+                        className="source-maintenance"
+                        disabled={sourceMaintenanceBusy}
+                        title="版本与时效维护"
+                        type="button"
+                        onClick={() => void openSourceMaintenance(source)}
+                      >
+                        <Icon name="refresh" size={15} />
+                      </button>
+                      <button
+                        aria-label={`删除来源 ${source.displayName}`}
+                        className="source-delete"
+                        disabled={Boolean(sourceDeleteBusyId)}
+                        title="删除来源"
+                        type="button"
+                        onClick={() => {
+                          setConfirmError("");
+                          setConfirmAction({ kind: "delete-source", source });
+                        }}
+                      >
+                        <Icon name="trash" size={15} />
+                      </button>
+                      {sourceJob && <SourceProgress job={sourceJob} />}
+                    </article>
+                  );
+                })
               ) : (
                 <div className="empty-source-state">
                   <strong>没有匹配来源</strong>
@@ -5996,6 +6278,122 @@ function AppDialog({
   );
 }
 
+function AppNotificationToast({
+  historyCount,
+  notification,
+  onAction,
+  onDismiss,
+  onToggleHistory,
+}: {
+  historyCount: number;
+  notification: AppNotification;
+  onAction: (action: AppNotificationAction) => void;
+  onDismiss: () => void;
+  onToggleHistory: () => void;
+}): React.JSX.Element {
+  return (
+    <section
+      aria-live={notification.tone === "error" ? "assertive" : "polite"}
+      className={`app-notification-toast ${notification.tone}`}
+      role={notification.tone === "error" ? "alert" : "status"}
+    >
+      <div className="app-notification-copy">
+        <strong>{notification.title}</strong>
+        <span>{notification.message}</span>
+      </div>
+      {(notification.actions?.length ?? 0) > 0 && (
+        <div className="app-notification-actions">
+          {notification.actions?.map((action) => (
+            <button
+              key={`${notification.id}:${action.kind}:${action.label}`}
+              type="button"
+              onClick={() => onAction(action)}
+            >
+              {action.label}
+            </button>
+          ))}
+        </div>
+      )}
+      <button
+        className="app-notification-history-button"
+        type="button"
+        onClick={onToggleHistory}
+      >
+        历史 {historyCount}
+      </button>
+      <button
+        aria-label="关闭通知"
+        className="app-notification-close"
+        type="button"
+        onClick={onDismiss}
+      >
+        <Icon name="close" size={15} />
+      </button>
+    </section>
+  );
+}
+
+function NotificationHistory({
+  notifications,
+  onAction,
+  onClear,
+  onClose,
+}: {
+  notifications: AppNotification[];
+  onAction: (action: AppNotificationAction) => void;
+  onClear: () => void;
+  onClose: () => void;
+}): React.JSX.Element {
+  return (
+    <aside className="notification-history" aria-label="通知历史">
+      <header>
+        <div>
+          <strong>通知历史</strong>
+          <small>{notifications.length} 条最近记录</small>
+        </div>
+        <button aria-label="关闭通知历史" type="button" onClick={onClose}>
+          <Icon name="close" size={15} />
+        </button>
+      </header>
+      <div className="notification-history-list">
+        {notifications.map((notification) => (
+          <article
+            className={`notification-history-item ${notification.tone}`}
+            key={notification.id}
+          >
+            <div>
+              <strong>{notification.title}</strong>
+              <small>{formatNotificationTime(notification.createdAt)}</small>
+            </div>
+            <p>{notification.message}</p>
+            {(notification.actions?.length ?? 0) > 0 && (
+              <div className="notification-history-actions">
+                {notification.actions?.map((action) => (
+                  <button
+                    key={`${notification.id}:history:${action.kind}:${action.label}`}
+                    type="button"
+                    onClick={() => onAction(action)}
+                  >
+                    {action.label}
+                  </button>
+                ))}
+              </div>
+            )}
+          </article>
+        ))}
+      </div>
+      <button
+        className="notification-history-clear"
+        disabled={notifications.length === 0}
+        type="button"
+        onClick={onClear}
+      >
+        清空历史
+      </button>
+    </aside>
+  );
+}
+
 function SetupGuide({
   actionLabel,
   busy,
@@ -6052,6 +6450,29 @@ function SetupGuide({
         {actionLabel}
       </button>
     </section>
+  );
+}
+
+function SourceProgress({
+  job,
+}: {
+  job: BackgroundJobRecord;
+}): React.JSX.Element {
+  const progress = jobProgressPercent(job);
+  return (
+    <div
+      aria-label={`${jobStatusLabel(job.status)}，${progress}%`}
+      className="source-progress"
+      role="status"
+    >
+      <span>
+        {job.jobType.startsWith("index.") ? "索引" : "导入"} ·{" "}
+        {jobStageSummary(job)}
+      </span>
+      <div aria-hidden="true">
+        <span style={{ width: `${progress}%` }} />
+      </div>
+    </div>
   );
 }
 
@@ -8655,6 +9076,35 @@ function isTerminalJobStatus(status: BackgroundJobRecord["status"]): boolean {
   return ["completed", "failed", "cancelled"].includes(status);
 }
 
+function sourceActiveJob(
+  source: KnowledgeBaseSource,
+  jobs: BackgroundJobRecord[],
+  activeKnowledgeBaseId: string,
+): BackgroundJobRecord | null {
+  const directJob = jobs.find(
+    (job) => !isTerminalJobStatus(job.status) && job.targetId === source.id,
+  );
+  if (directJob) {
+    return directJob;
+  }
+  const waitingForIndex =
+    source.status !== "ready" &&
+    source.status !== "failed" &&
+    source.status !== "duplicate" &&
+    source.status !== "skipped";
+  if (!waitingForIndex) {
+    return null;
+  }
+  return (
+    jobs.find(
+      (job) =>
+        !isTerminalJobStatus(job.status) &&
+        job.jobType.startsWith("index.") &&
+        job.targetId === activeKnowledgeBaseId,
+    ) ?? null
+  );
+}
+
 function jobProgressPercent(job: BackgroundJobRecord): number {
   return Math.max(0, Math.min(100, Math.round(job.progress * 100)));
 }
@@ -8710,6 +9160,24 @@ function jobElapsedLabel(job: BackgroundJobRecord): string {
     return `${seconds}s`;
   }
   return `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
+}
+
+function jobCompletionSummary(
+  job: BackgroundJobRecord,
+  title: string,
+  context: string,
+): string {
+  const elapsed = jobElapsedLabel(job);
+  if (job.jobType.startsWith("index.")) {
+    return `${context} 已完成索引，可用于检索、引用和回答。耗时 ${elapsed}。`;
+  }
+  if (
+    job.jobType.startsWith("source.import") ||
+    job.jobType.startsWith("web.")
+  ) {
+    return `${title} 已完成，来源卡片会刷新最新状态。耗时 ${elapsed}。`;
+  }
+  return `${title} 已完成。耗时 ${elapsed}。`;
 }
 
 function citationsForParagraph(
@@ -9191,6 +9659,14 @@ function parseFailureMessage(
   const suffix =
     items.length > 2 ? `；另有 ${items.length - 2} 份资料失败` : "";
   return `资料解析失败：${details}${suffix}`;
+}
+
+function formatNotificationTime(value: number): string {
+  return new Intl.DateTimeFormat("zh-CN", {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  }).format(new Date(value));
 }
 
 function formatNumber(value: number): string {
