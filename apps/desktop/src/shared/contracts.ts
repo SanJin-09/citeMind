@@ -651,6 +651,22 @@ export interface ConversationAnswerResponse {
     refusalReason: string | null;
     answerMode?: "knowledge_grounded" | "system_meta";
     citationPolicy?: "required" | "not_required";
+    queryIntent?:
+      | "assistant_identity"
+      | "system_capability"
+      | "system_limitation"
+      | "citation_policy"
+      | "runtime_tool_question"
+      | "knowledge_fact_qa"
+      | "knowledge_summary"
+      | "knowledge_transform"
+      | "knowledge_interview"
+      | "knowledge_review";
+    evidenceStatus?:
+      | "strong_evidence"
+      | "partial_evidence"
+      | "weak_evidence"
+      | "no_evidence";
   };
   citations: AnswerCitation[];
   citationValidation: {

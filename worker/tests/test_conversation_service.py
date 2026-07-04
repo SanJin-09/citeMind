@@ -259,12 +259,16 @@ def test_conversation_answer_persists_messages_and_valid_citations(tmp_path: Pat
     )
 
     assert response["answer"]["evidenceSufficient"] is True
+    assert response["answer"]["queryIntent"] == "knowledge_fact_qa"
+    assert response["answer"]["evidenceStatus"] == "strong_evidence"
     assert response["content"] == "Alpha 结论来自当前 PDF 证据。"
     assert response["citations"][0]["chunkId"] == "chunk-pdf-valid"
     assert response["assistantMessage"]["modelId"] == "doubao-test-chat"
     assert response["assistantMessage"]["indexVersionId"] == "index-current"
     assert response["assistantMessage"]["modelParams"]["generationTimeMs"] >= 0
     assert response["assistantMessage"]["modelParams"]["retryCount"] == 0
+    assert response["assistantMessage"]["modelParams"]["queryIntent"] == "knowledge_fact_qa"
+    assert response["assistantMessage"]["modelParams"]["evidenceStatus"] == "strong_evidence"
     assert response["agentRunId"] is None
     assert [event["type"] for event in response["events"]] == [
         "conversation.ready",
@@ -330,6 +334,8 @@ def test_conversation_splits_dense_answer_and_persists_paragraph_citations(
     )
 
     assert response["answer"]["evidenceSufficient"] is True
+    assert response["answer"]["queryIntent"] == "knowledge_interview"
+    assert response["answer"]["evidenceStatus"] == "partial_evidence"
     assert len(response["answer"]["paragraphs"]) == 2
     assert "\n\n" in response["content"]
     assert [citation["paragraphIndex"] for citation in response["citations"]] == [0, 1]
@@ -344,6 +350,8 @@ def test_conversation_splits_dense_answer_and_persists_paragraph_citations(
     assert isinstance(stored_paragraphs, list)
     assert len(stored_paragraphs) == 2
     assert assistant["citations"][1]["paragraphIndex"] == 1
+    assert assistant["modelParams"]["queryIntent"] == "knowledge_interview"
+    assert assistant["modelParams"]["evidenceStatus"] == "partial_evidence"
 
 
 def test_conversation_answer_emits_agent_run_trace_events(tmp_path: Path) -> None:
@@ -530,6 +538,8 @@ def test_conversation_refuses_without_retrieval_candidates(tmp_path: Path) -> No
     assert gateway.prompts == []
     assert response["answer"]["evidenceSufficient"] is False
     assert response["answer"]["refusalReason"] == "no_retrieval_candidates"
+    assert response["answer"]["queryIntent"] == "knowledge_fact_qa"
+    assert response["answer"]["evidenceStatus"] == "no_evidence"
     assert response["content"] == DEFAULT_REFUSAL
     assert response["citations"] == []
     assert response["retrieval"]["results"] == []
@@ -544,6 +554,8 @@ def test_conversation_refuses_without_retrieval_candidates(tmp_path: Path) -> No
         )
     assert params["evidenceSufficient"] is False
     assert params["refusalReason"] == "no_retrieval_candidates"
+    assert params["queryIntent"] == "knowledge_fact_qa"
+    assert params["evidenceStatus"] == "no_evidence"
 
 
 def test_conversation_answers_assistant_identity_without_knowledge_citations(
@@ -573,6 +585,7 @@ def test_conversation_answers_assistant_identity_without_knowledge_citations(
     assert response["answer"]["evidenceSufficient"] is True
     assert response["answer"]["answerMode"] == "system_meta"
     assert response["answer"]["citationPolicy"] == "not_required"
+    assert response["answer"]["queryIntent"] == "assistant_identity"
     assert response["citations"] == []
     assert response["citationValidation"]["valid"] is True
     assert response["retrieval"]["retrieval"]["mergedCandidateCount"] == 0
@@ -610,6 +623,7 @@ def test_conversation_runtime_tool_question_uses_meta_answer_without_fake_citati
 
     assert "知识库资料不能证明我本轮实际调用了哪些内部工具" in response["content"]
     assert response["answer"]["answerMode"] == "system_meta"
+    assert response["answer"]["queryIntent"] == "runtime_tool_question"
     assert response["citations"] == []
     assert response["assistantMessage"]["modelParams"]["queryIntent"] == "runtime_tool_question"
 
@@ -647,6 +661,7 @@ def test_conversation_system_meta_profile_covers_common_variants(
 
         assert response["answer"]["answerMode"] == "system_meta"
         assert response["answer"]["citationPolicy"] == "not_required"
+        assert response["answer"]["queryIntent"] == intent
         assert response["citations"] == []
         assert response["assistantMessage"]["modelParams"]["queryIntent"] == intent
         assert expected_text in response["content"]
@@ -671,6 +686,8 @@ def test_conversation_explicit_source_question_still_uses_rag_path(
 
     assert response["answer"]["answerMode"] == "knowledge_grounded"
     assert response["answer"]["citationPolicy"] == "required"
+    assert response["answer"]["queryIntent"] == "knowledge_fact_qa"
+    assert response["answer"]["evidenceStatus"] == "no_evidence"
     assert response["answer"]["refusalReason"] == "no_retrieval_candidates"
     assert response["retrieval"]["query"] == "这份简历中的你是谁？"
 
@@ -700,6 +717,8 @@ def test_conversation_refuses_low_relevance_semantic_candidates(
     assert gateway.prompts == []
     assert response["answer"]["evidenceSufficient"] is False
     assert response["answer"]["refusalReason"] == "low_relevance_candidates"
+    assert response["answer"]["queryIntent"] == "knowledge_fact_qa"
+    assert response["answer"]["evidenceStatus"] == "weak_evidence"
     assert response["content"] == DEFAULT_REFUSAL
     assert response["citations"] == []
     assert response["citationValidation"]["candidateChunkIds"] == ["chunk-pdf-valid"]
@@ -712,6 +731,63 @@ def test_conversation_refuses_low_relevance_semantic_candidates(
             ).fetchone()[0]
         )
     assert params["refusalReason"] == "low_relevance_candidates"
+    assert params["queryIntent"] == "knowledge_fact_qa"
+    assert params["evidenceStatus"] == "weak_evidence"
+
+
+def test_conversation_interview_task_continues_with_partial_evidence_on_weak_candidates(
+    tmp_path: Path,
+) -> None:
+    storage = StorageRuntime(tmp_path, vector_dimension=3)
+    storage.initialize()
+    knowledge_base_id = _seed_answer_fixture(storage)
+    gateway = FakeAnswerGateway(
+        [
+            {
+                "evidence_sufficient": True,
+                "refusal_reason": None,
+                "paragraphs": [
+                    {
+                        "text": "可以围绕 Alpha 项目经历追问具体职责、技术取舍和结果验证。",
+                        "evidence_chunk_ids": ["chunk-pdf-valid"],
+                    }
+                ],
+            }
+        ]
+    )
+
+    response = asyncio.run(
+        ConversationService(
+            storage,
+            retrieval=WeakSemanticRetrieval(),
+            gateway_factory=lambda _key, _base, _embedding: gateway,
+        ).answer(
+            knowledge_base_id=knowledge_base_id,
+            query="面试？",
+            api_key="ark-test",
+            chat_model="doubao-test-chat",
+            embedding_model="doubao-test-embedding",
+        )
+    )
+
+    assert gateway.prompts
+    assert response["answer"]["evidenceSufficient"] is True
+    assert response["answer"]["refusalReason"] is None
+    assert response["answer"]["queryIntent"] == "knowledge_interview"
+    assert response["answer"]["evidenceStatus"] == "partial_evidence"
+    assert response["content"] == "可以围绕 Alpha 项目经历追问具体职责、技术取舍和结果验证。"
+    assert response["citations"][0]["chunkId"] == "chunk-pdf-valid"
+    assert "当前知识库任务类型：knowledge_interview" in gateway.prompts[0]
+    assert "当前检索证据状态：weak_evidence" in gateway.prompts[0]
+
+    with storage.database.connect() as connection:
+        params = json.loads(
+            connection.execute(
+                "SELECT model_params_json FROM messages WHERE role = 'assistant'"
+            ).fetchone()[0]
+        )
+    assert params["queryIntent"] == "knowledge_interview"
+    assert params["evidenceStatus"] == "partial_evidence"
 
 
 def test_conversation_model_switch_applies_to_next_message_and_history_is_compacted(

@@ -36,8 +36,29 @@ type QueryIntent = Literal[
     "system_limitation",
     "citation_policy",
     "runtime_tool_question",
-    "knowledge_base_question",
+    "knowledge_fact_qa",
+    "knowledge_summary",
+    "knowledge_transform",
+    "knowledge_interview",
+    "knowledge_review",
 ]
+
+type EvidenceStatus = Literal[
+    "strong_evidence",
+    "partial_evidence",
+    "weak_evidence",
+    "no_evidence",
+]
+
+KNOWLEDGE_QUERY_INTENTS = frozenset(
+    {
+        "knowledge_fact_qa",
+        "knowledge_summary",
+        "knowledge_transform",
+        "knowledge_interview",
+        "knowledge_review",
+    }
+)
 
 SYSTEM_META_PROFILE: dict[str, str | tuple[str, ...]] = {
     "version": "system-meta-profile-v1",
@@ -419,7 +440,7 @@ class ConversationService:
             }
 
             query_intent = _classify_query_intent(clean_query)
-            if query_intent != "knowledge_base_question":
+            if query_intent not in KNOWLEDGE_QUERY_INTENTS:
                 response = self._persist_meta_answer(
                     conversation=conversation,
                     user_message=user_message,
@@ -510,6 +531,8 @@ class ConversationService:
                     conversation=conversation,
                     user_message=user_message,
                     retrieval=retrieval,
+                    query_intent=query_intent,
+                    evidence_status="no_evidence",
                     chat_model=effective_chat_model,
                     generation_time_ms=_elapsed_ms(started),
                     reason="no_retrieval_candidates",
@@ -533,11 +556,17 @@ class ConversationService:
                 return
 
             weak_reason = _low_relevance_reason(clean_query, retrieval)
-            if weak_reason is not None:
+            retrieval_evidence_status = _retrieval_evidence_status(
+                query_intent=query_intent,
+                weak_reason=weak_reason,
+            )
+            if weak_reason is not None and _should_refuse_weak_evidence(query_intent):
                 response = self._persist_refusal(
                     conversation=conversation,
                     user_message=user_message,
                     retrieval=retrieval,
+                    query_intent=query_intent,
+                    evidence_status=retrieval_evidence_status,
                     chat_model=effective_chat_model,
                     generation_time_ms=_elapsed_ms(started),
                     reason=weak_reason,
@@ -566,12 +595,16 @@ class ConversationService:
             prompt = _answer_prompt(
                 query=clean_query,
                 retrieval=retrieval,
+                query_intent=query_intent,
+                evidence_status=retrieval_evidence_status,
                 retry_feedback=None,
                 history_context=history_context,
             )
             plain_prompt = _plain_answer_prompt(
                 query=clean_query,
                 retrieval=retrieval,
+                query_intent=query_intent,
+                evidence_status=retrieval_evidence_status,
                 retry_feedback=None,
                 history_context=history_context,
             )
@@ -692,12 +725,16 @@ class ConversationService:
                 prompt = _answer_prompt(
                     query=clean_query,
                     retrieval=retrieval,
+                    query_intent=query_intent,
+                    evidence_status=retrieval_evidence_status,
                     retry_feedback=validation,
                     history_context=history_context,
                 )
                 plain_prompt = _plain_answer_prompt(
                     query=clean_query,
                     retrieval=retrieval,
+                    query_intent=query_intent,
+                    evidence_status=retrieval_evidence_status,
                     retry_feedback=validation,
                     history_context=history_context,
                 )
@@ -717,6 +754,8 @@ class ConversationService:
                 retrieval=retrieval,
                 answer=final_answer,
                 validation=final_validation,
+                query_intent=query_intent,
+                retrieval_evidence_status=retrieval_evidence_status,
                 chat_model=effective_chat_model,
                 max_output_tokens=max_output_tokens,
                 generation_time_ms=_elapsed_ms(started),
@@ -903,6 +942,8 @@ class ConversationService:
                 "evidenceSufficient": _nested_bool(response, "answer", "evidenceSufficient"),
                 "answerMode": _nested_string(response, "answer", "answerMode"),
                 "citationPolicy": _nested_string(response, "answer", "citationPolicy"),
+                "queryIntent": _nested_string(response, "answer", "queryIntent"),
+                "evidenceStatus": _nested_string(response, "answer", "evidenceStatus"),
                 "citationValidation": response.get("citationValidation"),
             },
             citations=_trace_response_citations(response.get("citations")),
@@ -965,6 +1006,8 @@ class ConversationService:
         retrieval: dict[str, object],
         answer: dict[str, object],
         validation: dict[str, object],
+        query_intent: QueryIntent,
+        retrieval_evidence_status: EvidenceStatus,
         chat_model: str,
         max_output_tokens: int,
         generation_time_ms: int,
@@ -973,6 +1016,11 @@ class ConversationService:
         history_context: dict[str, object],
     ) -> dict[str, object]:
         evidence_sufficient = answer["evidenceSufficient"] is True and validation["valid"] is True
+        evidence_status = _final_evidence_status(
+            answer=answer,
+            validation=validation,
+            retrieval_evidence_status=retrieval_evidence_status,
+        )
         if evidence_sufficient:
             paragraphs = _validated_paragraphs(validation)
             content = "\n\n".join(str(paragraph["text"]) for paragraph in paragraphs)
@@ -1004,6 +1052,8 @@ class ConversationService:
                 "attempts": list(attempts),
                 "answerMode": "knowledge_grounded",
                 "citationPolicy": "required",
+                "queryIntent": query_intent,
+                "evidenceStatus": evidence_status,
                 "evidenceSufficient": evidence_sufficient,
                 "refusalReason": refusal_reason,
                 "candidateChunkIds": _candidate_chunk_ids(retrieval),
@@ -1031,6 +1081,8 @@ class ConversationService:
                 "refusalReason": refusal_reason,
                 "answerMode": "knowledge_grounded",
                 "citationPolicy": "required",
+                "queryIntent": query_intent,
+                "evidenceStatus": evidence_status,
             },
             "citations": citations,
             "citationValidation": validation,
@@ -1049,6 +1101,8 @@ class ConversationService:
         conversation: dict[str, object],
         user_message: dict[str, object],
         retrieval: dict[str, object],
+        query_intent: QueryIntent,
+        evidence_status: EvidenceStatus,
         chat_model: str,
         generation_time_ms: int,
         reason: str,
@@ -1065,6 +1119,8 @@ class ConversationService:
                 "retryCount": 0,
                 "answerMode": "knowledge_grounded",
                 "citationPolicy": "required",
+                "queryIntent": query_intent,
+                "evidenceStatus": evidence_status,
                 "evidenceSufficient": False,
                 "refusalReason": reason,
                 "candidateChunkIds": candidate_chunk_ids,
@@ -1112,6 +1168,8 @@ class ConversationService:
                 "refusalReason": reason,
                 "answerMode": "knowledge_grounded",
                 "citationPolicy": "required",
+                "queryIntent": query_intent,
+                "evidenceStatus": evidence_status,
             },
             "citations": [],
             "citationValidation": validation,
@@ -1200,6 +1258,7 @@ class ConversationService:
                 "refusalReason": None,
                 "answerMode": "system_meta",
                 "citationPolicy": "not_required",
+                "queryIntent": intent,
             },
             "citations": [],
             "citationValidation": validation,
@@ -1472,8 +1531,9 @@ def _classify_query_intent(query: str) -> QueryIntent:
         "文件里",
         "文件中",
     )
+    knowledge_task_intent = _classify_knowledge_task_intent(compact)
     if any(marker in compact for marker in knowledge_markers):
-        return "knowledge_base_question"
+        return knowledge_task_intent
 
     subject_markers = ("你", "citemind", "这个软件", "这个应用", "这个系统", "系统")
     asks_system_subject = any(marker in compact for marker in subject_markers)
@@ -1606,7 +1666,70 @@ def _classify_query_intent(query: str) -> QueryIntent:
     )
     if any(marker in compact for marker in citation_markers):
         return "citation_policy"
-    return "knowledge_base_question"
+    if knowledge_task_intent != "knowledge_fact_qa":
+        return knowledge_task_intent
+    return "knowledge_fact_qa"
+
+
+def _classify_knowledge_task_intent(compact_query: str) -> QueryIntent:
+    interview_markers = (
+        "面试",
+        "追问",
+        "面试官",
+        "模拟",
+        "准备问题",
+        "提问",
+        "问我",
+        "问题清单",
+    )
+    if any(marker in compact_query for marker in interview_markers):
+        return "knowledge_interview"
+
+    summary_markers = (
+        "总结",
+        "概括",
+        "提炼",
+        "归纳",
+        "亮点",
+        "优势",
+        "不足",
+        "核心内容",
+        "主要内容",
+    )
+    if any(marker in compact_query for marker in summary_markers):
+        return "knowledge_summary"
+
+    transform_markers = (
+        "改写",
+        "润色",
+        "生成",
+        "写一段",
+        "写一个",
+        "写份",
+        "自我介绍",
+        "邮件",
+        "简历描述",
+        "包装",
+        "整理成",
+    )
+    if any(marker in compact_query for marker in transform_markers):
+        return "knowledge_transform"
+
+    review_markers = (
+        "评价",
+        "分析",
+        "建议",
+        "优化",
+        "如何改进",
+        "改进方向",
+        "风险",
+        "短板",
+        "可提升",
+    )
+    if any(marker in compact_query for marker in review_markers):
+        return "knowledge_review"
+
+    return "knowledge_fact_qa"
 
 
 def _meta_answer_text(intent: QueryIntent) -> str:
@@ -1709,6 +1832,40 @@ def _empty_meta_retrieval(*, knowledge_base_id: str, query: str) -> dict[str, ob
     }
 
 
+def _retrieval_evidence_status(
+    *,
+    query_intent: QueryIntent,
+    weak_reason: str | None,
+) -> EvidenceStatus:
+    if weak_reason is not None:
+        return "weak_evidence"
+    if query_intent in {
+        "knowledge_summary",
+        "knowledge_transform",
+        "knowledge_interview",
+        "knowledge_review",
+    }:
+        return "partial_evidence"
+    return "strong_evidence"
+
+
+def _should_refuse_weak_evidence(query_intent: QueryIntent) -> bool:
+    return query_intent == "knowledge_fact_qa"
+
+
+def _final_evidence_status(
+    *,
+    answer: Mapping[str, object],
+    validation: Mapping[str, object],
+    retrieval_evidence_status: EvidenceStatus,
+) -> EvidenceStatus:
+    if retrieval_evidence_status == "weak_evidence":
+        return "partial_evidence" if validation.get("valid") is True else "weak_evidence"
+    if answer.get("evidenceSufficient") is True and validation.get("valid") is True:
+        return retrieval_evidence_status
+    return "partial_evidence"
+
+
 def _low_relevance_reason(query: str, retrieval: dict[str, object]) -> str | None:
     results = retrieval.get("results")
     retrieval_meta = retrieval.get("retrieval")
@@ -1786,6 +1943,8 @@ def _answer_prompt(
     *,
     query: str,
     retrieval: dict[str, object],
+    query_intent: QueryIntent,
+    evidence_status: EvidenceStatus,
     retry_feedback: dict[str, object] | None,
     history_context: dict[str, object],
 ) -> str:
@@ -1807,12 +1966,27 @@ def _answer_prompt(
         "\n每个回答段落都必须给出支撑该段内容的 evidence_chunk_ids，"
         "且只能引用候选证据中的 chunk_id。"
         "\n输出必须符合 JSON Schema，不要输出 Markdown 或额外解释。"
+        f"\n当前知识库任务类型：{query_intent}。"
+        f"\n当前检索证据状态：{evidence_status}。"
+        f"\n{_knowledge_task_instruction(query_intent)}"
         f"{retry_text}"
         f"\n\n对话历史：\n{_history_prompt(history_context)}"
         f"\n\n用户问题：{query}"
         "\n\n候选证据："
         f"\n{_evidence_context(retrieval)}"
     )
+
+
+def _knowledge_task_instruction(query_intent: QueryIntent) -> str:
+    if query_intent == "knowledge_summary":
+        return "任务要求：总结和归纳候选证据；事实性结论必须引用，组织性表达不得引入新事实。"
+    if query_intent == "knowledge_transform":
+        return "任务要求：基于候选证据改写或生成内容；不得添加候选证据外的新经历、新数据或新结论。"
+    if query_intent == "knowledge_interview":
+        return "任务要求：基于候选证据生成面试追问；每个问题应能追溯到至少一个候选 chunk。"
+    if query_intent == "knowledge_review":
+        return "任务要求：基于候选证据做评价和建议；必须区分资料事实与基于事实的建议。"
+    return "任务要求：回答候选证据直接支持的事实；证据不足时必须拒答。"
 
 
 def _evidence_context(retrieval: dict[str, object]) -> str:
@@ -2011,6 +2185,8 @@ def _plain_answer_prompt(
     *,
     query: str,
     retrieval: dict[str, object],
+    query_intent: QueryIntent,
+    evidence_status: EvidenceStatus,
     retry_feedback: dict[str, object] | None,
     history_context: dict[str, object],
 ) -> str:
@@ -2030,6 +2206,9 @@ def _plain_answer_prompt(
         "\n不同要点之间必须空一行分段；不要输出一整段密集长文本。"
         "\n每个事实段落末尾必须使用方括号引用至少一个候选 chunk_id，例如 [chunk-xxx]。"
         "\n引用只能来自候选证据中的 chunk_id。"
+        f"\n当前知识库任务类型：{query_intent}。"
+        f"\n当前检索证据状态：{evidence_status}。"
+        f"\n{_knowledge_task_instruction(query_intent)}"
         f"{retry_text}"
         f"\n\n对话历史：\n{_history_prompt(history_context)}"
         f"\n\n用户问题：{query}"
