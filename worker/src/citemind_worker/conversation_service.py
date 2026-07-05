@@ -560,7 +560,10 @@ class ConversationService:
                 query_intent=query_intent,
                 weak_reason=weak_reason,
             )
-            if weak_reason is not None and _should_refuse_weak_evidence(query_intent):
+            if weak_reason is not None and _should_refuse_weak_evidence(
+                query_intent,
+                query=clean_query,
+            ):
                 response = self._persist_refusal(
                     conversation=conversation,
                     user_message=user_message,
@@ -1505,8 +1508,77 @@ def _ark_gateway_factory(api_key: str, base_url: str, embedding_model: str) -> A
     )
 
 
+def _compact_query_text(query: str) -> str:
+    return re.sub(r"[\s？?！!。,.，、：:；;“”\"'（）()【】\[\]]+", "", query.lower())
+
+
+def _is_obviously_unrelated_short_query(query: str) -> bool:
+    compact = _compact_query_text(query)
+    query_terms = _text_terms(query)
+    if not query_terms or len(query_terms) > LOW_RELEVANCE_MAX_QUERY_TERMS:
+        return False
+    unrelated_markers = (
+        "天气",
+        "今天几号",
+        "现在几点",
+        "几点",
+        "讲个笑话",
+        "笑话",
+        "新闻",
+        "股票",
+        "汇率",
+    )
+    return any(marker in compact for marker in unrelated_markers)
+
+
+def _has_document_task_marker(query: str) -> bool:
+    compact = _compact_query_text(query)
+    task_markers = (
+        "面试",
+        "追问",
+        "模拟",
+        "准备问题",
+        "提问",
+        "问题清单",
+        "总结",
+        "概括",
+        "提炼",
+        "亮点",
+        "优势",
+        "不足",
+        "评价",
+        "分析",
+        "建议",
+        "优化",
+        "改写",
+        "润色",
+        "生成",
+        "写一段",
+        "自我介绍",
+    )
+    if any(marker in compact for marker in task_markers):
+        return True
+
+    document_markers = (
+        "简历",
+        "项目",
+        "经历",
+        "技能",
+        "候选人",
+        "资料",
+        "材料",
+        "文档",
+        "文件",
+        "pdf",
+    )
+    scoped_markers = ("基于", "根据", "围绕", "针对", "帮我", "请")
+    return any(marker in compact for marker in document_markers) and any(
+        marker in compact for marker in scoped_markers
+    )
+
+
 def _classify_query_intent(query: str) -> QueryIntent:
-    compact = re.sub(r"[\s？?！!。,.，、：:；;“”\"'（）()【】\[\]]+", "", query.lower())
+    compact = _compact_query_text(query)
     knowledge_markers = (
         "资料",
         "材料",
@@ -1849,7 +1921,11 @@ def _retrieval_evidence_status(
     return "strong_evidence"
 
 
-def _should_refuse_weak_evidence(query_intent: QueryIntent) -> bool:
+def _should_refuse_weak_evidence(query_intent: QueryIntent, *, query: str) -> bool:
+    if _is_obviously_unrelated_short_query(query):
+        return True
+    if _has_document_task_marker(query):
+        return False
     return query_intent == "knowledge_fact_qa"
 
 
@@ -1968,6 +2044,7 @@ def _answer_prompt(
         "\n输出必须符合 JSON Schema，不要输出 Markdown 或额外解释。"
         f"\n当前知识库任务类型：{query_intent}。"
         f"\n当前检索证据状态：{evidence_status}。"
+        f"\n{_evidence_status_instruction(evidence_status)}"
         f"\n{_knowledge_task_instruction(query_intent)}"
         f"{retry_text}"
         f"\n\n对话历史：\n{_history_prompt(history_context)}"
@@ -1987,6 +2064,19 @@ def _knowledge_task_instruction(query_intent: QueryIntent) -> str:
     if query_intent == "knowledge_review":
         return "任务要求：基于候选证据做评价和建议；必须区分资料事实与基于事实的建议。"
     return "任务要求：回答候选证据直接支持的事实；证据不足时必须拒答。"
+
+
+def _evidence_status_instruction(evidence_status: EvidenceStatus) -> str:
+    if evidence_status == "weak_evidence":
+        return (
+            "证据状态要求：候选证据相关性较弱；只有在候选片段能支撑时回答，"
+            "并把回答范围限定为已检索到的片段。"
+        )
+    if evidence_status == "partial_evidence":
+        return "证据状态要求：候选证据可支持部分回答；必须说明可支持范围，不得补全缺失事实。"
+    if evidence_status == "no_evidence":
+        return "证据状态要求：没有候选证据，必须拒答。"
+    return "证据状态要求：候选证据足够时正常回答，但仍必须逐段绑定有效引用。"
 
 
 def _evidence_context(retrieval: dict[str, object]) -> str:
@@ -2208,6 +2298,7 @@ def _plain_answer_prompt(
         "\n引用只能来自候选证据中的 chunk_id。"
         f"\n当前知识库任务类型：{query_intent}。"
         f"\n当前检索证据状态：{evidence_status}。"
+        f"\n{_evidence_status_instruction(evidence_status)}"
         f"\n{_knowledge_task_instruction(query_intent)}"
         f"{retry_text}"
         f"\n\n对话历史：\n{_history_prompt(history_context)}"

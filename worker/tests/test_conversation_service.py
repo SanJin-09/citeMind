@@ -790,6 +790,51 @@ def test_conversation_interview_task_continues_with_partial_evidence_on_weak_can
     assert params["evidenceStatus"] == "partial_evidence"
 
 
+def test_conversation_document_scoped_query_bypasses_direct_low_relevance_refusal(
+    tmp_path: Path,
+) -> None:
+    storage = StorageRuntime(tmp_path, vector_dimension=3)
+    storage.initialize()
+    knowledge_base_id = _seed_answer_fixture(storage)
+    gateway = FakeAnswerGateway(
+        [
+            {
+                "evidence_sufficient": True,
+                "refusal_reason": None,
+                "paragraphs": [
+                    {
+                        "text": "候选人的说明只能基于当前检索到的 Alpha 片段展开。",
+                        "evidence_chunk_ids": ["chunk-pdf-valid"],
+                    }
+                ],
+            }
+        ]
+    )
+
+    response = asyncio.run(
+        ConversationService(
+            storage,
+            retrieval=WeakSemanticRetrieval(),
+            gateway_factory=lambda _key, _base, _embedding: gateway,
+        ).answer(
+            knowledge_base_id=knowledge_base_id,
+            query="基于简历",
+            api_key="ark-test",
+            chat_model="doubao-test-chat",
+            embedding_model="doubao-test-embedding",
+        )
+    )
+
+    assert gateway.prompts
+    assert response["answer"]["evidenceSufficient"] is True
+    assert response["answer"]["refusalReason"] is None
+    assert response["answer"]["queryIntent"] == "knowledge_fact_qa"
+    assert response["answer"]["evidenceStatus"] == "partial_evidence"
+    assert response["citations"][0]["chunkId"] == "chunk-pdf-valid"
+    assert "当前检索证据状态：weak_evidence" in gateway.prompts[0]
+    assert "候选证据相关性较弱" in gateway.prompts[0]
+
+
 def test_conversation_model_switch_applies_to_next_message_and_history_is_compacted(
     tmp_path: Path,
 ) -> None:
