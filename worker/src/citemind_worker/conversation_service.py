@@ -1526,7 +1526,11 @@ def _is_obviously_unrelated_short_query(query: str) -> bool:
         "笑话",
         "新闻",
         "股票",
+        "股价",
+        "涨了吗",
         "汇率",
+        "价格",
+        "热搜",
     )
     return any(marker in compact for marker in unrelated_markers)
 
@@ -1540,9 +1544,19 @@ def _has_document_task_marker(query: str) -> bool:
         "准备问题",
         "提问",
         "问题清单",
+        "检查清单",
+        "审查清单",
+        "讨论问题",
+        "测试问题",
+        "faq",
+        "清单",
         "总结",
         "概括",
         "提炼",
+        "归纳",
+        "要点",
+        "关键结论",
+        "核心内容",
         "亮点",
         "优势",
         "不足",
@@ -1550,29 +1564,76 @@ def _has_document_task_marker(query: str) -> bool:
         "分析",
         "建议",
         "优化",
+        "风险",
+        "优缺点",
+        "可行性",
         "改写",
         "润色",
         "生成",
         "写一段",
+        "整理成",
+        "转成",
+        "压缩成",
+        "扩写成",
+        "汇报稿",
+        "邮件",
+        "说明文案",
         "自我介绍",
     )
     if any(marker in compact for marker in task_markers):
         return True
 
-    document_markers = (
+    explicit_document_markers = (
+        "这份",
+        "这篇",
         "简历",
-        "项目",
-        "经历",
-        "技能",
-        "候选人",
         "资料",
         "材料",
         "文档",
         "文件",
+        "报告",
+        "论文",
+        "合同",
+        "会议纪要",
+        "纪要",
+        "说明书",
+        "项目材料",
+        "接口文档",
+        "产品文档",
+        "制度",
+        "条款",
+        "原文",
+        "来源",
+        "知识库",
+        "已导入",
+        "上传",
         "pdf",
     )
+    if any(marker in compact for marker in explicit_document_markers):
+        return True
+
+    scoped_document_markers = (
+        "项目",
+        "经历",
+        "技能",
+        "候选人",
+        "接口",
+        "产品",
+        "流程",
+        "参数",
+        "错误码",
+        "行动项",
+        "决议",
+        "义务",
+        "责任",
+        "期限",
+        "方法",
+        "实验",
+        "数据",
+        "结论",
+    )
     scoped_markers = ("基于", "根据", "围绕", "针对", "帮我", "请")
-    return any(marker in compact for marker in document_markers) and any(
+    return any(marker in compact for marker in scoped_document_markers) and any(
         marker in compact for marker in scoped_markers
     )
 
@@ -1753,6 +1814,11 @@ def _classify_knowledge_task_intent(compact_query: str) -> QueryIntent:
         "提问",
         "问我",
         "问题清单",
+        "检查清单",
+        "审查清单",
+        "讨论问题",
+        "测试问题",
+        "faq",
     )
     if any(marker in compact_query for marker in interview_markers):
         return "knowledge_interview"
@@ -2071,6 +2137,8 @@ def _evidence_status_instruction(evidence_status: EvidenceStatus) -> str:
         return (
             "证据状态要求：候选证据相关性较弱；只有在候选片段能支撑时回答，"
             "并把回答范围限定为已检索到的片段。"
+            "如果候选片段无法支撑用户任务，必须将 evidence_sufficient 设为 false，"
+            "并请求用户明确资料范围或补充相关资料。"
         )
     if evidence_status == "partial_evidence":
         return "证据状态要求：候选证据可支持部分回答；必须说明可支持范围，不得补全缺失事实。"

@@ -835,6 +835,112 @@ def test_conversation_document_scoped_query_bypasses_direct_low_relevance_refusa
     assert "候选证据相关性较弱" in gateway.prompts[0]
 
 
+def test_conversation_generic_document_references_bypass_direct_low_relevance_refusal(
+    tmp_path: Path,
+) -> None:
+    cases = [
+        "这篇论文",
+        "这份合同",
+        "会议纪要",
+        "接口文档",
+        "项目材料",
+    ]
+
+    for index, query in enumerate(cases):
+        storage = StorageRuntime(tmp_path / f"case-{index}", vector_dimension=3)
+        storage.initialize()
+        knowledge_base_id = _seed_answer_fixture(storage)
+        gateway = FakeAnswerGateway(
+            [
+                {
+                    "evidence_sufficient": True,
+                    "refusal_reason": None,
+                    "paragraphs": [
+                        {
+                            "text": f"{query} 只能基于当前检索到的片段谨慎处理。",
+                            "evidence_chunk_ids": ["chunk-pdf-valid"],
+                        }
+                    ],
+                }
+            ]
+        )
+
+        response = asyncio.run(
+            ConversationService(
+                storage,
+                retrieval=WeakSemanticRetrieval(),
+                gateway_factory=lambda _key, _base, _embedding, gateway=gateway: gateway,
+            ).answer(
+                knowledge_base_id=knowledge_base_id,
+                query=query,
+                api_key="ark-test",
+                chat_model="doubao-test-chat",
+                embedding_model="doubao-test-embedding",
+            )
+        )
+
+        assert gateway.prompts
+        assert response["answer"]["evidenceSufficient"] is True
+        assert response["answer"]["refusalReason"] is None
+        assert response["answer"]["queryIntent"] == "knowledge_fact_qa"
+        assert response["answer"]["evidenceStatus"] == "partial_evidence"
+        assert response["citations"][0]["chunkId"] == "chunk-pdf-valid"
+        assert "当前检索证据状态：weak_evidence" in gateway.prompts[0]
+        assert "请求用户明确资料范围或补充相关资料" in gateway.prompts[0]
+
+
+def test_conversation_generic_task_markers_bypass_direct_low_relevance_refusal(
+    tmp_path: Path,
+) -> None:
+    cases = [
+        ("审查清单", "knowledge_interview"),
+        ("提炼风险", "knowledge_summary"),
+        ("改写", "knowledge_transform"),
+        ("总结一下", "knowledge_summary"),
+    ]
+
+    for index, (query, expected_intent) in enumerate(cases):
+        storage = StorageRuntime(tmp_path / f"task-{index}", vector_dimension=3)
+        storage.initialize()
+        knowledge_base_id = _seed_answer_fixture(storage)
+        gateway = FakeAnswerGateway(
+            [
+                {
+                    "evidence_sufficient": True,
+                    "refusal_reason": None,
+                    "paragraphs": [
+                        {
+                            "text": f"{query} 的输出仅基于当前候选片段。",
+                            "evidence_chunk_ids": ["chunk-pdf-valid"],
+                        }
+                    ],
+                }
+            ]
+        )
+
+        response = asyncio.run(
+            ConversationService(
+                storage,
+                retrieval=WeakSemanticRetrieval(),
+                gateway_factory=lambda _key, _base, _embedding, gateway=gateway: gateway,
+            ).answer(
+                knowledge_base_id=knowledge_base_id,
+                query=query,
+                api_key="ark-test",
+                chat_model="doubao-test-chat",
+                embedding_model="doubao-test-embedding",
+            )
+        )
+
+        assert gateway.prompts
+        assert response["answer"]["evidenceSufficient"] is True
+        assert response["answer"]["refusalReason"] is None
+        assert response["answer"]["queryIntent"] == expected_intent
+        assert response["answer"]["evidenceStatus"] == "partial_evidence"
+        assert response["citations"][0]["chunkId"] == "chunk-pdf-valid"
+        assert "当前检索证据状态：weak_evidence" in gateway.prompts[0]
+
+
 def test_conversation_model_switch_applies_to_next_message_and_history_is_compacted(
     tmp_path: Path,
 ) -> None:
