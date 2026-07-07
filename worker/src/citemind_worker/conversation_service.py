@@ -5,7 +5,7 @@ import sqlite3
 from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from datetime import UTC, datetime
 from time import perf_counter
-from typing import Literal, Protocol
+from typing import Literal, NamedTuple, Protocol
 from uuid import uuid4
 
 from citemind_worker.agent_run_service import AgentRunService
@@ -39,8 +39,9 @@ type QueryIntent = Literal[
     "knowledge_fact_qa",
     "knowledge_summary",
     "knowledge_transform",
-    "knowledge_interview",
+    "knowledge_question_generation",
     "knowledge_review",
+    "knowledge_ambiguous",
 ]
 
 type EvidenceStatus = Literal[
@@ -55,10 +56,18 @@ KNOWLEDGE_QUERY_INTENTS = frozenset(
         "knowledge_fact_qa",
         "knowledge_summary",
         "knowledge_transform",
-        "knowledge_interview",
+        "knowledge_question_generation",
         "knowledge_review",
+        "knowledge_ambiguous",
     }
 )
+
+
+class KnowledgeIntentClassification(NamedTuple):
+    intent: QueryIntent
+    confidence: float
+    matched_markers: tuple[str, ...]
+
 
 SYSTEM_META_PROFILE: dict[str, str | tuple[str, ...]] = {
     "version": "system-meta-profile-v1",
@@ -1638,35 +1647,19 @@ def _has_document_task_marker(query: str) -> bool:
     )
 
 
+def _matched_markers(compact_query: str, markers: Sequence[str]) -> tuple[str, ...]:
+    return tuple(marker for marker in markers if marker in compact_query)
+
+
+def _has_knowledge_context_marker(compact_query: str) -> bool:
+    return bool(_matched_markers(compact_query, KNOWLEDGE_CONTEXT_MARKERS))
+
+
 def _classify_query_intent(query: str) -> QueryIntent:
     compact = _compact_query_text(query)
-    knowledge_markers = (
-        "资料",
-        "材料",
-        "文档",
-        "文件",
-        "简历",
-        "候选人",
-        "作者",
-        "这份",
-        "这篇",
-        "pdf",
-        "来源",
-        "原文",
-        "知识库里",
-        "知识库中",
-        "已导入",
-        "上传的",
-        "资料里",
-        "资料中",
-        "文档里",
-        "文档中",
-        "文件里",
-        "文件中",
-    )
-    knowledge_task_intent = _classify_knowledge_task_intent(compact)
-    if any(marker in compact for marker in knowledge_markers):
-        return knowledge_task_intent
+    knowledge_classification = _classify_knowledge_task_intent(compact)
+    if _has_knowledge_context_marker(compact):
+        return knowledge_classification.intent
 
     subject_markers = ("你", "citemind", "这个软件", "这个应用", "这个系统", "系统")
     asks_system_subject = any(marker in compact for marker in subject_markers)
@@ -1799,13 +1792,74 @@ def _classify_query_intent(query: str) -> QueryIntent:
     )
     if any(marker in compact for marker in citation_markers):
         return "citation_policy"
-    if knowledge_task_intent != "knowledge_fact_qa":
-        return knowledge_task_intent
+    if knowledge_classification.intent != "knowledge_fact_qa":
+        return knowledge_classification.intent
     return "knowledge_fact_qa"
 
 
-def _classify_knowledge_task_intent(compact_query: str) -> QueryIntent:
-    interview_markers = (
+KNOWLEDGE_CONTEXT_MARKERS = (
+    "资料",
+    "材料",
+    "文档",
+    "文件",
+    "简历",
+    "候选人",
+    "作者",
+    "这份",
+    "这篇",
+    "报告",
+    "论文",
+    "合同",
+    "会议纪要",
+    "纪要",
+    "说明书",
+    "项目材料",
+    "接口文档",
+    "产品文档",
+    "制度",
+    "条款",
+    "pdf",
+    "来源",
+    "原文",
+    "知识库",
+    "知识库里",
+    "知识库中",
+    "已导入",
+    "上传",
+    "上传的",
+    "资料里",
+    "资料中",
+    "文档里",
+    "文档中",
+    "文件里",
+    "文件中",
+)
+
+
+def _classify_knowledge_task_intent(compact_query: str) -> KnowledgeIntentClassification:
+    fact_markers = (
+        "是什么",
+        "是谁",
+        "什么时候",
+        "在哪里",
+        "哪里",
+        "哪些",
+        "多少",
+        "是否",
+        "有没有",
+        "有无",
+        "列出",
+        "提到",
+        "写了什么",
+        "原文",
+        "根据原文",
+        "资料里写了什么",
+    )
+    matched = _matched_markers(compact_query, fact_markers)
+    if matched:
+        return KnowledgeIntentClassification("knowledge_fact_qa", 0.95, matched)
+
+    question_generation_markers = (
         "面试",
         "追问",
         "面试官",
@@ -1819,9 +1873,35 @@ def _classify_knowledge_task_intent(compact_query: str) -> QueryIntent:
         "讨论问题",
         "测试问题",
         "faq",
+        "生成问题",
+        "设计问题",
+        "准备问题",
+        "出题",
     )
-    if any(marker in compact_query for marker in interview_markers):
-        return "knowledge_interview"
+    matched = _matched_markers(compact_query, question_generation_markers)
+    if matched:
+        return KnowledgeIntentClassification(
+            "knowledge_question_generation",
+            0.95,
+            matched,
+        )
+
+    review_markers = (
+        "评价",
+        "分析",
+        "建议",
+        "优化",
+        "如何改进",
+        "改进方向",
+        "风险",
+        "短板",
+        "可提升",
+        "优缺点",
+        "可行性",
+    )
+    matched = _matched_markers(compact_query, review_markers)
+    if matched:
+        return KnowledgeIntentClassification("knowledge_review", 0.9, matched)
 
     summary_markers = (
         "总结",
@@ -1834,8 +1914,9 @@ def _classify_knowledge_task_intent(compact_query: str) -> QueryIntent:
         "核心内容",
         "主要内容",
     )
-    if any(marker in compact_query for marker in summary_markers):
-        return "knowledge_summary"
+    matched = _matched_markers(compact_query, summary_markers)
+    if matched:
+        return KnowledgeIntentClassification("knowledge_summary", 0.9, matched)
 
     transform_markers = (
         "改写",
@@ -1850,24 +1931,15 @@ def _classify_knowledge_task_intent(compact_query: str) -> QueryIntent:
         "包装",
         "整理成",
     )
-    if any(marker in compact_query for marker in transform_markers):
-        return "knowledge_transform"
+    matched = _matched_markers(compact_query, transform_markers)
+    if matched:
+        return KnowledgeIntentClassification("knowledge_transform", 0.9, matched)
 
-    review_markers = (
-        "评价",
-        "分析",
-        "建议",
-        "优化",
-        "如何改进",
-        "改进方向",
-        "风险",
-        "短板",
-        "可提升",
-    )
-    if any(marker in compact_query for marker in review_markers):
-        return "knowledge_review"
+    matched = _matched_markers(compact_query, KNOWLEDGE_CONTEXT_MARKERS)
+    if matched:
+        return KnowledgeIntentClassification("knowledge_ambiguous", 0.45, matched)
 
-    return "knowledge_fact_qa"
+    return KnowledgeIntentClassification("knowledge_fact_qa", 0.55, ())
 
 
 def _meta_answer_text(intent: QueryIntent) -> str:
@@ -1980,8 +2052,9 @@ def _retrieval_evidence_status(
     if query_intent in {
         "knowledge_summary",
         "knowledge_transform",
-        "knowledge_interview",
+        "knowledge_question_generation",
         "knowledge_review",
+        "knowledge_ambiguous",
     }:
         return "partial_evidence"
     return "strong_evidence"
@@ -2125,10 +2198,18 @@ def _knowledge_task_instruction(query_intent: QueryIntent) -> str:
         return "任务要求：总结和归纳候选证据；事实性结论必须引用，组织性表达不得引入新事实。"
     if query_intent == "knowledge_transform":
         return "任务要求：基于候选证据改写或生成内容；不得添加候选证据外的新经历、新数据或新结论。"
-    if query_intent == "knowledge_interview":
-        return "任务要求：基于候选证据生成面试追问；每个问题应能追溯到至少一个候选 chunk。"
+    if query_intent == "knowledge_question_generation":
+        return (
+            "任务要求：基于候选证据生成问题、追问、FAQ 或检查清单；"
+            "每一项都应能追溯到至少一个候选 chunk。"
+        )
     if query_intent == "knowledge_review":
         return "任务要求：基于候选证据做评价和建议；必须区分资料事实与基于事实的建议。"
+    if query_intent == "knowledge_ambiguous":
+        return (
+            "任务要求：用户意图不够明确；只能回答候选证据直接支持的内容，"
+            "无法判断任务目标时请求用户明确资料范围或处理方式。"
+        )
     return "任务要求：回答候选证据直接支持的事实；证据不足时必须拒答。"
 
 

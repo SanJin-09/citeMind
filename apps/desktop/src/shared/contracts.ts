@@ -660,8 +660,9 @@ export interface ConversationAnswerResponse {
       | "knowledge_fact_qa"
       | "knowledge_summary"
       | "knowledge_transform"
-      | "knowledge_interview"
-      | "knowledge_review";
+      | "knowledge_question_generation"
+      | "knowledge_review"
+      | "knowledge_ambiguous";
     evidenceStatus?:
       | "strong_evidence"
       | "partial_evidence"

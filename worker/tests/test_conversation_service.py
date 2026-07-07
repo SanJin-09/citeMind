@@ -334,7 +334,7 @@ def test_conversation_splits_dense_answer_and_persists_paragraph_citations(
     )
 
     assert response["answer"]["evidenceSufficient"] is True
-    assert response["answer"]["queryIntent"] == "knowledge_interview"
+    assert response["answer"]["queryIntent"] == "knowledge_question_generation"
     assert response["answer"]["evidenceStatus"] == "partial_evidence"
     assert len(response["answer"]["paragraphs"]) == 2
     assert "\n\n" in response["content"]
@@ -350,7 +350,7 @@ def test_conversation_splits_dense_answer_and_persists_paragraph_citations(
     assert isinstance(stored_paragraphs, list)
     assert len(stored_paragraphs) == 2
     assert assistant["citations"][1]["paragraphIndex"] == 1
-    assert assistant["modelParams"]["queryIntent"] == "knowledge_interview"
+    assert assistant["modelParams"]["queryIntent"] == "knowledge_question_generation"
     assert assistant["modelParams"]["evidenceStatus"] == "partial_evidence"
 
 
@@ -538,7 +538,7 @@ def test_conversation_refuses_without_retrieval_candidates(tmp_path: Path) -> No
     assert gateway.prompts == []
     assert response["answer"]["evidenceSufficient"] is False
     assert response["answer"]["refusalReason"] == "no_retrieval_candidates"
-    assert response["answer"]["queryIntent"] == "knowledge_fact_qa"
+    assert response["answer"]["queryIntent"] == "knowledge_ambiguous"
     assert response["answer"]["evidenceStatus"] == "no_evidence"
     assert response["content"] == DEFAULT_REFUSAL
     assert response["citations"] == []
@@ -554,7 +554,7 @@ def test_conversation_refuses_without_retrieval_candidates(tmp_path: Path) -> No
         )
     assert params["evidenceSufficient"] is False
     assert params["refusalReason"] == "no_retrieval_candidates"
-    assert params["queryIntent"] == "knowledge_fact_qa"
+    assert params["queryIntent"] == "knowledge_ambiguous"
     assert params["evidenceStatus"] == "no_evidence"
 
 
@@ -773,11 +773,11 @@ def test_conversation_interview_task_continues_with_partial_evidence_on_weak_can
     assert gateway.prompts
     assert response["answer"]["evidenceSufficient"] is True
     assert response["answer"]["refusalReason"] is None
-    assert response["answer"]["queryIntent"] == "knowledge_interview"
+    assert response["answer"]["queryIntent"] == "knowledge_question_generation"
     assert response["answer"]["evidenceStatus"] == "partial_evidence"
     assert response["content"] == "可以围绕 Alpha 项目经历追问具体职责、技术取舍和结果验证。"
     assert response["citations"][0]["chunkId"] == "chunk-pdf-valid"
-    assert "当前知识库任务类型：knowledge_interview" in gateway.prompts[0]
+    assert "当前知识库任务类型：knowledge_question_generation" in gateway.prompts[0]
     assert "当前检索证据状态：weak_evidence" in gateway.prompts[0]
 
     with storage.database.connect() as connection:
@@ -786,7 +786,7 @@ def test_conversation_interview_task_continues_with_partial_evidence_on_weak_can
                 "SELECT model_params_json FROM messages WHERE role = 'assistant'"
             ).fetchone()[0]
         )
-    assert params["queryIntent"] == "knowledge_interview"
+    assert params["queryIntent"] == "knowledge_question_generation"
     assert params["evidenceStatus"] == "partial_evidence"
 
 
@@ -828,9 +828,10 @@ def test_conversation_document_scoped_query_bypasses_direct_low_relevance_refusa
     assert gateway.prompts
     assert response["answer"]["evidenceSufficient"] is True
     assert response["answer"]["refusalReason"] is None
-    assert response["answer"]["queryIntent"] == "knowledge_fact_qa"
+    assert response["answer"]["queryIntent"] == "knowledge_ambiguous"
     assert response["answer"]["evidenceStatus"] == "partial_evidence"
     assert response["citations"][0]["chunkId"] == "chunk-pdf-valid"
+    assert "当前知识库任务类型：knowledge_ambiguous" in gateway.prompts[0]
     assert "当前检索证据状态：weak_evidence" in gateway.prompts[0]
     assert "候选证据相关性较弱" in gateway.prompts[0]
 
@@ -882,9 +883,10 @@ def test_conversation_generic_document_references_bypass_direct_low_relevance_re
         assert gateway.prompts
         assert response["answer"]["evidenceSufficient"] is True
         assert response["answer"]["refusalReason"] is None
-        assert response["answer"]["queryIntent"] == "knowledge_fact_qa"
+        assert response["answer"]["queryIntent"] == "knowledge_ambiguous"
         assert response["answer"]["evidenceStatus"] == "partial_evidence"
         assert response["citations"][0]["chunkId"] == "chunk-pdf-valid"
+        assert "当前知识库任务类型：knowledge_ambiguous" in gateway.prompts[0]
         assert "当前检索证据状态：weak_evidence" in gateway.prompts[0]
         assert "请求用户明确资料范围或补充相关资料" in gateway.prompts[0]
 
@@ -893,8 +895,8 @@ def test_conversation_generic_task_markers_bypass_direct_low_relevance_refusal(
     tmp_path: Path,
 ) -> None:
     cases = [
-        ("审查清单", "knowledge_interview"),
-        ("提炼风险", "knowledge_summary"),
+        ("审查清单", "knowledge_question_generation"),
+        ("提炼风险", "knowledge_review"),
         ("改写", "knowledge_transform"),
         ("总结一下", "knowledge_summary"),
     ]
