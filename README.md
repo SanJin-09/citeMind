@@ -196,12 +196,6 @@ pnpm dev
 - 对话即时消息、引用编号与来源证据映射
 - 分块、Embedding、FTS5、LanceDB 索引写入
 
-运行完整检查：
-
-```bash
-pnpm check
-```
-
 ## Roadmap
 
 - [x] P0 工程底座
