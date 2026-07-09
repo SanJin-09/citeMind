@@ -280,6 +280,9 @@ def test_conversation_answer_persists_messages_and_valid_citations(tmp_path: Pat
     ]
     assert "不得使用外部知识" in gateway.prompts[0]
     assert "evidence_chunk_ids" in gateway.prompts[0]
+    assert "【事实问答任务】" in gateway.prompts[0]
+    assert "当前可回答范围 answerableScope" in gateway.prompts[0]
+    assert "answerableScope 只作为生成约束" in gateway.prompts[0]
 
     with storage.database.connect() as connection:
         assert connection.execute("SELECT COUNT(*) FROM conversations").fetchone()[0] == 1
@@ -779,6 +782,8 @@ def test_conversation_interview_task_continues_with_partial_evidence_on_weak_can
     assert response["citations"][0]["chunkId"] == "chunk-pdf-valid"
     assert "当前知识库任务类型：knowledge_question_generation" in gateway.prompts[0]
     assert "当前检索证据状态：weak_evidence" in gateway.prompts[0]
+    assert "【问题生成任务】" in gateway.prompts[0]
+    assert "当前可回答范围 answerableScope" in gateway.prompts[0]
 
     with storage.database.connect() as connection:
         params = json.loads(
@@ -834,6 +839,8 @@ def test_conversation_document_scoped_query_bypasses_direct_low_relevance_refusa
     assert "当前知识库任务类型：knowledge_ambiguous" in gateway.prompts[0]
     assert "当前检索证据状态：weak_evidence" in gateway.prompts[0]
     assert "候选证据相关性较弱" in gateway.prompts[0]
+    assert "【意图不明确】" in gateway.prompts[0]
+    assert "当前可回答范围 answerableScope" in gateway.prompts[0]
 
 
 def test_conversation_generic_document_references_bypass_direct_low_relevance_refusal(
@@ -895,13 +902,13 @@ def test_conversation_generic_task_markers_bypass_direct_low_relevance_refusal(
     tmp_path: Path,
 ) -> None:
     cases = [
-        ("审查清单", "knowledge_question_generation"),
-        ("提炼风险", "knowledge_review"),
-        ("改写", "knowledge_transform"),
-        ("总结一下", "knowledge_summary"),
+        ("审查清单", "knowledge_question_generation", "【问题生成任务】"),
+        ("提炼风险", "knowledge_review", "【评价建议任务】"),
+        ("改写", "knowledge_transform", "【转换改写任务】"),
+        ("总结一下", "knowledge_summary", "【总结提炼任务】"),
     ]
 
-    for index, (query, expected_intent) in enumerate(cases):
+    for index, (query, expected_intent, expected_prompt_label) in enumerate(cases):
         storage = StorageRuntime(tmp_path / f"task-{index}", vector_dimension=3)
         storage.initialize()
         knowledge_base_id = _seed_answer_fixture(storage)
@@ -941,6 +948,8 @@ def test_conversation_generic_task_markers_bypass_direct_low_relevance_refusal(
         assert response["answer"]["evidenceStatus"] == "partial_evidence"
         assert response["citations"][0]["chunkId"] == "chunk-pdf-valid"
         assert "当前检索证据状态：weak_evidence" in gateway.prompts[0]
+        assert expected_prompt_label in gateway.prompts[0]
+        assert "当前可回答范围 answerableScope" in gateway.prompts[0]
 
 
 def test_conversation_model_switch_applies_to_next_message_and_history_is_compacted(

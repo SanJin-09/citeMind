@@ -2181,10 +2181,12 @@ def _answer_prompt(
         "\n每个回答段落都必须给出支撑该段内容的 evidence_chunk_ids，"
         "且只能引用候选证据中的 chunk_id。"
         "\n输出必须符合 JSON Schema，不要输出 Markdown 或额外解释。"
+        "\nanswerableScope 只作为生成约束，不要作为额外 JSON 字段输出。"
         f"\n当前知识库任务类型：{query_intent}。"
         f"\n当前检索证据状态：{evidence_status}。"
         f"\n{_evidence_status_instruction(evidence_status)}"
-        f"\n{_knowledge_task_instruction(query_intent)}"
+        f"\n{_answerable_scope_instruction(query_intent, evidence_status, retrieval)}"
+        f"\n{_intent_generation_instruction(query_intent)}"
         f"{retry_text}"
         f"\n\n对话历史：\n{_history_prompt(history_context)}"
         f"\n\n用户问题：{query}"
@@ -2193,24 +2195,111 @@ def _answer_prompt(
     )
 
 
-def _knowledge_task_instruction(query_intent: QueryIntent) -> str:
+def _answerable_scope_instruction(
+    query_intent: QueryIntent,
+    evidence_status: EvidenceStatus,
+    retrieval: dict[str, object],
+) -> str:
+    source_names = _retrieval_source_names(retrieval)
+    source_text = "、".join(source_names[:3]) if source_names else "候选片段"
+    if len(source_names) > 3:
+        source_text += "等"
+    candidate_count = len(_candidate_chunk_ids(retrieval))
+    base_scope = {
+        "knowledge_fact_qa": (
+            "只能回答候选证据直接支持的事实；不得回答候选证据未出现的实体、时间、数字、因果或判断。"
+        ),
+        "knowledge_summary": (
+            "只能总结候选证据覆盖到的主题、事实和结论；可以组织结构，"
+            "但不得加入候选证据之外的新事实。"
+        ),
+        "knowledge_transform": (
+            "只能转换候选证据中已有事实的表达形式；不得新增人物、项目、数据、承诺、结论或经历。"
+        ),
+        "knowledge_question_generation": (
+            "只能围绕候选证据中出现的事实、流程、风险点或未说明信息生成问题；"
+            "不得围绕候选证据外的内容发问。"
+        ),
+        "knowledge_review": (
+            "只能基于候选证据中可见事实给出评价、风险或建议；必须把事实依据和建议判断区分开。"
+        ),
+        "knowledge_ambiguous": (
+            "用户任务目标不明确；只能复述或概括候选证据直接支持的内容，"
+            "无法判断处理方式时请求用户明确任务。"
+        ),
+    }.get(
+        query_intent,
+        "只能回答候选证据直接支持的事实；证据不足时必须拒答。",
+    )
+    status_scope = {
+        "strong_evidence": "候选证据可支撑主要回答，但仍必须逐段绑定有效引用。",
+        "partial_evidence": "候选证据只能支撑部分回答；必须说明回答仅限已检索片段。",
+        "weak_evidence": (
+            "候选证据相关性较弱；仅允许给出可被候选片段直接支撑的局部回答，不能泛化到整份资料。"
+        ),
+        "no_evidence": "没有候选证据，必须拒答。",
+    }[evidence_status]
+    return (
+        "当前可回答范围 answerableScope："
+        f"本轮共有 {candidate_count} 个候选片段，来源范围为 {source_text}。"
+        f"{base_scope}{status_scope}"
+    )
+
+
+def _retrieval_source_names(retrieval: dict[str, object]) -> list[str]:
+    results = retrieval.get("results")
+    if not isinstance(results, list):
+        return []
+    names: list[str] = []
+    for item in results:
+        if not isinstance(item, dict):
+            continue
+        source = item.get("source")
+        if not isinstance(source, dict):
+            continue
+        name = source.get("displayName")
+        if isinstance(name, str) and name and name not in names:
+            names.append(name)
+    return names
+
+
+def _intent_generation_instruction(query_intent: QueryIntent) -> str:
     if query_intent == "knowledge_summary":
-        return "任务要求：总结和归纳候选证据；事实性结论必须引用，组织性表达不得引入新事实。"
+        return (
+            "【总结提炼任务】你可以总结和归纳候选证据，但不得引入候选证据之外的新事实。"
+            "事实性结论必须引用来源；结构性组织语言可以不新增事实。"
+            "如果只能部分支持，必须明确说明“以下仅基于已检索到的资料片段”。"
+        )
     if query_intent == "knowledge_transform":
-        return "任务要求：基于候选证据改写或生成内容；不得添加候选证据外的新经历、新数据或新结论。"
+        return (
+            "【转换改写任务】请基于候选证据改写或生成目标文本。"
+            "可以改变表达形式，但不得新增候选证据之外的人物、项目、数据、结论或承诺。"
+            "关键事实必须保留引用依据。"
+        )
     if query_intent == "knowledge_question_generation":
         return (
-            "任务要求：基于候选证据生成问题、追问、FAQ 或检查清单；"
-            "每一项都应能追溯到至少一个候选 chunk。"
+            "【问题生成任务】请基于候选证据生成问题、追问、FAQ、检查清单或讨论题。"
+            "每个问题或清单项必须能追溯到至少一个候选 chunk。"
+            "不要围绕资料中不存在的信息发问；如必须涉及缺失信息，"
+            "必须明确标记为“需要补充资料确认”。"
         )
     if query_intent == "knowledge_review":
-        return "任务要求：基于候选证据做评价和建议；必须区分资料事实与基于事实的建议。"
+        return (
+            "【评价建议任务】请基于候选证据给出评价、风险或建议。"
+            "必须区分“资料事实”和“基于事实的建议”。"
+            "不得把建议写成资料中已经发生或已经确认的事实。"
+        )
     if query_intent == "knowledge_ambiguous":
         return (
-            "任务要求：用户意图不够明确；只能回答候选证据直接支持的内容，"
-            "无法判断任务目标时请求用户明确资料范围或处理方式。"
+            "【意图不明确】用户只给出资料指代或任务目标不完整。"
+            "可以简要说明当前候选证据可支持的范围；"
+            "如果无法判断用户要总结、改写、提问还是评价，必须请求用户明确处理方式。"
         )
-    return "任务要求：回答候选证据直接支持的事实；证据不足时必须拒答。"
+    return (
+        "【事实问答任务】只回答候选证据直接支持的事实。"
+        "每个事实段落必须引用 evidence_chunk_ids。"
+        "证据不足时必须拒答或说明资料未提到。"
+    )
 
 
 def _evidence_status_instruction(evidence_status: EvidenceStatus) -> str:
@@ -2448,7 +2537,8 @@ def _plain_answer_prompt(
         f"\n当前知识库任务类型：{query_intent}。"
         f"\n当前检索证据状态：{evidence_status}。"
         f"\n{_evidence_status_instruction(evidence_status)}"
-        f"\n{_knowledge_task_instruction(query_intent)}"
+        f"\n{_answerable_scope_instruction(query_intent, evidence_status, retrieval)}"
+        f"\n{_intent_generation_instruction(query_intent)}"
         f"{retry_text}"
         f"\n\n对话历史：\n{_history_prompt(history_context)}"
         f"\n\n用户问题：{query}"
