@@ -117,13 +117,25 @@ ANSWER_SCHEMA: dict[str, object] = {
             "items": {
                 "type": "object",
                 "properties": {
+                    "type": {
+                        "type": "string",
+                        "enum": [
+                            "fact",
+                            "summary_claim",
+                            "generated_question",
+                            "recommendation",
+                            "transformed_text",
+                            "transition",
+                            "clarification",
+                        ],
+                    },
                     "text": {"type": "string"},
                     "evidence_chunk_ids": {
                         "type": "array",
                         "items": {"type": "string"},
                     },
                 },
-                "required": ["text", "evidence_chunk_ids"],
+                "required": ["type", "text", "evidence_chunk_ids"],
                 "additionalProperties": False,
             },
         },
@@ -2178,8 +2190,11 @@ def _answer_prompt(
         "\n必须把不同要点拆成多个 paragraphs 数组项；"
         "不要把多条事实、多个追问或多个建议塞进同一个段落。"
         "\n每个段落建议 1-3 句，按自然阅读顺序组织。"
-        "\n每个回答段落都必须给出支撑该段内容的 evidence_chunk_ids，"
-        "且只能引用候选证据中的 chunk_id。"
+        "\n每个段落必须标注 type：fact、summary_claim、generated_question、"
+        "recommendation、transformed_text、transition 或 clarification。"
+        "\nfact、summary_claim、generated_question、recommendation、transformed_text "
+        "必须给出支撑内容的 evidence_chunk_ids；transition、clarification 可以为空。"
+        "无论段落是否强制引用，只要给出引用，就只能引用候选证据中的 chunk_id。"
         "\n输出必须符合 JSON Schema，不要输出 Markdown 或额外解释。"
         "\nanswerableScope 只作为生成约束，不要作为额外 JSON 字段输出。"
         f"\n当前知识库任务类型：{query_intent}。"
@@ -2460,6 +2475,7 @@ def _plain_text_to_answer(text: str, candidate_chunk_ids: Sequence[str]) -> dict
             continue
         paragraphs.append(
             {
+                "type": "fact",
                 "text": _strip_plain_citations(block, candidate_set),
                 "evidence_chunk_ids": evidence_ids,
             }
@@ -2481,6 +2497,7 @@ def _fallback_refusal_answer(reason: str) -> dict[str, object]:
         "refusal_reason": reason,
         "paragraphs": [
             {
+                "type": "clarification",
                 "text": DEFAULT_REFUSAL,
                 "evidence_chunk_ids": [],
             }
@@ -2555,6 +2572,10 @@ def _normalize_answer(raw: dict[str, object]) -> dict[str, object]:
             if not isinstance(item, dict):
                 continue
             text = item.get("text")
+            paragraph_type = item.get(
+                "type",
+                item.get("paragraph_type", item.get("paragraphType")),
+            )
             evidence = item.get("evidence_chunk_ids", item.get("evidenceChunkIds"))
             if not isinstance(text, str):
                 continue
@@ -2564,6 +2585,7 @@ def _normalize_answer(raw: dict[str, object]) -> dict[str, object]:
                 continue
             paragraphs.append(
                 {
+                    "type": paragraph_type if isinstance(paragraph_type, str) else "fact",
                     "text": clean_text,
                     "evidenceChunkIds": [
                         chunk_id
@@ -2597,6 +2619,7 @@ def _shape_answer_paragraphs(
             continue
         text = paragraph.get("text")
         raw_evidence_ids = paragraph.get("evidenceChunkIds")
+        paragraph_type = paragraph.get("type")
         if not isinstance(text, str):
             continue
         evidence_ids = (
@@ -2604,7 +2627,14 @@ def _shape_answer_paragraphs(
             if isinstance(raw_evidence_ids, list)
             else []
         )
-        shaped.extend(_shape_single_answer_paragraph(text, evidence_ids, chunk_texts))
+        shaped.extend(
+            _shape_single_answer_paragraph(
+                text,
+                evidence_ids,
+                chunk_texts,
+                paragraph_type=paragraph_type if isinstance(paragraph_type, str) else "fact",
+            )
+        )
     return {
         **answer,
         "paragraphs": shaped,
@@ -2615,6 +2645,8 @@ def _shape_single_answer_paragraph(
     text: str,
     evidence_ids: Sequence[str],
     chunk_texts: Mapping[str, str],
+    *,
+    paragraph_type: str,
 ) -> list[dict[str, object]]:
     clean_text = _clean_inline_text(text)
     if not clean_text:
@@ -2622,7 +2654,8 @@ def _shape_single_answer_paragraph(
 
     explicit_blocks = _explicit_text_blocks(text)
     if len(explicit_blocks) > 1:
-        return _assign_evidence_to_segments(explicit_blocks, evidence_ids, chunk_texts)
+        explicit_segments = _assign_evidence_to_segments(explicit_blocks, evidence_ids, chunk_texts)
+        return [{**segment, "type": paragraph_type} for segment in explicit_segments]
 
     sentences = _sentence_units(clean_text)
     unique_evidence_ids = list(dict.fromkeys(evidence_ids))
@@ -2630,13 +2663,26 @@ def _shape_single_answer_paragraph(
         len(unique_evidence_ids) > 1 and len(sentences) >= len(unique_evidence_ids)
     )
     if len(sentences) < 2 or not should_split:
-        return [{"text": clean_text, "evidenceChunkIds": list(dict.fromkeys(evidence_ids))}]
+        return [
+            {
+                "type": paragraph_type,
+                "text": clean_text,
+                "evidenceChunkIds": list(dict.fromkeys(evidence_ids)),
+            }
+        ]
 
     target_count = _auto_paragraph_count(clean_text, sentences, evidence_ids)
     if target_count < 2:
-        return [{"text": clean_text, "evidenceChunkIds": list(dict.fromkeys(evidence_ids))}]
+        return [
+            {
+                "type": paragraph_type,
+                "text": clean_text,
+                "evidenceChunkIds": list(dict.fromkeys(evidence_ids)),
+            }
+        ]
     segments = _group_sentence_units(sentences, target_count)
-    return _assign_evidence_to_segments(segments, evidence_ids, chunk_texts)
+    assigned = _assign_evidence_to_segments(segments, evidence_ids, chunk_texts)
+    return [{**segment, "type": paragraph_type} for segment in assigned]
 
 
 def _clean_model_text(text: str) -> str:
@@ -2838,6 +2884,7 @@ def _validated_paragraphs(validation: dict[str, object]) -> list[dict[str, objec
         result.append(
             {
                 "index": item.get("index"),
+                "type": item.get("type"),
                 "text": item.get("text"),
                 "evidenceChunkIds": evidence_ids if isinstance(evidence_ids, list) else [],
             }

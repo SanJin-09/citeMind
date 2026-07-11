@@ -4,6 +4,19 @@ from collections.abc import Sequence
 
 from citemind_worker.storage import StorageRuntime
 
+PARAGRAPH_TYPES = frozenset(
+    {
+        "fact",
+        "summary_claim",
+        "generated_question",
+        "recommendation",
+        "transformed_text",
+        "transition",
+        "clarification",
+    }
+)
+CITATION_OPTIONAL_PARAGRAPH_TYPES = frozenset({"transition", "clarification"})
+
 
 class CitationValidator:
     def __init__(self, storage: StorageRuntime) -> None:
@@ -25,9 +38,20 @@ class CitationValidator:
 
         for paragraph_index, paragraph in enumerate(paragraphs):
             text = _paragraph_text(paragraph)
+            paragraph_type, type_valid = _paragraph_type(paragraph)
+            citation_required = paragraph_type not in CITATION_OPTIONAL_PARAGRAPH_TYPES
             evidence_ids = _paragraph_evidence_ids(paragraph)
             valid_ids: list[str] = []
             invalid_ids: list[str] = []
+
+            if not type_valid:
+                invalid.append(
+                    {
+                        "paragraphIndex": paragraph_index,
+                        "chunkId": None,
+                        "reason": "paragraph_type_not_supported",
+                    }
+                )
 
             for chunk_id in evidence_ids:
                 reason = _invalid_reason(
@@ -54,7 +78,7 @@ class CitationValidator:
                         }
                     )
 
-            if not valid_ids:
+            if citation_required and not valid_ids:
                 invalid.append(
                     {
                         "paragraphIndex": paragraph_index,
@@ -66,7 +90,9 @@ class CitationValidator:
             validated_paragraphs.append(
                 {
                     "index": paragraph_index,
+                    "type": paragraph_type,
                     "text": text,
+                    "citationRequired": citation_required,
                     "validEvidenceChunkIds": valid_ids,
                     "invalidEvidenceChunkIds": invalid_ids,
                 }
@@ -238,6 +264,19 @@ def _requested_chunk_ids(paragraphs: Sequence[dict[str, object]]) -> list[str]:
 def _paragraph_text(paragraph: dict[str, object]) -> str:
     value = paragraph.get("text")
     return " ".join(value.split()) if isinstance(value, str) else ""
+
+
+def _paragraph_type(paragraph: dict[str, object]) -> tuple[str, bool]:
+    raw = paragraph.get(
+        "type",
+        paragraph.get("paragraph_type", paragraph.get("paragraphType")),
+    )
+    if raw is None:
+        # 兼容旧调用方，同时保持旧行为：未声明类型的段落仍按事实段落严格校验。
+        return "fact", True
+    if isinstance(raw, str) and raw in PARAGRAPH_TYPES:
+        return raw, True
+    return "fact", False
 
 
 def _paragraph_evidence_ids(paragraph: dict[str, object]) -> list[str]:

@@ -644,6 +644,14 @@ export interface ConversationAnswerResponse {
   answer: {
     paragraphs: Array<{
       index: number;
+      type?:
+        | "fact"
+        | "summary_claim"
+        | "generated_question"
+        | "recommendation"
+        | "transformed_text"
+        | "transition"
+        | "clarification";
       text: string;
       evidenceChunkIds: string[];
     }>;

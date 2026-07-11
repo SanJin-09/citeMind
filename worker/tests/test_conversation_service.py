@@ -31,6 +31,7 @@ class FakeAnswerGateway:
         self.outputs = list(outputs)
         self.stream_chunks = list(stream_chunks)
         self.prompts: list[str] = []
+        self.schemas: list[dict[str, object]] = []
         self.stream_prompts: list[str] = []
 
     async def generate_structured(
@@ -40,6 +41,7 @@ class FakeAnswerGateway:
     ) -> dict[str, object]:
         assert schema["type"] == "object"
         self.prompts.append(str(request["prompt"]))
+        self.schemas.append(schema)
         output = self.outputs.pop(0)
         if isinstance(output, Exception):
             raise output
@@ -292,6 +294,59 @@ def test_conversation_answer_persists_messages_and_valid_citations(tmp_path: Pat
     messages = ConversationService(storage).messages(str(response["conversation"]["id"]))
     assert [message["role"] for message in messages["messages"]] == ["user", "assistant"]
     assert messages["messages"][1]["citations"][0]["chunkId"] == "chunk-pdf-valid"
+
+
+def test_conversation_allows_uncited_transition_but_requires_typed_claim_citation(
+    tmp_path: Path,
+) -> None:
+    storage = StorageRuntime(tmp_path, vector_dimension=3)
+    storage.initialize()
+    knowledge_base_id = _seed_answer_fixture(storage)
+    gateway = FakeAnswerGateway(
+        [
+            {
+                "evidence_sufficient": True,
+                "refusal_reason": None,
+                "paragraphs": [
+                    {
+                        "type": "transition",
+                        "text": "下面按两个方面概括。",
+                        "evidence_chunk_ids": [],
+                    },
+                    {
+                        "type": "summary_claim",
+                        "text": "Alpha 结论来自当前 PDF 证据。",
+                        "evidence_chunk_ids": ["chunk-pdf-valid"],
+                    },
+                ],
+            }
+        ]
+    )
+
+    response = asyncio.run(
+        ConversationService(
+            storage,
+            retrieval=HybridRetrievalService(storage, embedder=QueryEmbedder()),
+            gateway_factory=lambda _key, _base, _embedding: gateway,
+        ).answer(
+            knowledge_base_id=knowledge_base_id,
+            query="总结 Alpha",
+            api_key="ark-test",
+        )
+    )
+
+    assert response["answer"]["evidenceSufficient"] is True
+    assert response["model"]["retryCount"] == 0
+    assert [paragraph["type"] for paragraph in response["answer"]["paragraphs"]] == [
+        "transition",
+        "summary_claim",
+    ]
+    assert response["citationValidation"]["paragraphs"][0]["citationRequired"] is False
+    assert response["citationValidation"]["paragraphs"][1]["citationRequired"] is True
+    assert response["citations"][0]["paragraphIndex"] == 1
+    paragraph_schema = gateway.schemas[0]["properties"]["paragraphs"]["items"]
+    assert "type" in paragraph_schema["required"]
+    assert "transition、clarification 可以为空" in gateway.prompts[0]
 
 
 def test_conversation_splits_dense_answer_and_persists_paragraph_citations(
@@ -1162,6 +1217,67 @@ def test_citation_validator_checks_candidate_validity_and_location(tmp_path: Pat
         "paragraph_missing_valid_evidence",
     }
     assert validation["validCitations"][0]["chunkId"] == "chunk-pdf-valid"
+
+
+def test_citation_validator_applies_requirement_by_paragraph_type(tmp_path: Path) -> None:
+    storage = StorageRuntime(tmp_path, vector_dimension=3)
+    storage.initialize()
+    _seed_answer_fixture(storage)
+
+    optional = CitationValidator(storage).validate(
+        paragraphs=[
+            {"type": "transition", "text": "下面分点说明。", "evidence_chunk_ids": []},
+            {"type": "clarification", "text": "请明确资料范围。", "evidence_chunk_ids": []},
+        ],
+        candidate_chunk_ids=["chunk-pdf-valid"],
+        index_version_id="index-current",
+    )
+    required = CitationValidator(storage).validate(
+        paragraphs=[
+            {"type": paragraph_type, "text": "需要依据。", "evidence_chunk_ids": []}
+            for paragraph_type in (
+                "fact",
+                "summary_claim",
+                "generated_question",
+                "recommendation",
+                "transformed_text",
+            )
+        ],
+        candidate_chunk_ids=["chunk-pdf-valid"],
+        index_version_id="index-current",
+    )
+    invalid_optional_citation = CitationValidator(storage).validate(
+        paragraphs=[
+            {
+                "type": "transition",
+                "text": "带了引用的过渡句。",
+                "evidence_chunk_ids": ["chunk-missing"],
+            }
+        ],
+        candidate_chunk_ids=["chunk-pdf-valid"],
+        index_version_id="index-current",
+    )
+    unsupported = CitationValidator(storage).validate(
+        paragraphs=[
+            {"type": "opinion", "text": "未知类型。", "evidence_chunk_ids": []},
+        ],
+        candidate_chunk_ids=["chunk-pdf-valid"],
+        index_version_id="index-current",
+    )
+
+    assert optional["valid"] is True
+    assert [item["citationRequired"] for item in optional["paragraphs"]] == [False, False]
+    assert required["valid"] is False
+    assert [item["reason"] for item in required["invalidCitations"]] == [
+        "paragraph_missing_valid_evidence"
+    ] * 5
+    assert invalid_optional_citation["valid"] is False
+    assert invalid_optional_citation["invalidCitations"][0]["reason"] == "chunk_not_found"
+    assert unsupported["valid"] is False
+    assert {item["reason"] for item in unsupported["invalidCitations"]} == {
+        "paragraph_type_not_supported",
+        "paragraph_missing_valid_evidence",
+    }
 
 
 def _seed_answer_fixture(storage: StorageRuntime) -> str:
