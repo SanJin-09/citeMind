@@ -62,6 +62,58 @@ KNOWLEDGE_QUERY_INTENTS = frozenset(
     }
 )
 
+RETRIEVAL_TASK_EXPANSION_TERMS: dict[QueryIntent, tuple[str, ...]] = {
+    "knowledge_summary": ("主题", "要点", "结论", "背景", "数据", "结果", "问题", "行动项"),
+    "knowledge_transform": (
+        "原始表述",
+        "关键事实",
+        "对象",
+        "时间",
+        "数据",
+        "约束",
+        "目标格式",
+    ),
+    "knowledge_question_generation": (
+        "背景",
+        "关键事实",
+        "流程",
+        "风险点",
+        "决策依据",
+        "未说明信息",
+    ),
+    "knowledge_review": ("优点", "缺点", "风险", "约束", "证据", "结果", "改进建议", "影响"),
+    "knowledge_fact_qa": ("实体", "属性", "时间", "地点", "数值", "原文表述"),
+    "knowledge_ambiguous": (),
+}
+
+RETRIEVAL_DOCUMENT_TYPE_PLUGINS: tuple[tuple[str, tuple[str, ...], tuple[str, ...]], ...] = (
+    (
+        "meeting_minutes",
+        ("会议纪要", "会议记录", "纪要", "会议"),
+        ("决议", "行动项", "负责人", "时间", "风险", "阻塞"),
+    ),
+    (
+        "product_api_documentation",
+        ("接口文档", "产品文档", "接入文档", "开发文档", "说明书", "接口", "api"),
+        ("参数", "流程", "限制", "错误码", "示例", "依赖"),
+    ),
+    (
+        "resume_project_material",
+        ("简历", "项目资料", "项目材料", "项目经历", "候选人"),
+        ("经历", "职责", "成果", "技术", "难点", "协作"),
+    ),
+    (
+        "contract_policy",
+        ("合同", "协议", "制度", "条款", "规范", "办法"),
+        ("条款", "义务", "责任", "期限", "违约", "审批", "风险"),
+    ),
+    (
+        "paper_report",
+        ("论文", "报告", "白皮书", "调研"),
+        ("方法", "实验", "数据", "结论", "限制", "贡献"),
+    ),
+)
+
 
 class KnowledgeIntentClassification(NamedTuple):
     intent: QueryIntent
@@ -488,6 +540,8 @@ class ConversationService:
                 yield {"type": "answer.completed", "response": response}
                 return
 
+            retrieval_query_plan = _retrieval_query_plan(clean_query, query_intent)
+
             self._record_trace_stage(
                 trace_run_id,
                 stage="evidence_retrieval",
@@ -502,6 +556,7 @@ class ConversationService:
                 step_id="conversation-retrieval",
                 sanitized_params={
                     "query": clean_query,
+                    "queryExpansion": retrieval_query_plan,
                     "limit": limit,
                     "candidateLimit": candidate_limit,
                     "apiKey": "***" if api_key else None,
@@ -509,13 +564,14 @@ class ConversationService:
             )
             retrieval = await self.retrieval.retrieve(
                 knowledge_base_id,
-                clean_query,
+                str(retrieval_query_plan["expandedQuery"]),
                 api_key=api_key,
                 base_url=base_url,
                 embedding_model=embedding_model,
                 limit=limit,
                 candidate_limit=candidate_limit,
             )
+            retrieval = _attach_retrieval_query_plan(retrieval, retrieval_query_plan)
             index_version_id = _index_version_id(retrieval)
             self._record_trace_tool_output(
                 retrieval_tool_id,
@@ -523,6 +579,7 @@ class ConversationService:
                 payload={
                     "indexVersionId": index_version_id,
                     "candidateCount": len(_candidate_chunk_ids(retrieval)),
+                    "queryExpansion": retrieval_query_plan,
                 },
             )
             self._finish_trace_tool(
@@ -545,6 +602,7 @@ class ConversationService:
                 "indexVersionId": index_version_id,
                 "candidateChunkIds": candidate_chunk_ids,
                 "candidateCount": len(candidate_chunk_ids),
+                "queryExpansion": retrieval_query_plan,
             }
 
             if not candidate_chunk_ids:
@@ -1082,6 +1140,7 @@ class ConversationService:
                 "refusalReason": refusal_reason,
                 "candidateChunkIds": _candidate_chunk_ids(retrieval),
                 "retrieval": retrieval.get("retrieval"),
+                "queryExpansion": retrieval.get("queryExpansion"),
                 "citationValidation": {
                     "valid": validation["valid"],
                     "invalidCitations": validation["invalidCitations"],
@@ -1149,6 +1208,7 @@ class ConversationService:
                 "refusalReason": reason,
                 "candidateChunkIds": candidate_chunk_ids,
                 "retrieval": retrieval.get("retrieval"),
+                "queryExpansion": retrieval.get("queryExpansion"),
                 "historyContext": history_context,
             },
             index_version_id=_index_version_id(retrieval),
@@ -1661,6 +1721,72 @@ def _has_document_task_marker(query: str) -> bool:
 
 def _matched_markers(compact_query: str, markers: Sequence[str]) -> tuple[str, ...]:
     return tuple(marker for marker in markers if marker in compact_query)
+
+
+def _retrieval_query_plan(query: str, query_intent: QueryIntent) -> dict[str, object]:
+    original_query = " ".join(query.split())
+    compact_query = _compact_query_text(original_query)
+    task_expansion_enabled = query_intent != "knowledge_fact_qa" or _has_document_task_marker(
+        original_query
+    )
+    task_terms = _new_expansion_terms(
+        RETRIEVAL_TASK_EXPANSION_TERMS.get(query_intent, ()) if task_expansion_enabled else (),
+        compact_query=compact_query,
+        seen=set(),
+    )
+    seen = set(task_terms)
+    document_type: str | None = None
+    document_type_terms: list[str] = []
+    for plugin_id, markers, terms in RETRIEVAL_DOCUMENT_TYPE_PLUGINS:
+        if not any(marker in compact_query for marker in markers):
+            continue
+        document_type = plugin_id
+        document_type_terms = _new_expansion_terms(
+            terms,
+            compact_query=compact_query,
+            seen=seen,
+        )
+        break
+
+    expansion_terms = [*task_terms, *document_type_terms]
+    expanded_query = " ".join((original_query, *expansion_terms))
+    return {
+        "strategy": "task_first_document_type_auxiliary_v1",
+        "originalQuery": original_query,
+        "expandedQuery": expanded_query,
+        "intent": query_intent,
+        "taskTerms": task_terms,
+        "documentType": document_type,
+        "documentTypeTerms": document_type_terms,
+        "terms": expansion_terms,
+        "applied": bool(expansion_terms),
+    }
+
+
+def _new_expansion_terms(
+    terms: Sequence[str],
+    *,
+    compact_query: str,
+    seen: set[str],
+) -> list[str]:
+    result: list[str] = []
+    for term in terms:
+        if term in compact_query or term in seen:
+            continue
+        result.append(term)
+        seen.add(term)
+    return result
+
+
+def _attach_retrieval_query_plan(
+    retrieval: dict[str, object],
+    query_plan: Mapping[str, object],
+) -> dict[str, object]:
+    return {
+        **retrieval,
+        "query": query_plan["originalQuery"],
+        "queryExpansion": dict(query_plan),
+    }
 
 
 def _has_knowledge_context_marker(compact_query: str) -> bool:

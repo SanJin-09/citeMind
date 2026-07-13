@@ -536,6 +536,23 @@ export interface HybridSearchResult {
 export interface HybridSearchResponse {
   knowledgeBaseId: string;
   query: string;
+  queryExpansion?: {
+    strategy: "task_first_document_type_auxiliary_v1";
+    originalQuery: string;
+    expandedQuery: string;
+    intent: string;
+    taskTerms: string[];
+    documentType:
+      | "contract_policy"
+      | "paper_report"
+      | "meeting_minutes"
+      | "product_api_documentation"
+      | "resume_project_material"
+      | null;
+    documentTypeTerms: string[];
+    terms: string[];
+    applied: boolean;
+  };
   indexVersion: IndexVersionRecord;
   limits: {
     resultLimit: number;

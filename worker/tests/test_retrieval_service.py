@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from citemind_worker.conversation_service import _retrieval_query_plan
 from citemind_worker.knowledge_base_service import KnowledgeBaseService
 from citemind_worker.retrieval_service import HybridRetrievalService
 from citemind_worker.storage import StorageRuntime
@@ -91,6 +92,27 @@ def test_hybrid_retrieval_requires_current_ready_index(tmp_path: Path) -> None:
                 "alpha",
             )
         )
+
+
+def test_task_expansion_terms_participate_in_hybrid_keyword_retrieval(tmp_path: Path) -> None:
+    storage = StorageRuntime(tmp_path, vector_dimension=3)
+    storage.initialize()
+    knowledge_base_id = _seed_retrieval_fixture(storage)
+    plan = _retrieval_query_plan("总结一下", "knowledge_summary")
+
+    response = asyncio.run(
+        HybridRetrievalService(storage, embedder=QueryEmbedder()).retrieve(
+            knowledge_base_id,
+            str(plan["expandedQuery"]),
+            limit=3,
+            candidate_limit=3,
+        )
+    )
+
+    assert "数据" in plan["taskTerms"]
+    assert response["retrieval"]["keywordCandidateCount"] == 1
+    assert response["results"][0]["chunkId"] == "chunk-alpha-current"
+    assert "数据" in response["results"][0]["match"]["keywordHits"]
 
 
 def _seed_retrieval_fixture(storage: StorageRuntime) -> str:

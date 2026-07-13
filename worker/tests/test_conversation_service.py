@@ -9,6 +9,7 @@ from citemind_worker.conversation_service import (
     DEFAULT_REFUSAL,
     ConversationService,
     _compact_history,
+    _retrieval_query_plan,
 )
 from citemind_worker.knowledge_base_service import KnowledgeBaseService
 from citemind_worker.retrieval_service import HybridRetrievalService
@@ -59,6 +60,9 @@ class FakeAnswerGateway:
 
 
 class EmptyRetrieval:
+    def __init__(self) -> None:
+        self.queries: list[str] = []
+
     async def retrieve(
         self,
         knowledge_base_id: str,
@@ -71,6 +75,7 @@ class EmptyRetrieval:
         candidate_limit: int = 24,
         rerank_model_version: str | None = None,
     ) -> dict[str, object]:
+        self.queries.append(query)
         return {
             "knowledgeBaseId": knowledge_base_id,
             "query": query,
@@ -441,7 +446,7 @@ def test_conversation_answer_emits_agent_run_trace_events(tmp_path: Path) -> Non
             agent_runs=agent_runs,
         ).answer(
             knowledge_base_id=knowledge_base_id,
-            query="Alpha 怎么解释？",
+            query="总结 Alpha",
             api_key="ark-test",
             chat_model="doubao-test-chat",
             embedding_model="doubao-test-embedding",
@@ -453,6 +458,9 @@ def test_conversation_answer_emits_agent_run_trace_events(tmp_path: Path) -> Non
     trace = agent_runs.get(run_id)
     event_types = {event["eventType"] for event in emitted}
     tool_names = {tool["toolName"] for tool in trace["toolCalls"]}
+    retrieval_tool = next(
+        tool for tool in trace["toolCalls"] if tool["toolName"] == "hybrid_retrieval.search"
+    )
 
     assert runs[0]["skillId"] == "conversation_answer"
     assert response["agentRunId"] == run_id
@@ -471,6 +479,10 @@ def test_conversation_answer_emits_agent_run_trace_events(tmp_path: Path) -> Non
         "model.generate_structured_answer",
         "citation.validate",
     } <= tool_names
+    trace_expansion = retrieval_tool["sanitizedParams"]["queryExpansion"]
+    assert trace_expansion["originalQuery"] == "总结 Alpha"
+    assert trace_expansion["intent"] == "knowledge_summary"
+    assert trace_expansion["applied"] is True
     assert trace["outputs"][0]["content"] == response["content"]
     assert trace["citations"][0]["chunkId"] == "chunk-pdf-valid"
 
@@ -733,8 +745,9 @@ def test_conversation_explicit_source_question_still_uses_rag_path(
     storage.initialize()
     knowledge_base_id = _seed_answer_fixture(storage)
 
+    retrieval = EmptyRetrieval()
     response = asyncio.run(
-        ConversationService(storage, retrieval=EmptyRetrieval()).answer(
+        ConversationService(storage, retrieval=retrieval).answer(
             knowledge_base_id=knowledge_base_id,
             query="这份简历中的你是谁？",
             api_key="ark-test",
@@ -748,6 +761,82 @@ def test_conversation_explicit_source_question_still_uses_rag_path(
     assert response["answer"]["evidenceStatus"] == "no_evidence"
     assert response["answer"]["refusalReason"] == "no_retrieval_candidates"
     assert response["retrieval"]["query"] == "这份简历中的你是谁？"
+    expansion = response["retrieval"]["queryExpansion"]
+    assert expansion["intent"] == "knowledge_fact_qa"
+    assert expansion["documentType"] == "resume_project_material"
+    assert expansion["taskTerms"][0] == "实体"
+    assert expansion["documentTypeTerms"][0] == "经历"
+    assert retrieval.queries == [expansion["expandedQuery"]]
+
+
+def test_retrieval_query_expansion_is_task_first_and_document_type_auxiliary() -> None:
+    cases = [
+        (
+            "总结这份会议纪要",
+            "knowledge_summary",
+            "主题",
+            "meeting_minutes",
+            "决议",
+        ),
+        (
+            "根据接口文档改写成接入指南",
+            "knowledge_transform",
+            "原始表述",
+            "product_api_documentation",
+            "参数",
+        ),
+        (
+            "基于这篇论文生成 5 个讨论问题",
+            "knowledge_question_generation",
+            "背景",
+            "paper_report",
+            "方法",
+        ),
+        (
+            "从这份合同中提炼主要风险点",
+            "knowledge_review",
+            "优点",
+            "contract_policy",
+            "条款",
+        ),
+        (
+            "基于我的简历生成面试追问",
+            "knowledge_question_generation",
+            "背景",
+            "resume_project_material",
+            "经历",
+        ),
+    ]
+
+    for query, intent, task_term, document_type, document_term in cases:
+        plan = _retrieval_query_plan(query, intent)
+
+        assert plan["strategy"] == "task_first_document_type_auxiliary_v1"
+        assert plan["originalQuery"] == query
+        assert plan["applied"] is True
+        assert plan["taskTerms"][0] == task_term
+        assert plan["documentType"] == document_type
+        assert plan["documentTypeTerms"][0] == document_term
+        assert plan["terms"] == [*plan["taskTerms"], *plan["documentTypeTerms"]]
+        assert plan["expandedQuery"].startswith(f"{query} {task_term}")
+        assert plan["expandedQuery"].index(task_term) < plan["expandedQuery"].index(document_term)
+
+
+def test_retrieval_query_expansion_does_not_guess_unknown_document_type() -> None:
+    plan = _retrieval_query_plan("总结一下", "knowledge_summary")
+
+    assert plan["taskTerms"]
+    assert plan["documentType"] is None
+    assert plan["documentTypeTerms"] == []
+
+
+def test_retrieval_query_expansion_does_not_broaden_unscoped_fact_question() -> None:
+    plan = _retrieval_query_plan("天气？", "knowledge_fact_qa")
+
+    assert plan["applied"] is False
+    assert plan["expandedQuery"] == "天气？"
+    assert plan["taskTerms"] == []
+    assert plan["documentType"] is None
 
 
 def test_conversation_refuses_low_relevance_semantic_candidates(
