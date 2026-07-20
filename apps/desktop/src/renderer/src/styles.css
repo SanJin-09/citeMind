@@ -634,15 +634,27 @@ kbd {
   min-height: 0;
   gap: 10px;
   padding: 10px 12px;
-  transition: grid-template-columns 180ms ease;
+  transition:
+    grid-template-columns 240ms ease,
+    column-gap 240ms ease;
 }
 
 .app-shell.evidence-collapsed .workspace {
-  grid-template-columns: 286px minmax(420px, 1fr);
+  grid-template-columns: 286px minmax(420px, 1fr) 0;
 }
 
-.app-shell.evidence-collapsed .evidence-panel {
-  display: none;
+.app-shell.evidence-collapsed .message-flow,
+.app-shell.evidence-collapsed .suggestion-block,
+.app-shell.evidence-collapsed .chat-search-region {
+  width: calc(100% - 48px);
+}
+
+.message-flow,
+.suggestion-block,
+.chat-search-region {
+  transition:
+    width 240ms ease,
+    margin 240ms ease;
 }
 
 .panel {
@@ -3378,6 +3390,18 @@ kbd {
 .evidence-panel {
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
+  transition:
+    opacity 180ms ease,
+    transform 240ms ease,
+    visibility 0s linear 240ms;
+}
+
+.app-shell.evidence-collapsed .evidence-panel {
+  visibility: hidden;
+  opacity: 0;
+  transform: translateX(16px);
+  pointer-events: none;
+  transition-delay: 240ms;
 }
 
 .evidence-backdrop {
@@ -3562,7 +3586,20 @@ blockquote {
   color: #516158;
   background: #fff;
   box-shadow: 0 5px 18px rgb(38 56 44 / 8%);
+  animation: evidence-restore-in 240ms ease both;
   font-size: 11px;
+}
+
+@keyframes evidence-restore-in {
+  from {
+    opacity: 0;
+    transform: translateX(8px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
 }
 
 .system-bar {
@@ -5014,6 +5051,10 @@ blockquote {
   }
 
   .workspace {
+    grid-template-columns: 250px minmax(420px, 1fr);
+  }
+
+  .app-shell.evidence-collapsed .workspace {
     grid-template-columns: 250px minmax(420px, 1fr);
   }
 
