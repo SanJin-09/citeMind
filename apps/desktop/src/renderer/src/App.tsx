@@ -6637,20 +6637,12 @@ function TaskCenter({
 
 function PendingAnswerMessage({
   message,
-  trace,
 }: {
   message: ConversationMessageRecord;
-  trace?: AgentRunResponse;
 }): React.JSX.Element {
   const [now, setNow] = useState(Date.now());
   const startedAtMs = new Date(message.createdAt).getTime();
   const elapsedMs = Number.isNaN(startedAtMs) ? 0 : now - startedAtMs;
-  const phases = pendingAnswerPhases(trace);
-  const currentStage =
-    trace?.run.traceSnapshot?.currentStageLabel ??
-    (trace ? agentRunStatusLabel(trace.run.status) : "创建回答任务");
-  const latestEvent = latestTraceEvent(trace);
-  const preview = pendingAnswerPreview(trace);
 
   useEffect(() => {
     const timer = window.setInterval(() => setNow(Date.now()), 1000);
@@ -6665,44 +6657,6 @@ function PendingAnswerMessage({
         </span>
         <strong>citeMind 正在生成</strong>
         <small>{formatAgentRunDuration(elapsedMs)}</small>
-      </div>
-      <div className="pending-answer-card">
-        <div className="pending-answer-status">
-          <span className="pending-answer-pulse" aria-hidden="true" />
-          <div>
-            <strong>{currentStage}</strong>
-            <span>
-              {latestEvent?.summary ||
-                latestEvent?.title ||
-                "正在准备检索、生成与引用校验流程。"}
-            </span>
-          </div>
-        </div>
-        <div className="pending-answer-phases" aria-label="回答生成阶段">
-          {phases.map((phase) => (
-            <span
-              className={`pending-answer-phase ${phase.status}`}
-              key={phase.id}
-            >
-              {phase.label}
-            </span>
-          ))}
-        </div>
-        {preview ? (
-          <div className="pending-answer-preview">
-            <small>已生成片段预览</small>
-            <p>{preview}</p>
-          </div>
-        ) : (
-          <div className="pending-answer-skeleton" aria-hidden="true">
-            <span />
-            <span />
-            <span />
-          </div>
-        )}
-        <p className="pending-answer-note">
-          回答完成后正文会自动替换这里；上方执行记录可查看更详细的检索、生成与引用校验过程。
-        </p>
       </div>
     </article>
   );
@@ -6730,7 +6684,7 @@ function AssistantAnswerMessage({
   ) => void;
 }): React.JSX.Element {
   if (isPendingAssistantMessage(message)) {
-    return <PendingAnswerMessage message={message} trace={trace} />;
+    return <PendingAnswerMessage message={message} />;
   }
 
   const citations = response?.citations ?? message.citations;
@@ -9278,71 +9232,6 @@ function jobCompletionSummary(
     return `${title} 已完成，来源卡片会刷新最新状态。耗时 ${elapsed}。`;
   }
   return `${title} 已完成。耗时 ${elapsed}。`;
-}
-
-function pendingAnswerPhases(
-  trace?: AgentRunResponse,
-): Array<{ id: string; label: string; status: string }> {
-  const phases = trace?.run.traceSnapshot?.phases;
-  if (phases?.length) {
-    return phases.map((phase) => ({
-      id: phase.id,
-      label: phase.label,
-      status: normalizePendingPhaseStatus(phase.status),
-    }));
-  }
-  return [
-    {
-      id: "prepare",
-      label: "准备任务",
-      status: trace ? "completed" : "active",
-    },
-    {
-      id: "evidence",
-      label: "检索证据",
-      status: trace ? "active" : "pending",
-    },
-    {
-      id: "generation",
-      label: "生成回答",
-      status: "pending",
-    },
-    {
-      id: "validation",
-      label: "引用校验",
-      status: "pending",
-    },
-    {
-      id: "save",
-      label: "保存结果",
-      status: "pending",
-    },
-  ];
-}
-
-function normalizePendingPhaseStatus(status: string): string {
-  return ["active", "completed", "failed"].includes(status)
-    ? status
-    : "pending";
-}
-
-function latestTraceEvent(
-  trace?: AgentRunResponse,
-): AgentRunEventRecord | undefined {
-  return trace?.events.reduce<AgentRunEventRecord | undefined>(
-    (latest, event) =>
-      !latest || event.sequence > latest.sequence ? event : latest,
-    undefined,
-  );
-}
-
-function pendingAnswerPreview(trace?: AgentRunResponse): string {
-  const output = trace?.outputs.find((item) => item.content.trim().length > 0);
-  if (!output) {
-    return "";
-  }
-  const clean = output.content.replace(/\s+/g, " ").trim();
-  return clean.length > 220 ? `${clean.slice(0, 219)}…` : clean;
 }
 
 function citationsForParagraph(
