@@ -3487,13 +3487,13 @@ function App(): React.JSX.Element {
             action={
               <div className="chat-header-actions">
                 <button
+                  aria-label="复习与写作工作流"
                   className="writing-header-button"
                   title="复习与写作工作流"
                   type="button"
                   onClick={() => void openWritingWorkspace()}
                 >
                   <Icon name="book" size={15} />
-                  <span>写作</span>
                 </button>
                 <ConversationHistoryMenu
                   activeConversationId={conversationId}
@@ -3519,6 +3519,17 @@ function App(): React.JSX.Element {
                   onClick={() => void exportMarkdown()}
                 >
                   <Icon name="download" size={17} />
+                </button>
+                <button
+                  aria-label={evidenceOpen ? "关闭证据栏" : "打开证据栏"}
+                  aria-controls="evidence-panel"
+                  aria-expanded={evidenceOpen}
+                  className="evidence-toggle-button"
+                  title={evidenceOpen ? "关闭证据栏" : "打开证据栏"}
+                  type="button"
+                  onClick={() => setEvidenceOpen((value) => !value)}
+                >
+                  <Icon name="folder" size={15} />
                 </button>
               </div>
             }
@@ -3702,7 +3713,6 @@ function App(): React.JSX.Element {
                             selectedChunkId={selectedEvidenceChunkId(
                               selectedEvidence,
                             )}
-                            trace={trace}
                             onSelectCitation={selectCitation}
                             exportBusy={exportBusyId === message.id}
                             onExport={() => void exportMarkdown(message.id)}
@@ -3908,7 +3918,11 @@ function App(): React.JSX.Element {
           />
         )}
 
-        <aside aria-label="来源与证据" className="panel evidence-panel">
+        <aside
+          aria-label="来源与证据"
+          className="panel evidence-panel"
+          id="evidence-panel"
+        >
           <PanelHeader
             icon="evidence"
             title="来源与证据"
@@ -3933,17 +3947,6 @@ function App(): React.JSX.Element {
             />
           </div>
         </aside>
-
-        {!evidenceOpen && (
-          <button
-            className="evidence-restore"
-            type="button"
-            onClick={() => setEvidenceOpen(true)}
-          >
-            <Icon name="panel" size={17} />
-            证据
-          </button>
-        )}
       </section>
 
       <footer className="system-bar">
@@ -6666,7 +6669,6 @@ function AssistantAnswerMessage({
   message,
   response,
   selectedChunkId,
-  trace,
   exportBusy,
   onExport,
   onSelectCitation,
@@ -6674,7 +6676,6 @@ function AssistantAnswerMessage({
   message: ConversationMessageRecord;
   response?: ConversationAnswerResponse;
   selectedChunkId?: string;
-  trace?: AgentRunResponse;
   exportBusy: boolean;
   onExport: () => void;
   onSelectCitation: (
